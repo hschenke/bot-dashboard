@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=69.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bot-dashboard"
+version = "0.1.0"
+description = "Zentrales Monitoring-, DB-, URL-, Worker- und KI-Dashboard für die 3 Streamlit Cloud Apps (News-Bot, Research-Bot, Alert-Bot)."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "google-genai>=2.30.1",
+    "pydantic>=2.9.0",
+    "requests>=2.32.3",
+    "pyyaml>=6.0.2",
+    "python-dotenv>=1.0.1",
+    "streamlit>=1.40.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "ruff>=0.8.0",
+    "pip-audit>=2.7.3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q --strict-markers"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "S",   # bandit security checks
+    "SIM", # flake8-simplify
+]
+ignore = [
+    "E501", # Zeilenlängen in Prompts & Templates pragmatisch handhaben
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106"]
