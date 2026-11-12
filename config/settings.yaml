@@ -1,4 +1,4 @@
-# Deklarative Standardkonfiguration für das Bot-Dashboard
+# Deklarative Standardkonfiguration für das Holli Dashboard
 default_language: "de"
 
 allowed_models:
@@ -12,13 +12,13 @@ apps:
     title: "News-Bot"
     icon: "📰"
     description: "KI-gestützter RSS-News-Kurator mit täglichem E-Mail-Digest, Volltext-Archiv & Ad-hoc-Briefings."
-    streamlit_url: "https://holli-news-bot.streamlit.app/"
-    github_repo: "hschenke/news-bot"
+    streamlit_url: ""
+    github_repo: ""
     primary_workflow: "daily_digest.yaml"
     secondary_workflows:
       - "update_rss.yaml"
-    turso_url: "libsql://news-bot-hschenke.aws-eu-west-1.turso.io"
-    local_sqlite_path: "../news-aggregator-bot/data/news_bot.db"
+    turso_url: ""
+    local_sqlite_path: ""
     expected_tables:
       - "articles"
       - "archived_articles"
@@ -30,13 +30,13 @@ apps:
     title: "Research-Bot"
     icon: "🔬"
     description: "Autonomer Deep-Web-Research-Bot (>1h Laufzeit) mit Checkpointing, Google Search Grounding & Dossier-Synthese."
-    streamlit_url: "https://holli-research-bot.streamlit.app/"
-    github_repo: "hschenke/research-bot"
+    streamlit_url: ""
+    github_repo: ""
     primary_workflow: "run_research.yaml"
     secondary_workflows:
       - "ci.yaml"
-    turso_url: "libsql://research-bot-hschenke.aws-eu-west-1.turso.io"
-    local_sqlite_path: "../research-bot/data/research_bot.db"
+    turso_url: ""
+    local_sqlite_path: ""
     expected_tables:
       - "research_jobs"
       - "research_reports"
@@ -46,13 +46,13 @@ apps:
     title: "Alert-Bot"
     icon: "🔔"
     description: "24/7 Smart-Alert-Bot für Wetter, Mietwohnungen, Preise, Seitenänderungen & Uptime mit Anti-Spam-Gedächtnis."
-    streamlit_url: "https://holli-alert-bot.streamlit.app/"
-    github_repo: "hschenke/alert-bot"
+    streamlit_url: ""
+    github_repo: ""
     primary_workflow: "check_alerts.yaml"
     secondary_workflows:
       - "ci.yaml"
-    turso_url: "libsql://alert-bot-hschenke.aws-eu-west-1.turso.io"
-    local_sqlite_path: "../alert-bot/data/alert_bot.db"
+    turso_url: ""
+    local_sqlite_path: ""
     expected_tables:
       - "alert_rules"
       - "alert_events"
@@ -61,12 +61,12 @@ apps:
 
 prompts:
   fleet_diagnosis_system_prompt: >-
-    Du bist ein präziser Site-Reliability- & KI-Systemarchitekt für eine Flotte aus drei
-    autonomen Streamlit/Turso/GitHub-Actions-Applikationen (News-Bot, Research-Bot, Alert-Bot).
+    Du bist ein präziser Site-Reliability- & KI-Systemarchitekt für eine Flotte
+    autonomer Streamlit/Turso/GitHub-Actions-Applikationen.
     Analysiere die übergebenen Echtzeit-Telemetriedaten (HTTP/Streamlit-Status, Latenzen,
     GitHub-Actions-Läufe, Datenbank-Tabellenstände und jüngste Fehler).
     Liefere eine faktenbasierte, prägnante Diagnose ohne Fülltext. Erfinde niemals Metriken.
   fleet_qa_system_prompt: >-
-    Du bist der KI-Operations-Assistent des Bot-Dashboards. Beantworte die Frage des Nutzers
+    Du bist der KI-Operations-Assistent des Dashboards. Beantworte die Frage des Nutzers
     direkt, präzise und ausschließlich auf Basis der bereitgestellten Live-Telemetriedaten
-    der drei überwachten Apps (News-Bot, Research-Bot, Alert-Bot).
+    der überwachten Apps.

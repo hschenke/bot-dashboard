@@ -23,7 +23,7 @@ def _ensure_initial_snapshots(
     repository: SqlDashboardRepository,
 ) -> list[AppFleetSnapshot]:
     if "fleet_snapshots" not in st.session_state:
-        with st.spinner("Initialisiere Live-Status für News-Bot, Research-Bot und Alert-Bot..."):
+        with st.spinner("Initialisiere Live-Status aller Apps..."):
             st.session_state["fleet_snapshots"] = coordinator.check_all_apps(repository=repository)
     return list(st.session_state["fleet_snapshots"])
 
@@ -31,7 +31,7 @@ def _ensure_initial_snapshots(
 def run_streamlit_app() -> None:
     """Initialisiert Seite, Authentifizierung, Navigation und die gewählte Dashboard-Ansicht."""
     st.set_page_config(
-        page_title="Bot-Dashboard | Streamlit Fleet Monitor",
+        page_title="Holli Dashboard",
         page_icon="🎛️",
         layout="wide",
     )
@@ -46,11 +46,11 @@ def run_streamlit_app() -> None:
         snapshots = _ensure_initial_snapshots(coordinator, repository)
 
         with st.sidebar:
-            st.title("🎛️ Bot-Dashboard")
-            st.caption(f"v{__version__} • Control Center (3 Apps)")
+            st.title("🎛️ Holli Dashboard")
+            st.caption(f"v{__version__} • Control Center")
 
             pages = [
-                "📡 Flotten-Übersicht",
+                "📡 Übersicht",
                 "🌐 Running & URLs",
                 "🗄️ DB-Inspektor",
                 "🤖 KI-View",
@@ -60,7 +60,7 @@ def run_streamlit_app() -> None:
 
             st.divider()
             if st.button("🔄 Alle Checks neu ausführen", use_container_width=True):
-                with st.spinner("Aktualisiere alle 3 Apps..."):
+                with st.spinner("Aktualisiere alle Apps..."):
                     st.session_state["fleet_snapshots"] = coordinator.check_all_apps(
                         repository=repository
                     )
@@ -69,9 +69,12 @@ def run_streamlit_app() -> None:
 
             st.caption(f"Dashboard-DB: **{repository.backend_name}**")
             for spec in settings.managed_apps:
-                st.markdown(f"- {spec.icon} [{spec.title}]({spec.streamlit_url})")
+                if spec.streamlit_url:
+                    st.markdown(f"- {spec.icon} [{spec.title}]({spec.streamlit_url})")
+                else:
+                    st.markdown(f"- {spec.icon} {spec.title}")
 
-        if selected_page == "📡 Flotten-Übersicht":
+        if selected_page in {"📡 Übersicht", "📡 Flotten-Übersicht"}:
             render_overview_view(snapshots, coordinator, repository)
         elif selected_page == "🌐 Running & URLs":
             render_urls_running_view(snapshots, coordinator, role)

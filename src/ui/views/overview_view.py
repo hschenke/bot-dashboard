@@ -1,4 +1,4 @@
-"""Flotten-Übersicht über alle 3 Streamlit-Apps mit Schnell-Checks und Direktlinks."""
+"""Übersicht über alle verwalteten Apps mit Schnell-Checks und Direktlinks."""
 
 from __future__ import annotations
 
@@ -80,16 +80,13 @@ def render_overview_view(
     coordinator: FleetCheckCoordinator,
     repository: SqlDashboardRepository,
 ) -> None:
-    """Rendert die zentrale Kommandozentrale für News-Bot, Research-Bot und Alert-Bot."""
-    head_col, action_col = st.columns([3, 1])
+    """Rendert die zentrale Übersicht für das Holli Dashboard."""
+    head_col, action_col = st.columns([3, 1], vertical_alignment="center")
     with head_col:
-        st.header("📡 Flotten-Übersicht (Streamlit Cloud Suite)")
-        st.caption(
-            "Echtzeit-Status deiner 3 gehosteten Apps: Erreichbarkeit, GitHub Actions Worker & Turso/SQLite-Datenbanken."
-        )
+        st.title("Holli Dashboard")
     with action_col:
-        if st.button("⚡ Alle 3 Apps jetzt prüfen", type="primary", use_container_width=True):
-            with st.spinner("Prüfe URLs, GitHub Workflows & Datenbanken aller 3 Bots..."):
+        if st.button("⚡ Alle Apps jetzt prüfen", type="primary", use_container_width=True):
+            with st.spinner("Prüfe URLs, GitHub Workflows & Datenbanken..."):
                 st.session_state["fleet_snapshots"] = coordinator.check_all_apps(
                     repository=repository
                 )

@@ -32,7 +32,7 @@ def _render_analysis_report(analysis: FleetAIAnalysis) -> None:
         st.caption(f"Engine: `{analysis.model_used}`")
 
     if analysis.app_insights:
-        st.markdown("#### 🔍 Einzelbewertung der 3 Apps")
+        st.markdown("#### 🔍 Einzelbewertung der Apps")
         cols = st.columns(len(analysis.app_insights))
         for idx, insight in enumerate(analysis.app_insights):
             with cols[idx], st.container(border=True):
@@ -62,7 +62,7 @@ def render_ki_view(
     """Rendert den KI-View mit Flotten-Diagnose und interaktivem Operations-Assistenten."""
     st.header("🤖 KI-View & Flotten-Intelligenz (Google Gemini)")
     st.caption(
-        "Automatische Auswertung aller URL-, GitHub-Worker- und Datenbank-Metriken deiner 3 Bots "
+        "Automatische Auswertung aller URL-, GitHub-Worker- und Datenbank-Metriken deiner Apps "
         "mit Google Gemini Structured Output (inkl. sofortigem Heuristik-Fallback)."
     )
 
@@ -74,7 +74,7 @@ def render_ki_view(
     btn_col, info_col = st.columns([1.4, 2.6])
     with btn_col:
         if st.button("✨ KI-Tiefendiagnose starten", type="primary", use_container_width=True):
-            with st.spinner("Analysiere Live-Telemetrie aller 3 Bots mit Google Gemini..."):
+            with st.spinner("Analysiere Live-Telemetrie aller Apps mit Google Gemini..."):
                 st.session_state["fleet_ai_analysis"] = gateway.analyze_fleet(snapshots)
             st.rerun()
     with info_col:
@@ -94,7 +94,7 @@ def render_ki_view(
     with st.form("ki_fleet_question_form"):
         question = st.text_input(
             "Frage zu Status, Datenbank-Inhalten, Fehlern oder Workflows stellen:",
-            placeholder="z. B. Welcher meiner 3 Bots braucht aktuell Aufmerksamkeit und wie viele Artikel/Regeln sind gespeichert?",
+            placeholder="z. B. Welche App braucht aktuell Aufmerksamkeit und wie viele Datensätze sind gespeichert?",
         )
         ask_submitted = st.form_submit_button("🤖 Frage auswerten", use_container_width=True)
 

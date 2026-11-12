@@ -52,11 +52,11 @@ def _render_single_bot_db_tab(snap: AppFleetSnapshot) -> None:
 
 
 def render_db_view(snapshots: list[AppFleetSnapshot]) -> None:
-    """Rendert den Datenbank-Inspektor über alle 3 überwachten Bots."""
+    """Rendert den Datenbank-Inspektor über alle überwachten Apps."""
     st.header("🗄️ Datenbank-Inspektor (Turso LibSQL & SQLite)")
     st.caption(
-        "Live-Einblick in die Tabellenbestände, Latenzen und jüngsten Einträge von "
-        "News-Bot, Research-Bot und Alert-Bot."
+        "Live-Einblick in die Tabellenbestände, Latenzen und jüngsten Einträge deiner "
+        "überwachten Apps."
     )
 
     overview_rows = [

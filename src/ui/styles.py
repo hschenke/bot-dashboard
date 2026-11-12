@@ -7,7 +7,7 @@ import streamlit as st
 _STATIC_CSS = """
 <style>
 .block-container {
-    padding-top: 1.5rem;
+    padding-top: 4.5rem;
     padding-bottom: 2.5rem;
     max-width: 1180px;
 }

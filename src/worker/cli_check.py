@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 def run_cli_fleet_check() -> int:
-    """Prüft alle 3 Apps und protokolliert das Ergebnis im Dashboard-Repository."""
+    """Prüft alle konfigurierten Apps und protokolliert das Ergebnis im Dashboard-Repository."""
     settings = load_app_settings()
     repository = create_dashboard_repository(settings)
     coordinator = FleetCheckCoordinator(settings)

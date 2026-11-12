@@ -1,10 +1,7 @@
-# 🎛️ Bot-Dashboard (Streamlit Fleet Control Center)
+# 🎛️ Holli Dashboard (Streamlit Fleet Control Center)
 
-Zentrale Monitoring-, Datenbank-, Worker- und KI-Kommandozentrale für deine **3 auf Streamlit Community Cloud gehosteten Applikationen**:
-
-1. 📰 **News-Bot** (`https://holli-news-bot.streamlit.app/` • `hschenke/news-bot`)
-2. 🔬 **Research-Bot** (`https://holli-research-bot.streamlit.app/` • `hschenke/research-bot`)
-3. 🔔 **Alert-Bot** (`https://holli-alert-bot.streamlit.app/` • `hschenke/alert-bot`)
+Zentrale Monitoring-, Datenbank-, Worker- und KI-Kommandozentrale für deine **auf Streamlit Community Cloud gehosteten Applikationen** (z. B. News-Bot, Research-Bot, Alert-Bot).
+Alle Konfigurationen, URLs, Repos und Datenbank-Credentials werden sicher und flexibel über **Secrets** (`st.secrets` / `.streamlit/secrets.toml`) bzw. Umgebungsvariablen gesteuert.
 
 Konzipiert als eigenständige **Streamlit Web-App** auf derselben kostenlosen **0-€-Cloud-Architektur** (**Streamlit Community Cloud + GitHub Actions + Turso LibSQL / SQLite + Google Gemini**).
 
@@ -43,7 +40,7 @@ bot-dashboard/
 ├── src/
 │   ├── ai/                            # Gemini Interactions API Gateway & Heuristik-Diagnose
 │   ├── checks/                        # SafeUrlProbe, GitHubWorkflowProbe, BotDatabaseInspector, Coordinator
-│   ├── config/                        # Konstanten & AppSettings (inkl. lokalem Nachbar-.env-Fallback)
+│   ├── config/                        # Konstanten & AppSettings (Secrets, ENV & YAML-Defaults)
 │   ├── domain/                        # Enums, Exception-Hierarchie, Dataclasses & Pydantic-Schemata
 │   ├── security/                      # SSRF-Guard, Whitelist-Validierung, HMAC-Auth & Rate-Limiter
 │   ├── storage/                       # SqlExecutor (SQLite & Turso) + SqlDashboardRepository

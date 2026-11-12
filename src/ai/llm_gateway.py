@@ -78,7 +78,7 @@ def build_heuristic_fleet_analysis(snapshots: Sequence[AppFleetSnapshot]) -> Fle
         return FleetAIAnalysis(
             fleet_health_score=0,
             headline="Noch keine Telemetriedaten erfasst",
-            executive_summary="Bitte starte zunächst einen Flotten-Check, um Daten für alle 3 Apps zu erheben.",
+            executive_summary="Bitte starte zunächst einen Flotten-Check, um Daten für alle Apps zu erheben.",
             model_used="heuristic-fallback",
         )
 

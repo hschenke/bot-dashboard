@@ -1,4 +1,4 @@
-"""Koordinator für parallele Flotten-Prüfungen über alle 3 Streamlit-Applikationen."""
+"""Koordinator für parallele Flotten-Prüfungen aller überwachten Streamlit-Applikationen."""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ def derive_overall_health(
 
 
 class FleetCheckCoordinator:
-    """Führt URL-, GitHub-Worker- und Datenbank-Prüfungen für alle 3 Bots durch."""
+    """Führt URL-, GitHub-Worker- und Datenbank-Prüfungen für alle konfigurierten Bots durch."""
 
     def __init__(
         self,

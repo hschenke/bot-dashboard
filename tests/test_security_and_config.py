@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from src.config.settings import load_app_settings
+from src.config.settings import _lookup_in_mapping, load_app_settings
 from src.domain.enums import AppId, AuthRole
 from src.domain.exceptions import SSRFBlockedError, ValidationError
 from src.security.auth import (
@@ -107,7 +107,9 @@ def test_sanitization_and_path_traversal_protection(tmp_path: Path) -> None:
         resolve_safe_sqlite_path(tmp_path, "../../etc/passwd")
 
 
-def test_load_app_settings_populates_three_managed_apps() -> None:
+def test_load_app_settings_populates_three_managed_apps(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NEWS_BOT_URL", "https://holli-news-bot.streamlit.app/")
+    monkeypatch.setenv("NEWS_BOT_REPO", "hschenke/news-bot")
     settings = load_app_settings(allow_sibling_env_fallback=False)
     assert len(settings.managed_apps) == 3
     ids = [spec.app_id for spec in settings.managed_apps]
@@ -115,3 +117,14 @@ def test_load_app_settings_populates_three_managed_apps() -> None:
     news_spec = settings.get_app_spec(AppId.NEWS_BOT)
     assert "streamlit.app" in news_spec.streamlit_url
     assert news_spec.github_repo == "hschenke/news-bot"
+
+
+def test_secret_mapping_lookup_flatter_and_nested() -> None:
+    data = {
+        "NEWS_BOT_URL": "https://flat.example.com",
+        "research_bot": {"url": "https://nested.example.com"},
+    }
+    assert _lookup_in_mapping(data, "NEWS_BOT_URL") == "https://flat.example.com"
+    assert _lookup_in_mapping(data, "RESEARCH_BOT_URL") == "https://nested.example.com"
+    assert _lookup_in_mapping(data, "UNKNOWN_KEY") is None
+
