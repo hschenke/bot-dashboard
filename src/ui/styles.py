@@ -56,29 +56,49 @@ div[data-testid="stVerticalBlockBorderWrapper"] li {
     font-size: 0.92rem !important;
 }
 
-/* Sidebar Navigation: Touch-freundlich & ohne Radio-Button-Kreise */
-[data-testid="stSidebar"] [data-testid="stRadioGroup"] {
+/* Sidebar Navigation: Vollflächig, gleichmäßig lang & touch-freundlich */
+[data-testid="stSidebar"] div[data-testid="stRadio"],
+[data-testid="stSidebar"] div[data-testid="stRadio"] > div {
+    width: 100% !important;
+}
+
+[data-testid="stSidebar"] [data-testid="stRadioGroup"],
+[data-testid="stSidebar"] div[role="radiogroup"] {
+    width: 100% !important;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: stretch !important;
     gap: 8px !important;
 }
+
+[data-testid="stSidebar"] [data-testid="stRadioGroup"] > div,
+[data-testid="stSidebar"] div[role="radiogroup"] > div {
+    width: 100% !important;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: stretch !important;
+}
+
 [data-testid="stSidebar"] div[role="radiogroup"] label,
 [data-testid="stSidebar"] [data-testid="stRadioOption"] {
     display: flex !important;
     align-items: center !important;
     width: 100% !important;
+    min-width: 100% !important;
+    box-sizing: border-box !important;
     min-height: 48px !important;
-    padding: 10px 14px !important;
-    margin-bottom: 8px !important;
+    padding: 10px 16px !important;
+    margin-bottom: 4px !important;
     border-radius: 10px !important;
     background: rgba(255, 255, 255, 0.04) !important;
     border: 1px solid rgba(255, 255, 255, 0.08) !important;
     cursor: pointer !important;
     transition: all 0.15s ease-in-out !important;
-    box-sizing: border-box !important;
 }
 
 /* Radio-Button-Kreis vollständig ausblenden */
 [data-testid="stSidebar"] div[role="radiogroup"] label > div:first-child,
-[data-testid="stSidebar"] [data-testid="stRadioOption"] > div > div:first-child {
+[data-testid="stSidebar"] [data-testid="stRadioOption"] > div:first-child {
     display: none !important;
 }
 
@@ -89,6 +109,7 @@ div[data-testid="stVerticalBlockBorderWrapper"] li {
     font-weight: 500 !important;
     margin: 0 !important;
     line-height: 1.4 !important;
+    width: 100% !important;
 }
 
 /* Hover-Status */
@@ -101,6 +122,7 @@ div[data-testid="stVerticalBlockBorderWrapper"] li {
 /* Aktiver / Ausgewählter Navi-Punkt */
 [data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked),
 [data-testid="stSidebar"] [data-testid="stRadioOption"][data-selected="true"],
+[data-testid="stSidebar"] [data-testid="stRadioOption"]:has(input:checked),
 [data-testid="stSidebar"] div[data-selected="true"] [data-testid="stRadioOption"] {
     background: rgba(59, 130, 246, 0.25) !important;
     border-color: #3b82f6 !important;

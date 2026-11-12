@@ -140,9 +140,8 @@ def _render_worker_card(
         with col_meta:
             if safe_repo_url != "#":
                 st.markdown(f"**GitHub Repo:** [{snap.spec.github_repo}]({safe_repo_url})")
-            st.markdown(f"**Branch:** `{wf.branch}`")
-            st.markdown(f"**Gestartet:** {format_iso_timestamp(wf.started_at)}")
-            st.markdown(f"**Aktualisiert:** {format_iso_timestamp(wf.updated_at)}")
+            st.markdown(f"**Worker gestartet:** {format_iso_timestamp(wf.started_at)}")
+            st.markdown(f"**Worker beendet:** {format_iso_timestamp(wf.updated_at)}")
 
         st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
         _render_card_actions(snap, coordinator, repository, role, idx)
