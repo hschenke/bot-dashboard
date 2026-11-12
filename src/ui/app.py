@@ -56,23 +56,12 @@ def run_streamlit_app() -> None:
                 "🤖 KI-View",
                 "⚙️ System & Historie",
             ]
-            selected_page = st.radio("Navigation", options=pages, index=0)
-
-            st.divider()
-            if st.button("🔄 Alle Checks neu ausführen", use_container_width=True):
-                with st.spinner("Aktualisiere alle Apps..."):
-                    st.session_state["fleet_snapshots"] = coordinator.check_all_apps(
-                        repository=repository
-                    )
-                    st.session_state.pop("fleet_ai_analysis", None)
-                st.rerun()
-
-            st.caption(f"Dashboard-DB: **{repository.backend_name}**")
-            for spec in settings.managed_apps:
-                if spec.streamlit_url:
-                    st.markdown(f"- {spec.icon} [{spec.title}]({spec.streamlit_url})")
-                else:
-                    st.markdown(f"- {spec.icon} {spec.title}")
+            selected_page = st.radio(
+                "Navigation",
+                options=pages,
+                index=0,
+                label_visibility="collapsed",
+            )
 
         if selected_page in {"📡 Übersicht", "📡 Flotten-Übersicht"}:
             render_overview_view(snapshots, coordinator, repository)

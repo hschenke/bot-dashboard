@@ -29,6 +29,24 @@ def _render_fleet_kpi_row(snapshots: list[AppFleetSnapshot]) -> None:
     col4.metric("Gesamte DB-Einträge", f"{total_records:,}".replace(",", "."))
 
 
+def _build_status_list(snap: AppFleetSnapshot) -> str:
+    latency_str = (
+        f" ({snap.url_check.latency_ms} ms)"
+        if snap.url_check.status == HealthStatus.ONLINE
+        else ""
+    )
+    rows_num = f"{snap.db_check.total_rows:,}".replace(",", ".")
+    db_suffix = f" ({rows_num} Zeilen)" if snap.db_check.status == HealthStatus.ONLINE else ""
+
+    items = [
+        f"- **Gesamtstatus:** {format_health_badge(snap.overall_status)}",
+        f"- **🌐 Web-App URL:** {format_health_badge(snap.url_check.status)}{latency_str}",
+        f"- **⚙️ GitHub Worker:** {format_workflow_badge(snap.workflow_check.state)}",
+        f"- **🗄️ Datenbank:** {format_health_badge(snap.db_check.status)}{db_suffix}",
+    ]
+    return "\n".join(items)
+
+
 def _render_app_card(
     snap: AppFleetSnapshot,
     coordinator: FleetCheckCoordinator,
@@ -36,23 +54,8 @@ def _render_app_card(
     idx: int,
 ) -> None:
     with st.container(border=True):
-        st.markdown(f"### {snap.spec.icon} {snap.spec.title}")
-        st.caption(snap.spec.description)
-        st.markdown(f"**Gesamtstatus:** {format_health_badge(snap.overall_status)}")
-        st.divider()
-
-        st.markdown(
-            f"**🌐 Web-App URL:** {format_health_badge(snap.url_check.status)}  \n"
-            f"`{snap.url_check.latency_ms} ms` • {snap.url_check.message}"
-        )
-        st.markdown(
-            f"**⚙️ GitHub Worker:** {format_workflow_badge(snap.workflow_check.state)}  \n"
-            f"`{snap.workflow_check.workflow_file}` • {snap.workflow_check.status_label}"
-        )
-        st.markdown(
-            f"**🗄️ Datenbank:** {format_health_badge(snap.db_check.status)}  \n"
-            f"`{snap.db_check.total_rows} Zeilen` • {snap.db_check.backend_label}"
-        )
+        st.markdown(f"#### {snap.spec.icon} {snap.spec.title}")
+        st.markdown(_build_status_list(snap))
         st.caption(f"Geprüft: {format_iso_timestamp(snap.checked_at)}")
 
         btn_col1, btn_col2 = st.columns(2)
@@ -75,6 +78,7 @@ def _render_app_card(
                 st.rerun()
 
 
+
 def render_overview_view(
     snapshots: list[AppFleetSnapshot],
     coordinator: FleetCheckCoordinator,
@@ -93,7 +97,6 @@ def render_overview_view(
             st.rerun()
 
     _render_fleet_kpi_row(snapshots)
-    st.write("")
 
     cols = st.columns(len(snapshots) or 1)
     for idx, snap in enumerate(snapshots):
