@@ -21,7 +21,7 @@ div[data-testid="stMetric"] [data-testid="stMetricValue"] {
     font-size: 1.45rem !important;
 }
 
-/* Kompakte App-Cards in der Flotten-Übersicht */
+/* Kompakte App-Cards im Dashboard */
 div[data-testid="stVerticalBlockBorderWrapper"] {
     border-radius: 12px;
 }

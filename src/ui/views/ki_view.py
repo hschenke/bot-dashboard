@@ -59,8 +59,8 @@ def render_ki_view(
     settings: AppSettings,
     snapshots: list[AppFleetSnapshot],
 ) -> None:
-    """Rendert den KI-View mit Flotten-Diagnose und interaktivem Operations-Assistenten."""
-    st.header("🤖 KI-View & Flotten-Intelligenz (Google Gemini)")
+    """Rendert den KI-View mit Status-Diagnose und interaktivem Operations-Assistenten."""
+    st.header("🤖 KI-View & Dashboard-Intelligenz (Google Gemini)")
     st.caption(
         "Automatische Auswertung aller URL-, GitHub-Worker- und Datenbank-Metriken deiner Apps "
         "mit Google Gemini Structured Output (inkl. sofortigem Heuristik-Fallback)."
@@ -90,7 +90,7 @@ def render_ki_view(
     _render_analysis_report(st.session_state["fleet_ai_analysis"])
     st.divider()
 
-    st.subheader("💬 KI-Operations-Assistent (Frage an deine Bot-Flotte)")
+    st.subheader("💬 KI-Operations-Assistent (Frage an deine Bots)")
     with st.form("ki_fleet_question_form"):
         question = st.text_input(
             "Frage zu Status, Datenbank-Inhalten, Fehlern oder Workflows stellen:",

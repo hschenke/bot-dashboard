@@ -9,7 +9,7 @@ Konzipiert als eigenständige **Streamlit Web-App** auf derselben kostenlosen **
 
 ## ✨ Kernfunktionen & Ansichten
 
-- **📡 Flotten-Übersicht**:
+- **📡 Dashboard**:
   - Alle 3 Bots nebeneinander mit Live-Gesamtstatus, Antwortzeit (`ms`), Worker-Status, Datenbank-Zeilenbestand und 1-Klick-Startlinks.
 - **🌐 Running & URLs**:
   - **Streamlit Cloud Health-Check**: Prüft sowohl die Haupt-URL als auch den offiziellen `/_stcore/health`-Endpunkt und erkennt, ob eine App wach (`🟢 Online`) oder im Ruhezustand (`🌙 Ruhezustand`) ist.
@@ -31,7 +31,7 @@ Konzipiert als eigenständige **Streamlit Web-App** auf derselben kostenlosen **
 bot-dashboard/
 ├── .github/workflows/
 │   ├── ci.yaml                        # Automatisches Linting (Ruff + Bandit) & Tests (Pytest)
-│   └── scheduled_healthcheck.yaml     # Optionaler 30-Min.-Cron & manueller Flotten-Check
+│   └── scheduled_healthcheck.yaml     # Optionaler 30-Min.-Cron & manueller Dashboard-Check
 ├── .streamlit/
 │   ├── config.toml                    # Dark-Theme, XSRF-Schutz & sichere Server-Defaults
 │   └── secrets.toml.example           # Vorlage für Streamlit Cloud Secrets

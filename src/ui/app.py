@@ -50,7 +50,7 @@ def run_streamlit_app() -> None:
             st.caption(f"v{__version__} • Control Center")
 
             pages = [
-                "📡 Übersicht",
+                "📡 Dashboard",
                 "🌐 Running & URLs",
                 "🗄️ DB-Inspektor",
                 "🤖 KI-View",
@@ -63,7 +63,7 @@ def run_streamlit_app() -> None:
                 label_visibility="collapsed",
             )
 
-        if selected_page in {"📡 Übersicht", "📡 Flotten-Übersicht"}:
+        if selected_page in {"📡 Dashboard", "📡 Übersicht", "📡 Flotten-Übersicht"}:
             render_overview_view(snapshots, coordinator, repository)
         elif selected_page == "🌐 Running & URLs":
             render_urls_running_view(snapshots, coordinator, role)
