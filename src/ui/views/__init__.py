@@ -1,1 +1,1 @@
-"""Teilansichten des Bot-Dashboards (Übersicht, Running & URLs, DB, KI-View, System)."""
+"""Teilansichten des Bot-Dashboards (Dashboard/Übersicht, DB, KI-View, System)."""

@@ -15,7 +15,6 @@ from src.ui.views.db_view import render_db_view
 from src.ui.views.ki_view import render_ki_view
 from src.ui.views.overview_view import render_overview_view
 from src.ui.views.settings_view import render_settings_view
-from src.ui.views.urls_running_view import render_urls_running_view
 
 
 def _ensure_initial_snapshots(
@@ -51,7 +50,6 @@ def run_streamlit_app() -> None:
 
             pages = [
                 "📡 Dashboard",
-                "🌐 Running & URLs",
                 "🗄️ DB-Inspektor",
                 "🤖 KI-View",
                 "⚙️ System & Historie",
@@ -63,10 +61,13 @@ def run_streamlit_app() -> None:
                 label_visibility="collapsed",
             )
 
-        if selected_page in {"📡 Dashboard", "📡 Übersicht", "📡 Flotten-Übersicht"}:
-            render_overview_view(snapshots, coordinator, repository)
-        elif selected_page == "🌐 Running & URLs":
-            render_urls_running_view(snapshots, coordinator, role)
+        if selected_page in {
+            "📡 Dashboard",
+            "📡 Übersicht",
+            "📡 Flotten-Übersicht",
+            "🌐 Running & URLs",
+        }:
+            render_overview_view(snapshots, coordinator, repository, role)
         elif selected_page == "🗄️ DB-Inspektor":
             render_db_view(snapshots)
         elif selected_page == "🤖 KI-View":

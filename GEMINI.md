@@ -23,7 +23,7 @@
   5. `src/checks`: `SafeUrlProbe` (HTTP & Streamlit `/_stcore/health`), `GitHubWorkflowProbe` (Workflow-Status & `workflow_dispatch`), `BotDatabaseInspector` (Multi-DB-Inspektion) und `FleetCheckCoordinator`.
   6. `src/ai`: `DashboardAIGateway` auf Basis der modernen `google-genai` Interactions API (`>= 2.30.1`) mit Structured Output & deterministischem Heuristik-Fallback.
   7. `src/worker`: CLI-Healthcheck-Runner für GitHub Actions (`scheduled_healthcheck.yaml`).
-  8. `src/ui`: Reine Streamlit-Präsentationsschicht (`overview_view`, `urls_running_view`, `db_view`, `ki_view`, `settings_view`).
+  8. `src/ui`: Reine Streamlit-Präsentationsschicht (`overview_view` [inkl. Running & URLs], `db_view`, `ki_view`, `settings_view`).
 
 ## Security Baseline (`security-standard`)
 - **Zero Hardcoded Secrets**: Alle Keys/Passwörter ausschließlich über Umgebungsvariablen / `st.secrets`.

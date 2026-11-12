@@ -9,11 +9,10 @@ Konzipiert als eigenständige **Streamlit Web-App** auf derselben kostenlosen **
 
 ## ✨ Kernfunktionen & Ansichten
 
-- **📡 Dashboard**:
-  - Alle 3 Bots nebeneinander mit Live-Gesamtstatus, Antwortzeit (`ms`), Worker-Status, Datenbank-Zeilenbestand und 1-Klick-Startlinks.
-- **🌐 Running & URLs**:
-  - **Streamlit Cloud Health-Check**: Prüft sowohl die Haupt-URL als auch den offiziellen `/_stcore/health`-Endpunkt und erkennt, ob eine App wach (`🟢 Online`) oder im Ruhezustand (`🌙 Ruhezustand`) ist.
-  - **GitHub Actions Worker-Monitor & Trigger**: Zeigt den Echtzeit-Status von `daily_digest.yaml`, `run_research.yaml` und `check_alerts.yaml` (`running`, `queued`, `success`, `failure`) und erlaubt den direkten **1-Klick-Start (`workflow_dispatch`)** aus dem Dashboard.
+- **📡 Dashboard (Zentrale Flotten-Übersicht & Worker-Monitor)**:
+  - **KPI-Header & Sofort-Check**: Flotten-Kennzahlen (Online-Apps, wache Streamlit-URLs, DB-Verbindungen, Zeilenbestand) und 1-Klick-Gesamtcheck aller Apps.
+  - **Streamlit Cloud Health-Check**: Tabellarische Übersicht aller Apps inkl. offiziellem `/_stcore/health`-Endpunkt, HTTP-Status, Latenz (`ms`) und Ruhezustand-Erkennung (`🟢 Wach` / `🌙 Schläft`).
+  - **GitHub Actions Worker-Monitor & Trigger**: Detaillierte Worker-Karten für `daily_digest.yaml`, `run_research.yaml` und `check_alerts.yaml` mit Direktlinks zum Action-Log, Einzel-App-Prüfung (`🔄 Prüfen`) und 1-Klick-Start (`▶️ Worker starten` per `workflow_dispatch`).
 - **🗄️ Datenbank-Inspektor (`Turso Cloud` & `SQLite`)**:
   - Verbindet sich mit den 3 Bot-Datenbanken (über Turso HTTPS Hrana v2 oder lokal per Read-Only-SQLite).
   - Zeigt Tabellen-Bestände (`articles`, `briefings`, `research_jobs`, `research_reports`, `alert_rules`, `alert_events`, `alert_check_logs`), aktive Aufträge/Wächter, Fehlerzähler und die jüngsten Einträge.
@@ -44,7 +43,7 @@ bot-dashboard/
 │   ├── domain/                        # Enums, Exception-Hierarchie, Dataclasses & Pydantic-Schemata
 │   ├── security/                      # SSRF-Guard, Whitelist-Validierung, HMAC-Auth & Rate-Limiter
 │   ├── storage/                       # SqlExecutor (SQLite & Turso) + SqlDashboardRepository
-│   ├── ui/                            # Schlanke Streamlit-Views (Overview, Running/URLs, DB, KI, Settings)
+│   ├── ui/                            # Schlanke Streamlit-Views (Overview inkl. URLs/Worker, DB, KI, Settings)
 │   └── worker/                        # CLI-Entrypoint für Hintergrund-Checks
 ├── tests/                             # Umfassende Unit- & Integrationstests
 ├── streamlit_app.py                   # Root-Entrypoint für Streamlit Cloud
