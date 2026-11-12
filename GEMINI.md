@@ -1,7 +1,7 @@
 # Projekt-Richtlinien für Bot-Dashboard
 
 ## Lokale Arbeitsumgebung & Pfade
-- **Lokales Nutzerverzeichnis**: `C:\Users\holge\.gemini\antigravity\scratch\bot-dashboard`
+- **Lokales Nutzerverzeichnis**: `C:\Users\holge\.gemini\antigravity\scratch\bot-dashboard` (nur relevant, wenn lokal auf diesem PC entwickelt wird)
 - **Remote Repository**: `https://github.com/hschenke/bot-dashboard` (`origin main`)
 
 ## Automatischer Start-Ablauf
@@ -10,7 +10,7 @@
 ## Automatischer Abschluss-Ablauf
 - **Qualitätscheck vor jedem Commit**: Führe vor jedem Commit `.venv\Scripts\ruff.exe check .` und `.venv\Scripts\pytest.exe` aus (unter Linux: `.venv/bin/ruff` und `.venv/bin/pytest`).
 - **Automatisches Committen & `git push`**: Committe abgeschlossene Features/Fixes sauber und pushe sie direkt nach `origin main`, damit GitHub Actions und Streamlit Community Cloud sofort aktuell sind.
-- **Lokaler Abgleich (C:\\Users\\holge\\...\\bot-dashboard)**: Halte das lokale Verzeichnis stets synchron mit `origin main` (automatisch per git pull / merge).
+- **Lokaler Abgleich (C:\\Users\\holge\\...\\bot-dashboard)**: Nur wenn lokal auf diesem PC entwickelt wird: Verzeichnis stets synchron mit `origin main` halten (automatisch per git pull / merge). In Cloud-/Remote-VMs reicht der Push nach `origin main`.
 - **Proaktive Versions-Tag Empfehlung (Semantic Versioning)**: Erhöhe bei neuen Meilensteinen die Version in `src/__version__.py` und setze/empfehle passende SemVer-Tags (`v0.X.0` für Features, `v0.X.Y` für Fixes).
 
 ## Architektur & Clean Code Standards (Strikte Pflicht)
