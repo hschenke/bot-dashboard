@@ -100,6 +100,8 @@ def test_heuristic_and_gemini_ai_analysis() -> None:
     ]
     heuristic = build_heuristic_fleet_analysis(snapshots)
     assert heuristic.fleet_health_score < 100
+    assert heuristic.headline.startswith("System-Status:")
+    assert "Flotten" not in heuristic.headline
     assert len(heuristic.app_insights) == 3
     assert len(heuristic.anomalies_or_warnings) >= 2
 
@@ -107,7 +109,7 @@ def test_heuristic_and_gemini_ai_analysis() -> None:
     mock_client = MagicMock()
     mock_interaction = MagicMock()
     mock_interaction.output_text = (
-        '{"fleet_health_score": 92, "headline": "Flotte stabil", '
+        '{"fleet_health_score": 92, "headline": "System stabil", '
         '"executive_summary": "Alle Systeme geprüft.", "app_insights": [], '
         '"anomalies_or_warnings": [], "next_steps": ["Weiter beobachten"]}'
     )
@@ -117,7 +119,7 @@ def test_heuristic_and_gemini_ai_analysis() -> None:
     gateway = DashboardAIGateway(settings, client=mock_client)
     ai_res = gateway.analyze_fleet(snapshots)
     assert ai_res.fleet_health_score == 92
-    assert ai_res.headline == "Flotte stabil"
+    assert ai_res.headline == "System stabil"
 
     mock_interaction.output_text = "News-Bot hat 42 Artikel gespeichert."
     answer = gateway.answer_fleet_question(snapshots, "Wie viele Artikel hat der News-Bot?")

@@ -21,7 +21,7 @@ def _render_header(
     coordinator: FleetCheckCoordinator,
     repository: SqlDashboardRepository,
 ) -> None:
-    head_col, action_col = st.columns([3, 1], vertical_alignment="center")
+    head_col, action_col = st.columns([2.5, 1.5], vertical_alignment="center")
     with head_col:
         st.title("Holli Dashboard")
     with action_col:
@@ -56,8 +56,6 @@ def _render_url_table_section(snapshots: list[AppFleetSnapshot]) -> None:
             "/_stcore/health": "✅ OK" if snap.url_check.health_endpoint_ok else "⚠️ Nicht bestätigt",
             "HTTP-Code": snap.url_check.http_status_code or "–",
             "Latenz (ms)": snap.url_check.latency_ms,
-            "Streamlit URL": snap.spec.streamlit_url,
-            "GitHub Repo": snap.spec.github_repo_url,
         }
         for snap in snapshots
     ]
@@ -73,34 +71,41 @@ def _render_card_actions(
 ) -> None:
     safe_app_url = sanitize_display_url(snap.spec.streamlit_url)
     safe_run_url = sanitize_display_url(snap.workflow_check.run_url)
-    if safe_app_url != "#":
-        st.link_button("🌐 Web-App öffnen", safe_app_url, use_container_width=True)
-    if safe_run_url != "#":
-        st.link_button("📋 GitHub Action Log", safe_run_url, use_container_width=True)
+    is_admin = (role == AuthRole.ADMIN)
 
-    if st.button(
-        "🔄 Prüfen",
-        key=f"refresh_single_{snap.spec.app_id.value}",
-        use_container_width=True,
-    ):
-        with st.spinner(f"Prüfe {snap.spec.title}..."):
-            updated = coordinator.check_single_app(snap.spec, repository=repository)
-            current = list(st.session_state.get("fleet_snapshots", []))
-            if idx < len(current):
-                current[idx] = updated
-                st.session_state["fleet_snapshots"] = current
-        st.rerun()
+    cols = st.columns(4 if is_admin else 3)
+    with cols[0]:
+        if safe_app_url != "#":
+            st.link_button("🌐 Web-App öffnen", safe_app_url, use_container_width=True)
+    with cols[1]:
+        if safe_run_url != "#":
+            st.link_button("📋 Action Log", safe_run_url, use_container_width=True)
+    with cols[2]:
+        if st.button(
+            "🔄 App prüfen",
+            key=f"refresh_single_{snap.spec.app_id.value}",
+            use_container_width=True,
+        ):
+            with st.spinner(f"Prüfe {snap.spec.title}..."):
+                updated = coordinator.check_single_app(snap.spec, repository=repository)
+                current = list(st.session_state.get("fleet_snapshots", []))
+                if idx < len(current):
+                    current[idx] = updated
+                    st.session_state["fleet_snapshots"] = current
+            st.rerun()
 
-    if role == AuthRole.ADMIN and st.button(
-        "▶️ Worker starten",
-        key=f"trigger_wf_{snap.spec.app_id.value}",
-        use_container_width=True,
-    ):
-        try:
-            msg = coordinator.github_probe.trigger_workflow_dispatch(snap.spec)
-            st.success(msg)
-        except ProbeError as exc:
-            st.error(str(exc))
+    if is_admin:
+        with cols[3]:
+            if st.button(
+                "▶️ Worker starten",
+                key=f"trigger_wf_{snap.spec.app_id.value}",
+                use_container_width=True,
+            ):
+                try:
+                    msg = coordinator.github_probe.trigger_workflow_dispatch(snap.spec)
+                    st.success(msg)
+                except ProbeError as exc:
+                    st.error(str(exc))
 
 
 def _render_worker_card(
@@ -111,22 +116,36 @@ def _render_worker_card(
     idx: int,
 ) -> None:
     wf = snap.workflow_check
-    with st.container(border=True):
-        col_info, col_meta, col_actions = st.columns([2.2, 1.8, 1.3])
+    safe_app_url = sanitize_display_url(snap.spec.streamlit_url)
+    safe_repo_url = sanitize_display_url(snap.spec.github_repo_url)
+    expander_title = (
+        f"{snap.spec.icon} {snap.spec.title} — {format_health_badge(snap.overall_status)} "
+        f"• Worker: {format_workflow_badge(wf.state)}"
+    )
+
+    with st.expander(expander_title, expanded=True):
+        st.markdown(
+            f"<div style='font-size: 0.83rem; color: #94a3b8; margin-top: -2px; margin-bottom: 8px;'>"
+            f"⚙️ Workflow: <code>{wf.workflow_file}</code>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        col_info, col_meta = st.columns([1.5, 1.5])
         with col_info:
-            st.markdown(f"#### {snap.spec.icon} {snap.spec.title} — `{wf.workflow_file}`")
             st.markdown(f"**Worker-Status:** {format_workflow_badge(wf.state)} ({wf.status_label})")
-            if snap.spec.secondary_workflows:
-                sec_list = ", ".join(f"`{w}`" for w in snap.spec.secondary_workflows)
-                st.caption(f"Weitere Workflows im Repo: {sec_list}")
+            if safe_app_url != "#":
+                st.markdown(f"**Streamlit URL:** [{snap.spec.streamlit_url}]({safe_app_url})")
 
         with col_meta:
+            if safe_repo_url != "#":
+                st.markdown(f"**GitHub Repo:** [{snap.spec.github_repo}]({safe_repo_url})")
             st.markdown(f"**Branch:** `{wf.branch}`")
             st.markdown(f"**Gestartet:** {format_iso_timestamp(wf.started_at)}")
             st.markdown(f"**Aktualisiert:** {format_iso_timestamp(wf.updated_at)}")
 
-        with col_actions:
-            _render_card_actions(snap, coordinator, repository, role, idx)
+        st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+        _render_card_actions(snap, coordinator, repository, role, idx)
 
 
 def _render_running_workers_section(
@@ -137,8 +156,7 @@ def _render_running_workers_section(
 ) -> None:
     st.subheader("⚙️ Running Status & GitHub Actions Hintergrund-Worker")
     st.caption(
-        "Überwacht die automatischen Cloud-Worker (`daily_digest.yaml`, `run_research.yaml`, `check_alerts.yaml`) "
-        "und erlaubt den direkten Sofort-Start per `workflow_dispatch`."
+        "Überwacht die automatischen Cloud-Worker aller Apps und erlaubt den direkten Sofort-Start per 1-Klick-Trigger."
     )
     for idx, snap in enumerate(snapshots):
         _render_worker_card(snap, coordinator, repository, role, idx)

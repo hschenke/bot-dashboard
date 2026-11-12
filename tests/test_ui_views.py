@@ -16,7 +16,6 @@ from src.domain.models import (
     WorkflowRunSummary,
 )
 from src.ui.views.overview_view import render_overview_view
-from src.ui.views.urls_running_view import render_urls_running_view
 
 
 def _create_mock_snapshot() -> AppFleetSnapshot:
@@ -88,6 +87,7 @@ def _fake_columns(spec: Any, **kwargs: Any) -> list[_DummyContext]:
 
 @patch("streamlit.columns", side_effect=_fake_columns)
 @patch("streamlit.container", return_value=_DummyContext())
+@patch("streamlit.expander", return_value=_DummyContext())
 @patch("streamlit.title")
 @patch("streamlit.subheader")
 @patch("streamlit.caption")
@@ -105,6 +105,7 @@ def test_render_overview_view_renders_successfully(
     mock_cap: MagicMock,
     mock_sub: MagicMock,
     mock_title: MagicMock,
+    mock_expander: MagicMock,
     mock_container: MagicMock,
     mock_cols: MagicMock,
 ) -> None:
@@ -116,34 +117,17 @@ def test_render_overview_view_renders_successfully(
 
     mock_title.assert_called_once_with("Holli Dashboard")
     mock_df.assert_called_once()
+    df_rows = mock_df.call_args[0][0]
+    assert "Streamlit URL" not in df_rows[0]
+    assert "GitHub Repo" not in df_rows[0]
     assert mock_sub.call_count == 2
 
 
-@patch("streamlit.columns", side_effect=_fake_columns)
-@patch("streamlit.container", return_value=_DummyContext())
-@patch("streamlit.title")
-@patch("streamlit.subheader")
-@patch("streamlit.caption")
-@patch("streamlit.markdown")
-@patch("streamlit.divider")
-@patch("streamlit.dataframe")
-@patch("streamlit.link_button")
-@patch("streamlit.button", return_value=False)
-def test_render_urls_running_view_compatibility_shim(
-    mock_btn: MagicMock,
-    mock_link: MagicMock,
-    mock_df: MagicMock,
-    mock_div: MagicMock,
-    mock_md: MagicMock,
-    mock_cap: MagicMock,
-    mock_sub: MagicMock,
-    mock_title: MagicMock,
-    mock_container: MagicMock,
-    mock_cols: MagicMock,
-) -> None:
-    snapshot = _create_mock_snapshot()
-    coordinator = MagicMock(spec=FleetCheckCoordinator)
-    repository = MagicMock()
+def test_format_iso_timestamp_format() -> None:
+    from src.ui.formatters import format_iso_timestamp
 
-    render_urls_running_view([snapshot], coordinator, role=AuthRole.READONLY, repository=repository)
-    mock_title.assert_called_once_with("Holli Dashboard")
+    assert format_iso_timestamp("2026-11-12T07:05:00Z") == "12.11.2026 - 07:05"
+    assert format_iso_timestamp("2026-11-12T10:30:00+00:00") == "12.11.2026 - 10:30"
+    assert format_iso_timestamp("") == "–"
+    assert format_iso_timestamp(None) == "–"
+

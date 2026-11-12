@@ -21,6 +21,24 @@ div[data-testid="stMetric"] [data-testid="stMetricValue"] {
     font-size: 1.45rem !important;
 }
 
+/* Einheitliche Button- & Link-Button-Größe & Geometrie */
+div[data-testid="stButton"] > button,
+div[data-testid="stLinkButton"] > a {
+    min-height: 42px !important;
+    height: 42px !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    font-size: 0.92rem !important;
+    font-weight: 500 !important;
+    padding: 0.45rem 0.85rem !important;
+    border-radius: 8px !important;
+    box-sizing: border-box !important;
+    width: 100% !important;
+    text-decoration: none !important;
+    white-space: nowrap !important;
+}
+
 /* Kompakte App-Cards im Dashboard */
 div[data-testid="stVerticalBlockBorderWrapper"] {
     border-radius: 12px;

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from src.domain.enums import HealthStatus, WorkflowRunState
 
 
@@ -30,9 +32,18 @@ def format_workflow_badge(state: WorkflowRunState) -> str:
     return mapping.get(state, "⚪ Unbekannt")
 
 
-def format_iso_timestamp(raw_iso: str) -> str:
-    """Formatiert einen ISO-Zeitstempel kompakt für die UI-Anzeige."""
-    cleaned = (raw_iso or "").strip()
+def format_iso_timestamp(raw_iso: str | datetime | None) -> str:
+    """Formatiert einen Zeitstempel einheitlich im Format tt.mm.yyyy - hh:mm."""
+    if not raw_iso:
+        return "–"
+    if isinstance(raw_iso, datetime):
+        return raw_iso.strftime("%d.%m.%Y - %H:%M")
+    cleaned = str(raw_iso).strip()
     if not cleaned:
         return "–"
-    return cleaned.replace("T", " ").replace("+00:00", " UTC").replace("Z", " UTC")[:23]
+    try:
+        normalized = cleaned.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalized)
+        return dt.strftime("%d.%m.%Y - %H:%M")
+    except Exception:
+        return cleaned

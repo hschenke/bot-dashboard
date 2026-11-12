@@ -78,7 +78,7 @@ def build_heuristic_fleet_analysis(snapshots: Sequence[AppFleetSnapshot]) -> Fle
         return FleetAIAnalysis(
             fleet_health_score=0,
             headline="Noch keine Telemetriedaten erfasst",
-            executive_summary="Bitte starte zunächst einen Flotten-Check, um Daten für alle Apps zu erheben.",
+            executive_summary="Bitte starte zunächst einen System-Check, um Daten für alle Apps zu erheben.",
             model_used="heuristic-fallback",
         )
 
@@ -142,7 +142,7 @@ def build_heuristic_fleet_analysis(snapshots: Sequence[AppFleetSnapshot]) -> Fle
     clamped_score = max(0, min(100, score))
     online_count = sum(1 for s in snapshots if s.overall_status == HealthStatus.ONLINE)
     headline = (
-        f"Flotten-Status: {online_count} von {len(snapshots)} Bots voll einsatzbereit "
+        f"System-Status: {online_count} von {len(snapshots)} Bots voll einsatzbereit "
         f"(Health-Score {clamped_score}/100)"
     )
     summary = (
@@ -209,7 +209,7 @@ class DashboardAIGateway:
         telemetry = format_snapshots_telemetry_context(snapshots)
         sys_prompt = (
             self._settings.fleet_diagnosis_prompt
-            or "Analysiere die Flotten-Telemetrie der 3 Bots präzise und faktenbasiert."
+            or "Analysiere die Telemetrie der 3 Bots präzise und faktenbasiert."
         )
         client = self._get_or_create_client()
         last_exc: Exception | None = None
@@ -235,13 +235,13 @@ class DashboardAIGateway:
                 return parsed.model_copy(update={"model_used": model_name})
             except Exception as exc:
                 last_exc = exc
-                logger.warning("Gemini Flotten-Analyse (%s) fehlgeschlagen: %s", model_name, exc)
+                logger.warning("Gemini System-Analyse (%s) fehlgeschlagen: %s", model_name, exc)
                 if attempt + 1 < LLM_MAX_ATTEMPTS:
                     time.sleep(RETRY_BACKOFF_BASE_SECONDS * (attempt + 1))
 
         if prefer_heuristic_on_error:
             return build_heuristic_fleet_analysis(snapshots)
-        raise LLMProviderError(f"KI-Flottenanalyse fehlgeschlagen: {last_exc}")
+        raise LLMProviderError(f"KI-Systemanalyse fehlgeschlagen: {last_exc}")
 
     def answer_fleet_question(
         self,

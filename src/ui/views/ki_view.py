@@ -28,7 +28,7 @@ def _render_analysis_report(analysis: FleetAIAnalysis) -> None:
         st.subheader(f"🧠 {analysis.headline}")
         st.write(analysis.executive_summary)
     with model_col:
-        st.metric("Fleet Health Score", f"{analysis.fleet_health_score} / 100")
+        st.metric("System Health Score", f"{analysis.fleet_health_score} / 100")
         st.caption(f"Engine: `{analysis.model_used}`")
 
     if analysis.app_insights:
