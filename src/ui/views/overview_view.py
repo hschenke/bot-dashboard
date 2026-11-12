@@ -124,24 +124,23 @@ def _render_worker_card(
     )
 
     with st.expander(expander_title, expanded=True):
-        st.markdown(
-            f"<div style='font-size: 0.83rem; color: #94a3b8; margin-top: -2px; margin-bottom: 8px;'>"
-            f"⚙️ Workflow: <code>{wf.workflow_file}</code>"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
-
-        col_info, col_meta = st.columns([1.5, 1.5])
-        with col_info:
+        col_worker, col_urls = st.columns([1.5, 1.5])
+        with col_worker:
+            st.markdown(
+                f"<div style='font-size: 0.83rem; color: #94a3b8; margin-bottom: 6px;'>"
+                f"⚙️ Workflow: <code>{wf.workflow_file}</code>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
             st.markdown(f"**Worker-Status:** {format_workflow_badge(wf.state)} ({wf.status_label})")
-            if safe_app_url != "#":
-                st.markdown(f"**Streamlit URL:** [{snap.spec.streamlit_url}]({safe_app_url})")
-
-        with col_meta:
-            if safe_repo_url != "#":
-                st.markdown(f"**GitHub Repo:** [{snap.spec.github_repo}]({safe_repo_url})")
             st.markdown(f"**Worker gestartet:** {format_iso_timestamp(wf.started_at)}")
             st.markdown(f"**Worker beendet:** {format_iso_timestamp(wf.updated_at)}")
+
+        with col_urls:
+            if safe_app_url != "#":
+                st.markdown(f"**Streamlit URL:** [{snap.spec.streamlit_url}]({safe_app_url})")
+            if safe_repo_url != "#":
+                st.markdown(f"**GitHub Repo:** [{snap.spec.github_repo}]({safe_repo_url})")
 
         st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
         _render_card_actions(snap, coordinator, repository, role, idx)

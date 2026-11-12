@@ -7,6 +7,7 @@ import streamlit as st
 from src.__version__ import __version__
 from src.checks.coordinator import FleetCheckCoordinator
 from src.config.settings import AppSettings, load_app_settings
+from src.domain.enums import AuthRole
 from src.domain.models import AppFleetSnapshot
 from src.storage.repository import SqlDashboardRepository, create_dashboard_repository
 from src.ui.auth_view import enforce_authentication
@@ -61,10 +62,18 @@ def run_streamlit_app() -> None:
                 label_visibility="collapsed",
             )
 
+            if role == AuthRole.ADMIN and settings.app_password.strip():
+                st.markdown("<div style='height: 16px;'></div>", unsafe_allow_html=True)
+                if st.button("🚪 Abmelden", use_container_width=True):
+                    from src.ui.auth_view import clear_auth_cookie
+
+                    clear_auth_cookie()
+                    st.session_state["just_logged_out"] = True
+                    st.rerun()
+
         if selected_page in {
             "📡 Dashboard",
             "📡 Übersicht",
-            "📡 Flotten-Übersicht",
             "🌐 Running & URLs",
         }:
             render_overview_view(snapshots, coordinator, repository, role)

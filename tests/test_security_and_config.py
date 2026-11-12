@@ -128,3 +128,25 @@ def test_secret_mapping_lookup_flatter_and_nested() -> None:
     assert _lookup_in_mapping(data, "RESEARCH_BOT_URL") == "https://nested.example.com"
     assert _lookup_in_mapping(data, "UNKNOWN_KEY") is None
 
+
+def test_30_day_auth_token_and_storage_scripts() -> None:
+    from src.config.constants import AUTH_COOKIE_MAX_AGE_SECONDS, AUTH_COOKIE_NAME
+    from src.ui.auth_view import (
+        _render_auto_restore_script,
+        _render_clear_storage_script,
+        _render_save_storage_script,
+    )
+
+    assert AUTH_COOKIE_MAX_AGE_SECONDS == 30 * 24 * 3600
+    assert AUTH_COOKIE_NAME == "bot_dashboard_auth_token"
+
+    secret = "test-secret-123"
+    token = generate_admin_token(secret)
+    assert verify_admin_token(token, secret, max_age_seconds=AUTH_COOKIE_MAX_AGE_SECONDS)
+
+    _render_save_storage_script(token)
+    _render_save_storage_script("invalid")
+    _render_clear_storage_script()
+    _render_auto_restore_script()
+
+

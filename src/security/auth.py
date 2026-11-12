@@ -86,7 +86,11 @@ def verify_readonly_token(token: str, password: str) -> bool:
     return hmac.compare_digest(parts[2], expected_sig)
 
 
-def resolve_credential_role(credential: str, expected_password: str) -> AuthRole:
+def resolve_credential_role(
+    credential: str,
+    expected_password: str,
+    max_age_seconds: int = ADMIN_TOKEN_MAX_AGE_SECONDS,
+) -> AuthRole:
     """Ermittelt die Zugriffsrolle anhand eines Passworts oder signierten Tokens."""
     clean_pw = expected_password.strip()
     if not clean_pw:
@@ -95,7 +99,9 @@ def resolve_credential_role(credential: str, expected_password: str) -> AuthRole
     candidate = credential.strip()
     if not candidate:
         return AuthRole.GUEST
-    if hmac.compare_digest(candidate, clean_pw) or verify_admin_token(candidate, clean_pw):
+    if hmac.compare_digest(candidate, clean_pw) or verify_admin_token(
+        candidate, clean_pw, max_age_seconds=max_age_seconds
+    ):
         return AuthRole.ADMIN
     if verify_readonly_token(candidate, clean_pw):
         return AuthRole.READONLY
