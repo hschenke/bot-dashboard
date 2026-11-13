@@ -33,14 +33,20 @@ def render_settings_view(
             "Status": "✅ Aktiv",
             "Details": repository.backend_name,
         },
+        {
+            "Komponente": "Dashboard Self-Wakeup (STREAMLIT_APP_URL)",
+            "Status": "✅ Konfiguriert" if settings.streamlit_app_url.strip() else "⚪ Nicht gesetzt",
+            "Details": settings.streamlit_app_url.strip()
+            or "In Streamlit Secrets & GitHub Actions Secrets für Auto-Wakeup hinterlegen",
+        },
     ]
     for spec in settings.managed_apps:
         db_mode = "Turso Cloud" if spec.has_turso_credentials else f"Lokal ({spec.local_sqlite_path})"
         matrix_rows.append(
             {
                 "Komponente": f"{spec.icon} {spec.title}",
-                "Status": "✅ Verbunden",
-                "Details": f"URL: {spec.streamlit_url} | Repo: {spec.github_repo} | DB: {db_mode}",
+                "Status": "✅ Verbunden" if spec.streamlit_url.strip() else "⚠️ URL fehlt",
+                "Details": f"URL: {spec.streamlit_url or '–'} | Repo: {spec.github_repo or '–'} | DB: {db_mode}",
             }
         )
     st.dataframe(matrix_rows, use_container_width=True, hide_index=True)

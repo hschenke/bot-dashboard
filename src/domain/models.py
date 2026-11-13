@@ -43,7 +43,7 @@ class ManagedAppSpec:
 class UrlCheckResult:
     """Ergebnis eines HTTP- & Streamlit-Health-Checks für eine Web-App."""
 
-    app_id: AppId
+    app_id: AppId | str
     target_url: str
     health_endpoint_url: str
     status: HealthStatus

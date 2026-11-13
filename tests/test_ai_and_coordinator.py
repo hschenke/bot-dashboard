@@ -147,4 +147,41 @@ def test_coordinator_checks_all_three_apps() -> None:
     results = coord.check_all_apps(repository=repo)
     assert len(results) == 3
     assert len(repo.list_recent_logs()) == 3
+
+    sleeping_snap = _make_snapshot(AppId.ALERT_BOT, url_status=HealthStatus.ASLEEP)
+    awake_snap = _make_snapshot(AppId.NEWS_BOT, url_status=HealthStatus.ONLINE)
+    mock_url.wake_app.return_value = (True, "Wakeup-Signal gesendet (HTTP 204).")
+    wake_results = coord.wake_sleeping_apps([awake_snap, sleeping_snap])
+    assert len(wake_results) == 1
+    assert wake_results[0][0] == sleeping_snap.spec.title
+    assert wake_results[0][1] is True
     repo.close()
+
+
+def test_cli_check_wakes_sleeping_apps_and_dashboard_url(monkeypatch: object) -> None:
+    from unittest.mock import patch
+
+    from src.worker.cli_check import run_cli_fleet_check
+
+    sleeping = _make_snapshot(AppId.NEWS_BOT, url_status=HealthStatus.ASLEEP)
+    dash_sleeping = sleeping.url_check
+    mock_coord = MagicMock()
+    mock_coord.check_all_apps.return_value = [sleeping]
+    mock_coord.wake_sleeping_apps.return_value = [("News-Bot", True, "HTTP 204")]
+    mock_coord.check_dashboard_url.return_value = dash_sleeping
+    mock_coord.url_probe.wake_app.return_value = (True, "HTTP 204")
+
+    mock_repo = MagicMock()
+    with (
+        patch("src.worker.cli_check.load_app_settings", return_value=AppSettings(streamlit_app_url="https://holli-bot-dashboard.streamlit.app/")),
+        patch("src.worker.cli_check.create_dashboard_repository", return_value=mock_repo),
+        patch("src.worker.cli_check.FleetCheckCoordinator", return_value=mock_coord),
+    ):
+        exit_code = run_cli_fleet_check(wake_sleeping=True)
+
+    assert exit_code == 0
+    mock_coord.wake_sleeping_apps.assert_called_once()
+    mock_coord.check_dashboard_url.assert_called_once()
+    mock_coord.url_probe.wake_app.assert_called_once_with(dash_sleeping.target_url)
+    mock_repo.close.assert_called_once()
+

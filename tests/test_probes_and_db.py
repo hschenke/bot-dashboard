@@ -58,7 +58,7 @@ def test_url_probe_detects_online_and_sleeping_apps() -> None:
     assert res.is_streamlit_awake is True
     assert res.health_endpoint_ok is True
 
-    # Sleeping Streamlit app simulation
+    # Sleeping Streamlit app simulation (explicit sleep HTML)
     def _sleeping_get(url: str, **kwargs: Any) -> MagicMock:
         resp = MagicMock()
         resp.is_redirect = False
@@ -71,6 +71,96 @@ def test_url_probe_detects_online_and_sleeping_apps() -> None:
     res_sleep = probe.check_app_url(_sample_spec())
     assert res_sleep.status == HealthStatus.ASLEEP
     assert res_sleep.is_streamlit_awake is False
+    assert res_sleep.health_endpoint_ok is False
+
+
+def test_url_probe_detects_sleeping_streamlit_cloud_spa_without_sleep_html() -> None:
+    """Reproduziert den Bug: Community Cloud liefert auf `/` und `/_stcore/health` HTTP 200 HTML."""
+    mock_session = MagicMock()
+
+    def _cloud_sleeping_get(url: str, **kwargs: Any) -> MagicMock:
+        resp = MagicMock()
+        resp.is_redirect = False
+        resp.encoding = "utf-8"
+        if "api/v2/app/status" in url:
+            resp.status_code = 200
+            resp.iter_content.return_value = [b'{"status": 7, "platformStatus": 0}']
+        elif "~/+/_stcore/health" in url:
+            resp.status_code = 503
+            resp.iter_content.return_value = [b"Service Unavailable"]
+        else:
+            # Host SPA shell returns 200 HTML with "token" / "cookie" containing "ok"
+            resp.status_code = 200
+            resp.iter_content.return_value = [
+                b'<!doctype html><html><head><title>Streamlit</title></head><body><div id="root">cookie</div></body></html>'
+            ]
+        return resp
+
+    mock_session.get.side_effect = _cloud_sleeping_get
+    probe = SafeUrlProbe(
+        session=mock_session,
+        dns_resolver=lambda host, port: ["35.190.10.10"],
+    )
+    res = probe.check_app_url(_sample_spec())
+    assert res.status == HealthStatus.ASLEEP
+    assert res.is_streamlit_awake is False
+    assert res.health_endpoint_ok is False
+
+
+def test_url_probe_detects_sleeping_cloud_even_when_status_api_unavailable() -> None:
+    mock_session = MagicMock()
+
+    def _spa_only_get(url: str, **kwargs: Any) -> MagicMock:
+        resp = MagicMock()
+        resp.is_redirect = False
+        resp.encoding = "utf-8"
+        if "api/v2/app/status" in url:
+            resp.status_code = 404
+            resp.iter_content.return_value = [b"Not Found"]
+        else:
+            resp.status_code = 200
+            resp.iter_content.return_value = [b"<html><body><div id='root'>ok</div></body></html>"]
+        return resp
+
+    mock_session.get.side_effect = _spa_only_get
+    probe = SafeUrlProbe(
+        session=mock_session,
+        dns_resolver=lambda host, port: ["35.190.10.10"],
+    )
+    res = probe.check_app_url(_sample_spec())
+    assert res.status == HealthStatus.ASLEEP
+    assert res.is_streamlit_awake is False
+    assert res.health_endpoint_ok is False
+
+
+def test_url_probe_wake_app_calls_status_and_resume_with_csrf() -> None:
+    mock_session = MagicMock()
+    status_resp = MagicMock()
+    status_resp.status_code = 200
+    status_resp.headers = {"x-csrf-token": "csrf-xyz-123"}
+    status_resp.cookies = {"_streamlit_csrf": "csrf-xyz-123"}
+    mock_session.get.return_value = status_resp
+
+    resume_resp = MagicMock()
+    resume_resp.status_code = 204
+    mock_session.post.return_value = resume_resp
+
+    probe = SafeUrlProbe(
+        session=mock_session,
+        dns_resolver=lambda host, port: ["35.190.10.10"],
+    )
+    ok, msg = probe.wake_app("https://holli-alert-bot.streamlit.app/")
+    assert ok is True
+    assert "204" in msg
+
+    post_call = mock_session.post.call_args
+    assert post_call.args[0] == "https://holli-alert-bot.streamlit.app/api/v2/app/resume"
+    assert post_call.kwargs["headers"]["x-csrf-token"] == "csrf-xyz-123"
+    assert post_call.kwargs["headers"]["origin"] == "https://holli-alert-bot.streamlit.app"
+    assert "x-streamlit-machine-id" in post_call.kwargs["headers"]
+
+    non_cloud_ok, _ = probe.wake_app("https://example.com/")
+    assert non_cloud_ok is False
 
 
 def test_github_workflow_probe_parses_runs_and_triggers_dispatch() -> None:

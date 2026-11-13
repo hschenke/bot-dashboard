@@ -64,6 +64,29 @@ class FleetCheckCoordinator:
     def github_probe(self) -> GitHubWorkflowProbe:
         return self._github_probe
 
+    @property
+    def url_probe(self) -> SafeUrlProbe:
+        return self._url_probe
+
+    def check_dashboard_url(self) -> UrlCheckResult | None:
+        """Prüft die eigene Streamlit-URL des Dashboards (`STREAMLIT_APP_URL`)."""
+        raw = self._settings.streamlit_app_url.strip()
+        if not raw:
+            return None
+        return self._url_probe.check_url(raw, app_id="bot_dashboard")
+
+    def wake_sleeping_apps(self, snapshots: list[AppFleetSnapshot]) -> list[tuple[str, bool, str]]:
+        """Sendet Wakeup-Signale an alle aktuell nicht wachen überwachten Streamlit Cloud Apps."""
+        results: list[tuple[str, bool, str]] = []
+        for snap in snapshots:
+            raw_url = snap.spec.streamlit_url.strip()
+            if not raw_url or snap.url_check.is_streamlit_awake:
+                continue
+            if snap.url_check.status in {HealthStatus.ASLEEP, HealthStatus.DEGRADED}:
+                ok, msg = self._url_probe.wake_app(raw_url)
+                results.append((snap.spec.title, ok, msg))
+        return results
+
     def check_single_app(
         self,
         spec: ManagedAppSpec,

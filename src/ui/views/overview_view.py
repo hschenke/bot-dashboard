@@ -18,19 +18,29 @@ from src.ui.formatters import (
 
 
 def _render_header(
+    snapshots: list[AppFleetSnapshot],
     coordinator: FleetCheckCoordinator,
     repository: SqlDashboardRepository,
+    role: AuthRole,
 ) -> None:
-    head_col, action_col = st.columns([2.5, 1.5], vertical_alignment="center")
-    with head_col:
+    has_sleeping = any(s.url_check.status == HealthStatus.ASLEEP for s in snapshots)
+    show_wake_all = role == AuthRole.ADMIN and has_sleeping
+    cols = st.columns([2.2, 1.2, 1.2] if show_wake_all else [2.5, 1.5], vertical_alignment="center")
+    with cols[0]:
         st.title("Holli Dashboard")
-    with action_col:
+    with cols[1]:
         if st.button("⚡ Alle Apps jetzt prüfen", type="primary", use_container_width=True):
             with st.spinner("Prüfe URLs, GitHub Workflows & Datenbanken..."):
                 st.session_state["fleet_snapshots"] = coordinator.check_all_apps(
                     repository=repository
                 )
             st.rerun()
+    if show_wake_all:
+        with cols[2]:
+            if st.button("☀️ Schlafende aufwecken", use_container_width=True):
+                with st.spinner("Sende Wakeup-Signale an schlafende Apps..."):
+                    for title, ok, msg in coordinator.wake_sleeping_apps(snapshots):
+                        st.success(f"{title}: {msg}") if ok else st.warning(f"{title}: {msg}")
 
 
 def _render_fleet_kpi_row(snapshots: list[AppFleetSnapshot]) -> None:
@@ -56,6 +66,7 @@ def _render_url_table_section(snapshots: list[AppFleetSnapshot]) -> None:
             "/_stcore/health": "✅ OK" if snap.url_check.health_endpoint_ok else "⚠️ Nicht bestätigt",
             "HTTP-Code": snap.url_check.http_status_code or "–",
             "Latenz (ms)": snap.url_check.latency_ms,
+            "Details": snap.url_check.message,
         }
         for snap in snapshots
     ]
@@ -71,7 +82,7 @@ def _render_card_actions(
 ) -> None:
     safe_app_url = sanitize_display_url(snap.spec.streamlit_url)
     safe_run_url = sanitize_display_url(snap.workflow_check.run_url)
-    is_admin = (role == AuthRole.ADMIN)
+    is_admin = role == AuthRole.ADMIN
 
     cols = st.columns(4 if is_admin else 3)
     with cols[0]:
@@ -106,6 +117,18 @@ def _render_card_actions(
                     st.success(msg)
                 except ProbeError as exc:
                     st.error(str(exc))
+        if (
+            snap.url_check.status == HealthStatus.ASLEEP
+            and safe_app_url != "#"
+            and st.button(
+                "☀️ Schlafende App aufwecken",
+                key=f"wake_app_{snap.spec.app_id.value}",
+                use_container_width=True,
+            )
+        ):
+            with st.spinner(f"Wecke {snap.spec.title} auf..."):
+                ok, msg = coordinator.url_probe.wake_app(snap.spec.streamlit_url)
+                st.success(msg) if ok else st.warning(msg)
 
 
 def _render_worker_card(
@@ -167,7 +190,7 @@ def render_overview_view(
     role: AuthRole = AuthRole.READONLY,
 ) -> None:
     """Rendert die zentrale Dashboard-Übersicht (KPIs, URL-Status & Cloud-Worker)."""
-    _render_header(coordinator, repository)
+    _render_header(snapshots, coordinator, repository, role)
     _render_fleet_kpi_row(snapshots)
     st.divider()
     _render_url_table_section(snapshots)

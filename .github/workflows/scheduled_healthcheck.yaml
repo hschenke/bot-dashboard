@@ -3,7 +3,7 @@ name: Fleet Health-Check & Wakeup
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "17 */2 * * *"
 
 jobs:
   check-fleet:
@@ -28,12 +28,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-worker.txt
 
-      - name: Flotten-Checks für alle 3 Apps ausführen
+      - name: Flotten-Checks & Wakeup für alle Apps + Dashboard ausführen
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GH_FLEET_TOKEN }}
           TURSO_URL: ${{ secrets.TURSO_URL }}
           TURSO_KEY: ${{ secrets.TURSO_KEY }}
+          STREAMLIT_APP_URL: ${{ secrets.STREAMLIT_APP_URL }}
           NEWS_BOT_URL: ${{ secrets.NEWS_BOT_URL }}
           NEWS_BOT_TURSO_URL: ${{ secrets.NEWS_BOT_TURSO_URL }}
           NEWS_BOT_TURSO_KEY: ${{ secrets.NEWS_BOT_TURSO_KEY }}
@@ -43,4 +44,4 @@ jobs:
           ALERT_BOT_URL: ${{ secrets.ALERT_BOT_URL }}
           ALERT_BOT_TURSO_URL: ${{ secrets.ALERT_BOT_TURSO_URL }}
           ALERT_BOT_TURSO_KEY: ${{ secrets.ALERT_BOT_TURSO_KEY }}
-        run: python -m src.worker.cli_check
+        run: python -m src.worker.cli_check --wake

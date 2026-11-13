@@ -131,3 +131,62 @@ def test_format_iso_timestamp_format() -> None:
     assert format_iso_timestamp("") == "–"
     assert format_iso_timestamp(None) == "–"
 
+
+@patch("streamlit.columns", side_effect=_fake_columns)
+@patch("streamlit.container", return_value=_DummyContext())
+@patch("streamlit.expander", return_value=_DummyContext())
+@patch("streamlit.title")
+@patch("streamlit.subheader")
+@patch("streamlit.caption")
+@patch("streamlit.markdown")
+@patch("streamlit.divider")
+@patch("streamlit.dataframe")
+@patch("streamlit.link_button")
+@patch("streamlit.button", return_value=False)
+def test_render_overview_view_shows_wakeup_controls_for_sleeping_app(
+    mock_btn: MagicMock,
+    mock_link: MagicMock,
+    mock_df: MagicMock,
+    mock_div: MagicMock,
+    mock_md: MagicMock,
+    mock_cap: MagicMock,
+    mock_sub: MagicMock,
+    mock_title: MagicMock,
+    mock_expander: MagicMock,
+    mock_container: MagicMock,
+    mock_cols: MagicMock,
+) -> None:
+    base = _create_mock_snapshot()
+    sleeping_url = UrlCheckResult(
+        app_id=AppId.NEWS_BOT,
+        target_url=base.spec.streamlit_url,
+        health_endpoint_url=f"{base.spec.streamlit_url}~/+/_stcore/health",
+        status=HealthStatus.ASLEEP,
+        http_status_code=200,
+        latency_ms=110,
+        is_streamlit_awake=False,
+        health_endpoint_ok=False,
+        message="Cloud-Status: Ruhezustand/Inaktiv (status=7)",
+        checked_at="2026-11-13T10:00:00+00:00",
+    )
+    sleeping_snap = AppFleetSnapshot(
+        spec=base.spec,
+        overall_status=HealthStatus.ASLEEP,
+        url_check=sleeping_url,
+        workflow_check=base.workflow_check,
+        db_check=base.db_check,
+        checked_at=base.checked_at,
+    )
+    coordinator = MagicMock(spec=FleetCheckCoordinator)
+    repository = MagicMock()
+
+    render_overview_view([sleeping_snap], coordinator, repository, role=AuthRole.ADMIN)
+
+    df_rows = mock_df.call_args[0][0]
+    assert df_rows[0]["Wach (Awake)"] == "🌙 Nein (Schläft)"
+    assert "Cloud-Status" in df_rows[0]["Details"]
+    btn_labels = [call.args[0] for call in mock_btn.call_args_list]
+    assert "☀️ Schlafende aufwecken" in btn_labels
+    assert "☀️ Schlafende App aufwecken" in btn_labels
+
+

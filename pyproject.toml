@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bot-dashboard"
-version = "0.5.0"
+version = "0.5.1"
 description = "Zentrales Monitoring-, DB-, URL-, Worker- und KI-Dashboard für die 3 Streamlit Cloud Apps (News-Bot, Research-Bot, Alert-Bot)."
 readme = "README.md"
 requires-python = ">=3.11"
