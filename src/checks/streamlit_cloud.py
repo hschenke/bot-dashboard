@@ -73,7 +73,7 @@ def parse_streamlit_cloud_status(status_code: int, body_text: str) -> tuple[str 
         return None, ""
 
     upper_val = str(raw_status).strip().upper()
-    if raw_status == 5 or upper_val == "RUNNING":
+    if raw_status == 5 or upper_val in {"5", "RUNNING"}:
         return "running", f"Cloud-Status: RUNNING ({raw_status})"
     if upper_val in {"ERROR", "FAILED", "CRASHED"}:
         return "error", f"Cloud-Status: Fehler ({raw_status})"

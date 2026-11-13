@@ -39,6 +39,21 @@ div[data-testid="stLinkButton"] > a {
     white-space: nowrap !important;
 }
 
+/* Kompakte Feedback-Banner ohne vertikales Aufblähen */
+div[data-testid="stAlert"] {
+    margin-bottom: 0.4rem !important;
+}
+div[data-testid="stAlert"] > div {
+    padding: 0.55rem 0.9rem !important;
+    border-radius: 10px !important;
+    min-height: 42px !important;
+}
+div[data-testid="stAlert"] p {
+    margin: 0 !important;
+    font-size: 0.92rem !important;
+    line-height: 1.35 !important;
+}
+
 /* Kompakte App-Cards im Dashboard */
 div[data-testid="stVerticalBlockBorderWrapper"] {
     border-radius: 12px;

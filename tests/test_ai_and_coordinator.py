@@ -185,3 +185,92 @@ def test_cli_check_wakes_sleeping_apps_and_dashboard_url(monkeypatch: object) ->
     mock_coord.url_probe.wake_app.assert_called_once_with(dash_sleeping.target_url)
     mock_repo.close.assert_called_once()
 
+
+def test_wake_and_refresh_apps_stops_early_and_refreshes_snapshots() -> None:
+    settings = load_app_settings(allow_sibling_env_fallback=False)
+    mock_url = MagicMock()
+    mock_gh = MagicMock()
+    mock_db = MagicMock()
+
+    online_snap = _make_snapshot(AppId.NEWS_BOT, url_status=HealthStatus.ONLINE)
+    asleep_snap = _make_snapshot(AppId.ALERT_BOT, url_status=HealthStatus.ASLEEP)
+    mock_gh.check_primary_workflow.return_value = online_snap.workflow_check
+    mock_db.inspect_bot_database.return_value = online_snap.db_check
+    mock_url.wake_app.return_value = (True, "Wakeup-Signal gesendet (HTTP 204).")
+
+    poll_calls = 0
+
+    def _check_app_url(spec: ManagedAppSpec) -> UrlCheckResult:
+        nonlocal poll_calls
+        if spec.app_id == AppId.ALERT_BOT:
+            poll_calls += 1
+            return asleep_snap.url_check if poll_calls == 1 else online_snap.url_check
+        return online_snap.url_check
+
+    mock_url.check_app_url.side_effect = _check_app_url
+    sleep_calls: list[float] = []
+
+    coord = FleetCheckCoordinator(
+        settings,
+        url_probe=mock_url,
+        github_probe=mock_gh,
+        db_inspector=mock_db,
+    )
+    wake_results, updated = coord.wake_and_refresh_apps(
+        [online_snap, asleep_snap],
+        wait_timeout_seconds=9.0,
+        poll_interval_seconds=3.0,
+        sleep_fn=sleep_calls.append,
+    )
+
+    assert len(wake_results) == 1
+    assert wake_results[0][0] == asleep_snap.spec.title
+    assert sleep_calls == [3.0, 3.0]
+    assert len(updated) == 3
+    assert all(s.url_check.is_streamlit_awake for s in updated)
+
+
+def test_wake_and_refresh_apps_respects_timeout_and_single_app_wake() -> None:
+    settings = load_app_settings(allow_sibling_env_fallback=False)
+    mock_url = MagicMock()
+    mock_gh = MagicMock()
+    mock_db = MagicMock()
+
+    asleep_snap = _make_snapshot(AppId.RESEARCH_BOT, url_status=HealthStatus.ASLEEP)
+    online_snap = _make_snapshot(AppId.RESEARCH_BOT, url_status=HealthStatus.ONLINE)
+    mock_gh.check_primary_workflow.return_value = asleep_snap.workflow_check
+    mock_db.inspect_bot_database.return_value = asleep_snap.db_check
+    mock_url.wake_app.return_value = (True, "Wakeup-Signal gesendet (HTTP 204).")
+    mock_url.check_app_url.return_value = asleep_snap.url_check
+
+    sleep_calls: list[float] = []
+    coord = FleetCheckCoordinator(
+        settings,
+        url_probe=mock_url,
+        github_probe=mock_gh,
+        db_inspector=mock_db,
+    )
+    _, updated = coord.wake_and_refresh_apps(
+        [asleep_snap],
+        wait_timeout_seconds=7.0,
+        poll_interval_seconds=3.0,
+        sleep_fn=sleep_calls.append,
+    )
+    assert sleep_calls == [3.0, 3.0, 1.0]
+    assert all(not s.url_check.is_streamlit_awake for s in updated)
+
+    # Single app wake succeeds and stops immediately once awake
+    single_sleep: list[float] = []
+    mock_url.check_app_url.return_value = online_snap.url_check
+    ok, msg, single_updated = coord.wake_and_refresh_single_app(
+        online_snap.spec,
+        wait_timeout_seconds=9.0,
+        poll_interval_seconds=3.0,
+        sleep_fn=single_sleep.append,
+    )
+    assert ok is True
+    assert "204" in msg
+    assert single_sleep == [3.0]
+    assert single_updated.url_check.is_streamlit_awake is True
+
+

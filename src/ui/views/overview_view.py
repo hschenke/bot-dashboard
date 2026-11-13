@@ -6,7 +6,6 @@ import streamlit as st
 
 from src.checks.coordinator import FleetCheckCoordinator
 from src.domain.enums import AuthRole, HealthStatus
-from src.domain.exceptions import ProbeError
 from src.domain.models import AppFleetSnapshot
 from src.security.sanitization import sanitize_display_url
 from src.storage.repository import SqlDashboardRepository
@@ -15,6 +14,21 @@ from src.ui.formatters import (
     format_iso_timestamp,
     format_workflow_badge,
 )
+from src.ui.views.overview_feedback import (
+    render_feedback_banner,
+    run_wake_all_action,
+    run_wake_single_action,
+    run_worker_trigger_action,
+    update_single_snapshot_state,
+)
+
+
+def _has_waking_candidate(snap: AppFleetSnapshot) -> bool:
+    return (
+        bool(snap.spec.streamlit_url.strip())
+        and not snap.url_check.is_streamlit_awake
+        and snap.url_check.status in {HealthStatus.ASLEEP, HealthStatus.DEGRADED}
+    )
 
 
 def _render_header(
@@ -23,24 +37,23 @@ def _render_header(
     repository: SqlDashboardRepository,
     role: AuthRole,
 ) -> None:
-    has_sleeping = any(s.url_check.status == HealthStatus.ASLEEP for s in snapshots)
+    has_sleeping = any(_has_waking_candidate(s) for s in snapshots)
     show_wake_all = role == AuthRole.ADMIN and has_sleeping
-    cols = st.columns([2.2, 1.2, 1.2] if show_wake_all else [2.5, 1.5], vertical_alignment="center")
+    cols = st.columns([2.4, 1.0, 1.1] if show_wake_all else [3.4, 1.1], vertical_alignment="center")
     with cols[0]:
         st.title("Holli Dashboard")
     with cols[1]:
-        if st.button("⚡ Alle Apps jetzt prüfen", type="primary", use_container_width=True):
+        if st.button("⚡ Alle prüfen", type="primary", use_container_width=True):
             with st.spinner("Prüfe URLs, GitHub Workflows & Datenbanken..."):
                 st.session_state["fleet_snapshots"] = coordinator.check_all_apps(
                     repository=repository
                 )
+                st.session_state.pop("overview_feedback", None)
             st.rerun()
     if show_wake_all:
         with cols[2]:
-            if st.button("☀️ Schlafende aufwecken", use_container_width=True):
-                with st.spinner("Sende Wakeup-Signale an schlafende Apps..."):
-                    for title, ok, msg in coordinator.wake_sleeping_apps(snapshots):
-                        st.success(f"{title}: {msg}") if ok else st.warning(f"{title}: {msg}")
+            if st.button("☀️ Alle aufwecken", use_container_width=True):
+                run_wake_all_action(snapshots, coordinator, repository)
 
 
 def _render_fleet_kpi_row(snapshots: list[AppFleetSnapshot]) -> None:
@@ -66,7 +79,6 @@ def _render_url_table_section(snapshots: list[AppFleetSnapshot]) -> None:
             "/_stcore/health": "✅ OK" if snap.url_check.health_endpoint_ok else "⚠️ Nicht bestätigt",
             "HTTP-Code": snap.url_check.http_status_code or "–",
             "Latenz (ms)": snap.url_check.latency_ms,
-            "Details": snap.url_check.message,
         }
         for snap in snapshots
     ]
@@ -83,8 +95,10 @@ def _render_card_actions(
     safe_app_url = sanitize_display_url(snap.spec.streamlit_url)
     safe_run_url = sanitize_display_url(snap.workflow_check.run_url)
     is_admin = role == AuthRole.ADMIN
+    can_wake = is_admin and _has_waking_candidate(snap) and safe_app_url != "#"
+    app_key = snap.spec.app_id.value
 
-    cols = st.columns(4 if is_admin else 3)
+    cols = st.columns(5 if can_wake else (4 if is_admin else 3))
     with cols[0]:
         if safe_app_url != "#":
             st.link_button("🌐 Web-App öffnen", safe_app_url, use_container_width=True)
@@ -92,43 +106,21 @@ def _render_card_actions(
         if safe_run_url != "#":
             st.link_button("📋 Action Log", safe_run_url, use_container_width=True)
     with cols[2]:
-        if st.button(
-            "🔄 App prüfen",
-            key=f"refresh_single_{snap.spec.app_id.value}",
-            use_container_width=True,
-        ):
+        if st.button("🔄 App prüfen", key=f"refresh_single_{app_key}", use_container_width=True):
             with st.spinner(f"Prüfe {snap.spec.title}..."):
                 updated = coordinator.check_single_app(snap.spec, repository=repository)
-                current = list(st.session_state.get("fleet_snapshots", []))
-                if idx < len(current):
-                    current[idx] = updated
-                    st.session_state["fleet_snapshots"] = current
+            update_single_snapshot_state(idx, updated)
             st.rerun()
 
-    if is_admin:
-        with cols[3]:
-            if st.button(
-                "▶️ Worker starten",
-                key=f"trigger_wf_{snap.spec.app_id.value}",
-                use_container_width=True,
-            ):
-                try:
-                    msg = coordinator.github_probe.trigger_workflow_dispatch(snap.spec)
-                    st.success(msg)
-                except ProbeError as exc:
-                    st.error(str(exc))
-        if (
-            snap.url_check.status == HealthStatus.ASLEEP
-            and safe_app_url != "#"
-            and st.button(
-                "☀️ Schlafende App aufwecken",
-                key=f"wake_app_{snap.spec.app_id.value}",
-                use_container_width=True,
-            )
-        ):
-            with st.spinner(f"Wecke {snap.spec.title} auf..."):
-                ok, msg = coordinator.url_probe.wake_app(snap.spec.streamlit_url)
-                st.success(msg) if ok else st.warning(msg)
+    if not is_admin:
+        return
+    with cols[3]:
+        if st.button("▶️ Worker starten", key=f"trigger_wf_{app_key}", use_container_width=True):
+            run_worker_trigger_action(snap, coordinator)
+    if can_wake:
+        with cols[4]:
+            if st.button("☀️ App aufwecken", key=f"wake_app_{app_key}", use_container_width=True):
+                run_wake_single_action(snap, idx, coordinator, repository)
 
 
 def _render_worker_card(
@@ -191,6 +183,7 @@ def render_overview_view(
 ) -> None:
     """Rendert die zentrale Dashboard-Übersicht (KPIs, URL-Status & Cloud-Worker)."""
     _render_header(snapshots, coordinator, repository, role)
+    render_feedback_banner(coordinator, repository)
     _render_fleet_kpi_row(snapshots)
     st.divider()
     _render_url_table_section(snapshots)

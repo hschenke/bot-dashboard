@@ -163,6 +163,16 @@ def test_url_probe_wake_app_calls_status_and_resume_with_csrf() -> None:
     assert non_cloud_ok is False
 
 
+def test_parse_streamlit_cloud_status_handles_numeric_and_string_states() -> None:
+    from src.checks.streamlit_cloud import parse_streamlit_cloud_status
+
+    assert parse_streamlit_cloud_status(200, '{"status": 5}')[0] == "running"
+    assert parse_streamlit_cloud_status(200, '{"status": "5"}')[0] == "running"
+    assert parse_streamlit_cloud_status(200, '{"status": "RUNNING"}')[0] == "running"
+    assert parse_streamlit_cloud_status(200, '{"status": 12}')[0] == "asleep"
+    assert parse_streamlit_cloud_status(200, '{"state": "ERROR"}')[0] == "error"
+
+
 def test_github_workflow_probe_parses_runs_and_triggers_dispatch() -> None:
     mock_session = MagicMock()
     run_resp = MagicMock()

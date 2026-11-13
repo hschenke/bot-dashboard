@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
@@ -22,6 +24,16 @@ from src.storage.repository import SqlDashboardRepository
 
 def _utc_now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat()
+
+
+def _wake_targets(snapshots: list[AppFleetSnapshot]) -> list[AppFleetSnapshot]:
+    return [
+        snap
+        for snap in snapshots
+        if snap.spec.streamlit_url.strip()
+        and not snap.url_check.is_streamlit_awake
+        and snap.url_check.status in {HealthStatus.ASLEEP, HealthStatus.DEGRADED}
+    ]
 
 
 def derive_overall_health(
@@ -76,16 +88,67 @@ class FleetCheckCoordinator:
         return self._url_probe.check_url(raw, app_id="bot_dashboard")
 
     def wake_sleeping_apps(self, snapshots: list[AppFleetSnapshot]) -> list[tuple[str, bool, str]]:
-        """Sendet Wakeup-Signale an alle aktuell nicht wachen überwachten Streamlit Cloud Apps."""
-        results: list[tuple[str, bool, str]] = []
-        for snap in snapshots:
-            raw_url = snap.spec.streamlit_url.strip()
-            if not raw_url or snap.url_check.is_streamlit_awake:
-                continue
-            if snap.url_check.status in {HealthStatus.ASLEEP, HealthStatus.DEGRADED}:
-                ok, msg = self._url_probe.wake_app(raw_url)
-                results.append((snap.spec.title, ok, msg))
-        return results
+        """Sendet Wakeup-Signale parallel an alle nicht wachen überwachten Streamlit Cloud Apps."""
+        targets = _wake_targets(snapshots)
+        if not targets:
+            return []
+
+        def _wake_one(snap: AppFleetSnapshot) -> tuple[str, bool, str]:
+            ok, msg = self._url_probe.wake_app(snap.spec.streamlit_url.strip())
+            return snap.spec.title, ok, msg
+
+        with ThreadPoolExecutor(max_workers=len(targets)) as pool:
+            return list(pool.map(_wake_one, targets))
+
+    def _wait_until_specs_awake(
+        self,
+        specs: list[ManagedAppSpec],
+        wait_timeout_seconds: float,
+        poll_interval_seconds: float,
+        sleep_fn: Callable[[float], None],
+    ) -> None:
+        if not specs or wait_timeout_seconds <= 0 or poll_interval_seconds <= 0:
+            return
+        pending, elapsed = list(specs), 0.0
+        while pending and elapsed < wait_timeout_seconds:
+            step = min(poll_interval_seconds, wait_timeout_seconds - elapsed)
+            sleep_fn(step)
+            elapsed += step
+            with ThreadPoolExecutor(max_workers=len(pending)) as pool:
+                url_results = list(pool.map(self._url_probe.check_app_url, pending))
+            pending = [
+                s for s, r in zip(pending, url_results, strict=True) if not r.is_streamlit_awake
+            ]
+
+    def wake_and_refresh_apps(
+        self,
+        snapshots: list[AppFleetSnapshot],
+        repository: SqlDashboardRepository | None = None,
+        wait_timeout_seconds: float = 9.0,
+        poll_interval_seconds: float = 3.0,
+        sleep_fn: Callable[[float], None] = time.sleep,
+    ) -> tuple[list[tuple[str, bool, str]], list[AppFleetSnapshot]]:
+        """Weckt schlafende Apps, wartet kurz auf den Start und aktualisiert alle Snapshots."""
+        targets = _wake_targets(snapshots)
+        wake_results = self.wake_sleeping_apps(snapshots)
+        ok_titles = {title for title, ok, _ in wake_results if ok}
+        poll_specs = [snap.spec for snap in targets if snap.spec.title in ok_titles]
+        self._wait_until_specs_awake(poll_specs, wait_timeout_seconds, poll_interval_seconds, sleep_fn)
+        return wake_results, self.check_all_apps(repository=repository)
+
+    def wake_and_refresh_single_app(
+        self,
+        spec: ManagedAppSpec,
+        repository: SqlDashboardRepository | None = None,
+        wait_timeout_seconds: float = 9.0,
+        poll_interval_seconds: float = 3.0,
+        sleep_fn: Callable[[float], None] = time.sleep,
+    ) -> tuple[bool, str, AppFleetSnapshot]:
+        """Weckt eine einzelne App auf, wartet kurz auf den Start und aktualisiert ihren Snapshot."""
+        ok, msg = self._url_probe.wake_app(spec.streamlit_url.strip())
+        if ok:
+            self._wait_until_specs_awake([spec], wait_timeout_seconds, poll_interval_seconds, sleep_fn)
+        return ok, msg, self.check_single_app(spec, repository=repository)
 
     def check_single_app(
         self,
