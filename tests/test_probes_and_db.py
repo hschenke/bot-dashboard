@@ -22,7 +22,7 @@ def _sample_spec(app_id: AppId = AppId.ALERT_BOT) -> ManagedAppSpec:
     return ManagedAppSpec(
         app_id=app_id,
         title="Test-Bot",
-        icon="🔔",
+        icon=":material/notifications_active:",
         description="Test",
         streamlit_url="https://holli-alert-bot.streamlit.app/",
         github_repo="hschenke/alert-bot",

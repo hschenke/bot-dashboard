@@ -160,8 +160,20 @@ div[data-testid="stVerticalBlockBorderWrapper"] li {
     }
 }
 
-/* Unsichtbare Auth-Storage-Bridge ohne Layout-Abstand */
-div[data-testid="stElementContainer"]:has(.bot-dash-auth-bridge) {
+/* Kompakte, horizontal scrollbare Markdown-Tabellen (z. B. Health-Übersicht) */
+div[data-testid="stTable"],
+div[data-testid="stTable"] > div {
+    overflow-x: auto !important;
+    max-width: 100% !important;
+}
+div[data-testid="stElementContainer"]:has(.bot-dash-health-marker)
+    + div[data-testid="stElementContainer"]
+    table[data-testid="stTableStyledTable"] :is(th, td, [data-testid="stMarkdownContainer"] p) {
+    white-space: nowrap !important;
+}
+
+/* Unsichtbare Marker & Auth-Storage-Bridge ohne Layout-Abstand */
+div[data-testid="stElementContainer"]:has(:is(.bot-dash-health-marker, .bot-dash-auth-bridge)) {
     display: none !important;
     margin: 0 !important;
     padding: 0 !important;

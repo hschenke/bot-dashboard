@@ -6,7 +6,7 @@ import streamlit as st
 
 from src.domain.models import AppFleetSnapshot
 from src.security.sanitization import sanitize_display_url
-from src.ui.formatters import format_health_badge, format_iso_timestamp
+from src.ui.formatters import format_health_badge, format_iso_timestamp, render_markdown_table
 
 
 def _render_single_bot_db_tab(snap: AppFleetSnapshot) -> None:
@@ -72,7 +72,7 @@ def render_db_view(snapshots: list[AppFleetSnapshot]) -> None:
         }
         for s in snapshots
     ]
-    st.dataframe(overview_rows, use_container_width=True, hide_index=True)
+    render_markdown_table(overview_rows)
     st.divider()
 
     if not snapshots:

@@ -44,7 +44,7 @@ apps:
 
   alert_bot:
     title: "Alert-Bot"
-    icon: "🔔"
+    icon: ":material/notifications_active:"
     description: "24/7 Smart-Alert-Bot für Wetter, Mietwohnungen, Preise, Seitenänderungen & Uptime mit Anti-Spam-Gedächtnis."
     streamlit_url: ""
     github_repo: ""

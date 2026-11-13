@@ -6,7 +6,7 @@ import streamlit as st
 
 from src.config.settings import AppSettings
 from src.storage.repository import SqlDashboardRepository
-from src.ui.formatters import format_iso_timestamp
+from src.ui.formatters import format_iso_timestamp, render_markdown_table
 
 
 def render_settings_view(
@@ -49,7 +49,7 @@ def render_settings_view(
                 "Details": f"URL: {spec.streamlit_url or '–'} | Repo: {spec.github_repo or '–'} | DB: {db_mode}",
             }
         )
-    st.dataframe(matrix_rows, use_container_width=True, hide_index=True)
+    render_markdown_table(matrix_rows)
 
     st.divider()
     st.subheader("📜 Persistierte Check-Historie")

@@ -2,9 +2,19 @@
 
 from __future__ import annotations
 
+import inspect
 from datetime import datetime
+from typing import Any
+from urllib.parse import quote
+
+import streamlit as st
 
 from src.domain.enums import HealthStatus, WorkflowRunState
+from src.domain.exceptions import ValidationError
+from src.security.sanitization import sanitize_display_url, validate_workflow_filename
+
+_TABLE_SUPPORTS_BORDER = "border" in inspect.signature(st.table).parameters
+_TABLE_SUPPORTS_HIDE_INDEX = "hide_index" in inspect.signature(st.table).parameters
 
 
 def format_health_badge(status: HealthStatus) -> str:
@@ -57,3 +67,30 @@ def format_iso_timestamp(raw_iso: str | datetime | None) -> str:
         return dt.strftime("%d.%m.%Y - %H:%M")
     except Exception:
         return cleaned
+
+
+def build_workflow_file_url(
+    github_repo_url: str,
+    workflow_file: str,
+    branch: str = "main",
+) -> str:
+    """Erstellt einen sicheren GitHub-Link direkt zur Workflow-Datei im Repository."""
+    base = sanitize_display_url(github_repo_url).rstrip("/")
+    if base == "#":
+        return "#"
+    try:
+        safe_wf = validate_workflow_filename(workflow_file)
+    except ValidationError:
+        return "#"
+    clean_branch = quote((branch or "main").strip() or "main", safe="/")
+    return sanitize_display_url(f"{base}/blob/{clean_branch}/.github/workflows/{safe_wf}")
+
+
+def render_markdown_table(rows: list[dict[str, Any]]) -> None:
+    """Rendert eine kompakte Markdown-Tabelle ohne Index-Spalte (inkl. Versions-Fallback)."""
+    kwargs: dict[str, Any] = {}
+    if _TABLE_SUPPORTS_BORDER:
+        kwargs["border"] = "horizontal"
+    if _TABLE_SUPPORTS_HIDE_INDEX:
+        kwargs["hide_index"] = True
+    st.table(rows, **kwargs)

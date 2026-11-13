@@ -94,13 +94,13 @@ def _fake_columns(spec: Any, **kwargs: Any) -> list[_DummyContext]:
 @patch("streamlit.caption")
 @patch("streamlit.markdown")
 @patch("streamlit.divider")
-@patch("streamlit.dataframe")
+@patch("streamlit.table")
 @patch("streamlit.link_button")
 @patch("streamlit.button", return_value=False)
 def test_render_overview_view_renders_successfully(
     mock_btn: MagicMock,
     mock_link: MagicMock,
-    mock_df: MagicMock,
+    mock_table: MagicMock,
     mock_div: MagicMock,
     mock_md: MagicMock,
     mock_cap: MagicMock,
@@ -117,23 +117,33 @@ def test_render_overview_view_renders_successfully(
     render_overview_view([snapshot], coordinator, repository, role=AuthRole.ADMIN)
 
     mock_title.assert_called_once_with("Holli Dashboard")
-    mock_df.assert_called_once()
-    df_rows = mock_df.call_args[0][0]
-    assert "Streamlit URL" not in df_rows[0]
-    assert "GitHub Repo" not in df_rows[0]
-    assert "Details" not in df_rows[0]
-    assert mock_sub.call_count == 2
+    mock_table.assert_called_once()
+    table_rows = mock_table.call_args[0][0]
+    assert table_rows[0]["App"] == "📰 [News-Bot](https://holli-news-bot.streamlit.app/)"
+    assert "Streamlit URL" not in table_rows[0]
+    assert "GitHub Repo" not in table_rows[0]
+    assert "Details" not in table_rows[0]
+    sub_titles = [call.args[0] for call in mock_sub.call_args_list]
+    assert sub_titles == ["🌐 Health", "⚙️ Action"]
+    assert mock_expander.call_args.kwargs["expanded"] is False
     btn_labels = [call.args[0] for call in mock_btn.call_args_list]
     assert "⚡ Alle prüfen" in btn_labels
 
 
 def test_format_iso_timestamp_format() -> None:
-    from src.ui.formatters import format_iso_timestamp
+    from src.ui.formatters import build_workflow_file_url, format_iso_timestamp
 
     assert format_iso_timestamp("2026-11-12T07:05:00Z") == "12.11.2026 - 07:05"
     assert format_iso_timestamp("2026-11-12T10:30:00+00:00") == "12.11.2026 - 10:30"
     assert format_iso_timestamp("") == "–"
     assert format_iso_timestamp(None) == "–"
+
+    assert (
+        build_workflow_file_url("https://github.com/hschenke/news-bot", "daily_digest.yaml", "main")
+        == "https://github.com/hschenke/news-bot/blob/main/.github/workflows/daily_digest.yaml"
+    )
+    assert build_workflow_file_url("https://github.com/hschenke/news-bot", "../bad.yaml") == "#"
+    assert build_workflow_file_url("javascript:alert(1)", "daily_digest.yaml") == "#"
 
 
 @patch("streamlit.columns", side_effect=_fake_columns)
@@ -144,13 +154,13 @@ def test_format_iso_timestamp_format() -> None:
 @patch("streamlit.caption")
 @patch("streamlit.markdown")
 @patch("streamlit.divider")
-@patch("streamlit.dataframe")
+@patch("streamlit.table")
 @patch("streamlit.link_button")
 @patch("streamlit.button", return_value=False)
 def test_render_overview_view_shows_wakeup_controls_for_sleeping_app(
     mock_btn: MagicMock,
     mock_link: MagicMock,
-    mock_df: MagicMock,
+    mock_table: MagicMock,
     mock_div: MagicMock,
     mock_md: MagicMock,
     mock_cap: MagicMock,
@@ -186,9 +196,9 @@ def test_render_overview_view_shows_wakeup_controls_for_sleeping_app(
 
     render_overview_view([sleeping_snap], coordinator, repository, role=AuthRole.ADMIN)
 
-    df_rows = mock_df.call_args[0][0]
-    assert df_rows[0]["Awake"] == "🌙 Sleeping"
-    assert "Details" not in df_rows[0]
+    table_rows = mock_table.call_args[0][0]
+    assert table_rows[0]["Awake"] == "🌙 Sleeping"
+    assert "Details" not in table_rows[0]
     btn_labels = [call.args[0] for call in mock_btn.call_args_list]
     assert "⚡ Alle prüfen" in btn_labels
     assert "☀️ Alle aufwecken" in btn_labels
@@ -234,7 +244,7 @@ def test_queued_worker_renders_english_badge_status_link_and_active_end() -> Non
         patch("streamlit.caption") as mock_cap,
         patch("streamlit.markdown") as mock_md,
         patch("streamlit.divider"),
-        patch("streamlit.dataframe"),
+        patch("streamlit.table"),
         patch("streamlit.link_button"),
         patch("streamlit.button", return_value=False),
     ):
@@ -243,12 +253,17 @@ def test_queued_worker_renders_english_badge_status_link_and_active_end() -> Non
     expander_title = mock_exp.call_args.args[0]
     assert "⏳ Queued" in expander_title
     assert "Warteschlange" not in expander_title
+    assert mock_exp.call_args.kwargs["expanded"] is False
 
     md_calls = [call.args[0] for call in mock_md.call_args_list]
     cap_calls = [call.args[0] for call in mock_cap.call_args_list]
     assert any("[⏳ Queued](https://github.com/hschenke/alert-bot/actions/runs/999)" in m for m in md_calls)
     assert any("**Finished:** ⏳ Active" in m for m in md_calls)
-    assert any("[`check_alerts.yaml`](https://github.com/hschenke/alert-bot/actions/runs/999)" in c for c in cap_calls)
+    assert any(
+        "[`check_alerts.yaml`](https://github.com/hschenke/news-bot/blob/main/.github/workflows/check_alerts.yaml)"
+        in c
+        for c in cap_calls
+    )
 
 
 class _RerunCalled(Exception):
@@ -527,5 +542,133 @@ def test_poll_live_updates_detects_queued_worker_completion_and_steady_refresh()
     assert session_state["fleet_snapshots"] == [updated_db_snap]
 
 
+def test_alert_bot_icon_updated_and_no_yellow_bell_remains() -> None:
+    from pathlib import Path
 
+    from src.config.settings import load_app_settings
+
+    settings = load_app_settings(allow_sibling_env_fallback=False)
+    alert_spec = settings.get_app_spec(AppId.ALERT_BOT)
+    assert alert_spec.icon == ":material/notifications_active:"
+
+    root = Path(__file__).resolve().parent.parent
+    assert "🔔" not in (root / "config" / "settings.yaml").read_text(encoding="utf-8")
+    for py_file in (root / "src").rglob("*.py"):
+        assert "🔔" not in py_file.read_text(encoding="utf-8"), f"Veraltetes 🔔 in {py_file}"
+
+
+def test_apptest_overview_db_and_settings_views_render_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
+    from streamlit.testing.v1 import AppTest
+
+    monkeypatch.setenv("NEWS_BOT_URL", "https://holli-news-bot.streamlit.app/")
+    monkeypatch.setenv("RESEARCH_BOT_URL", "https://holli-research-bot.streamlit.app/")
+    monkeypatch.setenv("ALERT_BOT_URL", "https://holli-alert-bot.streamlit.app/")
+    monkeypatch.setenv("NEWS_BOT_REPO", "hschenke/news-bot")
+    monkeypatch.setenv("RESEARCH_BOT_REPO", "hschenke/research-bot")
+    monkeypatch.setenv("ALERT_BOT_REPO", "hschenke/alert-bot")
+
+    def _app() -> None:
+        from unittest.mock import MagicMock
+
+        import streamlit as st
+        from src.checks.coordinator import FleetCheckCoordinator
+        from src.config.settings import load_app_settings
+        from src.domain.enums import AuthRole, HealthStatus, WorkflowRunState
+        from src.domain.models import (
+            AppFleetSnapshot,
+            DatabaseHealthSummary,
+            DatabaseTableMetric,
+            UrlCheckResult,
+            WorkflowRunSummary,
+        )
+        from src.ui.views.db_view import render_db_view
+        from src.ui.views.overview_view import render_overview_view
+        from src.ui.views.settings_view import render_settings_view
+
+        settings = load_app_settings(allow_sibling_env_fallback=False)
+        snapshots = [
+            AppFleetSnapshot(
+                spec=spec,
+                overall_status=HealthStatus.ONLINE,
+                url_check=UrlCheckResult(
+                    app_id=spec.app_id,
+                    target_url=spec.streamlit_url,
+                    health_endpoint_url=f"{spec.streamlit_url}_stcore/health",
+                    status=HealthStatus.ONLINE,
+                    http_status_code=200,
+                    latency_ms=80,
+                    is_streamlit_awake=True,
+                    health_endpoint_ok=True,
+                    message="OK",
+                    checked_at="2026-11-13T12:00:00+00:00",
+                ),
+                workflow_check=WorkflowRunSummary(
+                    app_id=spec.app_id,
+                    workflow_file=spec.primary_workflow,
+                    state=WorkflowRunState.SUCCESS,
+                    status_label="Success",
+                    conclusion="success",
+                    run_url=f"https://github.com/{spec.github_repo}/actions/runs/42",
+                    branch="main",
+                    started_at="2026-11-13T11:00:00Z",
+                    updated_at="2026-11-13T11:02:00Z",
+                    message="OK",
+                ),
+                db_check=DatabaseHealthSummary(
+                    app_id=spec.app_id,
+                    backend_label="Turso Cloud",
+                    status=HealthStatus.ONLINE,
+                    latency_ms=30,
+                    table_metrics=(DatabaseTableMetric("articles", 10),),
+                    message="OK",
+                    checked_at="2026-11-13T12:00:00+00:00",
+                ),
+                checked_at="2026-11-13T12:00:00+00:00",
+            )
+            for spec in settings.managed_apps
+        ]
+        st.session_state["fleet_snapshots"] = snapshots
+        coord = MagicMock(spec=FleetCheckCoordinator)
+        repo = MagicMock()
+        repo.backend_name = "SQLite"
+        repo.list_recent_logs.return_value = []
+
+        render_overview_view(snapshots, coord, repo, role=AuthRole.ADMIN)
+        render_db_view(snapshots)
+        render_settings_view(settings, repo)
+
+    at = AppTest.from_function(_app).run()
+    assert not at.exception
+
+    # KPI-Reihe: DB-Einträge entfernt, nur 3 Overview-Metriken + 3x4 DB-Tab-Metriken
+    metric_labels = [m.label for m in at.metric]
+    assert metric_labels[:3] == ["Apps Online", "Apps Awake", "DBs Online"]
+    assert "DB-Einträge" not in metric_labels
+
+    # Abschnitts-Titel: Health & Action
+    subheaders = [s.value for s in at.subheader]
+    assert "🌐 Health" in subheaders
+    assert "⚙️ Action" in subheaders
+
+    # Alle 3 App-Detail-Boxen standardmäßig eingeklappt
+    assert len(at.expander) == 3
+    assert all(exp.proto.expanded is False for exp in at.expander)
+    assert any(":material/notifications_active: Alert-Bot" in exp.label for exp in at.expander)
+
+    # Health-Tabelle enthält alle 3 App-Links + neues Alert-Bot-Icon
+    assert len(at.table) >= 3
+    health_df = at.table[0].value
+    app_cells = list(health_df["App"])
+    assert "📰 [News-Bot](https://holli-news-bot.streamlit.app/)" in app_cells
+    assert "🔬 [Research-Bot](https://holli-research-bot.streamlit.app/)" in app_cells
+    assert ":material/notifications_active: [Alert-Bot](https://holli-alert-bot.streamlit.app/)" in app_cells
+
+    # Workflow-Datei-Link & Worker-Status-Link unterscheiden sich
+    captions = [c.value for c in at.caption]
+    markdowns = [m.value for m in at.markdown]
+    assert any(
+        "https://github.com/hschenke/alert-bot/blob/main/.github/workflows/check_alerts.yaml" in c
+        for c in captions
+    )
+    assert any("https://github.com/hschenke/alert-bot/actions/runs/42" in m for m in markdowns)
 
