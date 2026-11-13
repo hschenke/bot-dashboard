@@ -159,6 +159,14 @@ div[data-testid="stVerticalBlockBorderWrapper"] li {
         margin-bottom: 10px !important;
     }
 }
+
+/* Unsichtbare Auth-Storage-Bridge ohne Layout-Abstand */
+div[data-testid="stElementContainer"]:has(.bot-dash-auth-bridge) {
+    display: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    height: 0 !important;
+}
 </style>
 """
 

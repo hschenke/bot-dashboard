@@ -129,13 +129,11 @@ def test_secret_mapping_lookup_flatter_and_nested() -> None:
     assert _lookup_in_mapping(data, "UNKNOWN_KEY") is None
 
 
-def test_30_day_auth_token_and_storage_scripts() -> None:
+def test_30_day_auth_token_and_storage_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import MagicMock
+
     from src.config.constants import AUTH_COOKIE_MAX_AGE_SECONDS, AUTH_COOKIE_NAME
-    from src.ui.auth_view import (
-        _render_auto_restore_script,
-        _render_clear_storage_script,
-        _render_save_storage_script,
-    )
+    from src.ui import auth_storage
 
     assert AUTH_COOKIE_MAX_AGE_SECONDS == 30 * 24 * 3600
     assert AUTH_COOKIE_NAME == "bot_dashboard_auth_token"
@@ -143,10 +141,21 @@ def test_30_day_auth_token_and_storage_scripts() -> None:
     secret = "test-secret-123"
     token = generate_admin_token(secret)
     assert verify_admin_token(token, secret, max_age_seconds=AUTH_COOKIE_MAX_AGE_SECONDS)
+    assert auth_storage.is_valid_admin_token_format(token)
+    assert not auth_storage.is_valid_admin_token_format("invalid")
 
-    _render_save_storage_script(token)
-    _render_save_storage_script("invalid")
-    _render_clear_storage_script()
-    _render_auto_restore_script()
+    fake_component = MagicMock(return_value={"restored": token})
+    monkeypatch.setattr(auth_storage, "_get_bridge_component", lambda: fake_component)
 
+    assert auth_storage.mount_auth_storage_bridge("save", "invalid") == ""
+    fake_component.assert_not_called()
+
+    auth_storage.mount_auth_storage_bridge("save", token, nonce="n1")
+    assert fake_component.call_args.kwargs["data"]["action"] == "save"
+    assert fake_component.call_args.kwargs["data"]["token"] == token
+    assert fake_component.call_args.kwargs["data"]["maxAge"] == AUTH_COOKIE_MAX_AGE_SECONDS
+
+    assert auth_storage.mount_auth_storage_bridge("restore", nonce="n2") == token
+    auth_storage.mount_auth_storage_bridge("clear", nonce="n3")
+    assert fake_component.call_args.kwargs["data"]["action"] == "clear"
 
