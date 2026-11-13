@@ -23,9 +23,15 @@ def _ensure_initial_snapshots(
     repository: SqlDashboardRepository,
 ) -> list[AppFleetSnapshot]:
     if "fleet_snapshots" not in st.session_state:
-        with st.spinner("Initialisiere Live-Status aller Apps..."):
+        with st.spinner("Checking Apps, Workers & DBs..."):
             st.session_state["fleet_snapshots"] = coordinator.check_all_apps(repository=repository)
-    return list(st.session_state["fleet_snapshots"])
+    snapshots = list(st.session_state["fleet_snapshots"])
+    pending_persist = st.session_state.pop("_persist_snapshot_indices", None)
+    if pending_persist:
+        for idx in pending_persist:
+            if 0 <= idx < len(snapshots):
+                repository.record_snapshot(snapshots[idx])
+    return snapshots
 
 
 def run_streamlit_app() -> None:

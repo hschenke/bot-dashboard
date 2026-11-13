@@ -25,6 +25,10 @@
   7. `src/worker`: CLI-Healthcheck-Runner für GitHub Actions (`scheduled_healthcheck.yaml`).
   8. `src/ui`: Reine Streamlit-Präsentationsschicht (`overview_view` [inkl. Running & URLs], `db_view`, `ki_view`, `settings_view`).
 
+## UI- & Benennungs-Konvention (Benutzer-Präferenz)
+- **Kurze englische Fachbegriffe**: Bei Status-Badges, Worker-Zuständen und technischen Labels konsequent kurze englische Originalbegriffe nutzen (`Online`, `Offline`, `Sleeping`, `Degraded`, `Queued`, `Running`, `Success`, `Failed`, `Cancelled`, `Awake`) statt umständlicher/langer deutscher Entsprechungen (z. B. **nur `Queued`**, niemals `"Warteschlange"`).
+- **Keine Status-Boxen/Spinner in schmalen Spalten**: `st.spinner(...)`, `st.success(...)`, `st.warning(...)` und `st.info(...)` niemals innerhalb schmaler Button-Spalten (`st.columns`) rendern, um Layout-Verschiebungen zu vermeiden.
+
 ## Security Baseline (`security-standard`)
 - **Zero Hardcoded Secrets**: Alle Keys/Passwörter ausschließlich über Umgebungsvariablen / `st.secrets`.
 - **Parameterized SQL & Table Whitelisting**: Ausnahmslos `?`-Platzhalter für Parameter und Whitelist-Prüfung für Tabellennamen.

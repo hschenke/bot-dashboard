@@ -8,28 +8,38 @@ from src.domain.enums import HealthStatus, WorkflowRunState
 
 
 def format_health_badge(status: HealthStatus) -> str:
-    """Liefert ein übersichtliches Status-Label mit passendem Icon."""
+    """Liefert ein kurzes Status-Badge im englischen Originalbegriff."""
     mapping = {
         HealthStatus.ONLINE: "🟢 Online",
-        HealthStatus.ASLEEP: "🌙 Ruhezustand (Wakeup)",
-        HealthStatus.DEGRADED: "🟡 Eingeschränkt",
-        HealthStatus.OFFLINE: "🔴 Offline / Nicht verbunden",
-        HealthStatus.UNKNOWN: "⚪ Unbekannt",
+        HealthStatus.ASLEEP: "🌙 Sleeping",
+        HealthStatus.DEGRADED: "🟡 Degraded",
+        HealthStatus.OFFLINE: "🔴 Offline",
+        HealthStatus.UNKNOWN: "⚪ Unknown",
     }
-    return mapping.get(status, "⚪ Unbekannt")
+    return mapping.get(status, "⚪ Unknown")
 
 
 def format_workflow_badge(state: WorkflowRunState) -> str:
-    """Liefert ein Status-Badge für einen GitHub Actions Workflow-Lauf."""
+    """Liefert ein kurzes Status-Badge für GitHub Actions Worker (`Queued`, `Running`, etc.)."""
     mapping = {
-        WorkflowRunState.RUNNING: "🔵 Läuft gerade",
-        WorkflowRunState.QUEUED: "⏳ Warteschlange",
-        WorkflowRunState.SUCCESS: "🟢 Erfolgreich",
-        WorkflowRunState.FAILURE: "🔴 Fehlgeschlagen",
-        WorkflowRunState.CANCELLED: "⚪ Abgebrochen",
-        WorkflowRunState.UNKNOWN: "⚪ Unbekannt",
+        WorkflowRunState.RUNNING: "🔵 Running",
+        WorkflowRunState.QUEUED: "⏳ Queued",
+        WorkflowRunState.SUCCESS: "🟢 Success",
+        WorkflowRunState.FAILURE: "🔴 Failed",
+        WorkflowRunState.CANCELLED: "⚪ Cancelled",
+        WorkflowRunState.UNKNOWN: "⚪ Unknown",
     }
-    return mapping.get(state, "⚪ Unbekannt")
+    return mapping.get(state, "⚪ Unknown")
+
+
+def format_worker_status(state: WorkflowRunState, status_label: str) -> str:
+    """Kombiniert Worker-Badge und Detail-Label ohne redundante Dopplungen."""
+    badge = format_workflow_badge(state)
+    clean_label = (status_label or "").strip()
+    badge_word = badge.split(" ", 1)[-1].lower()
+    if not clean_label or clean_label.lower() == badge_word:
+        return badge
+    return f"{badge} ({clean_label})"
 
 
 def format_iso_timestamp(raw_iso: str | datetime | None) -> str:

@@ -187,7 +187,7 @@ def test_render_overview_view_shows_wakeup_controls_for_sleeping_app(
     render_overview_view([sleeping_snap], coordinator, repository, role=AuthRole.ADMIN)
 
     df_rows = mock_df.call_args[0][0]
-    assert df_rows[0]["Wach (Awake)"] == "🌙 Nein (Schläft)"
+    assert df_rows[0]["Awake"] == "🌙 Sleeping"
     assert "Details" not in df_rows[0]
     btn_labels = [call.args[0] for call in mock_btn.call_args_list]
     assert "⚡ Alle prüfen" in btn_labels
@@ -195,70 +195,121 @@ def test_render_overview_view_shows_wakeup_controls_for_sleeping_app(
     assert "☀️ App aufwecken" in btn_labels
 
 
+def test_queued_worker_renders_english_badge_status_link_and_active_end() -> None:
+    from src.ui.formatters import format_worker_status, format_workflow_badge
+
+    assert format_workflow_badge(WorkflowRunState.QUEUED) == "⏳ Queued"
+    assert format_worker_status(WorkflowRunState.QUEUED, "Queued") == "⏳ Queued"
+    assert format_worker_status(WorkflowRunState.FAILURE, "Timed out") == "🔴 Failed (Timed out)"
+
+    base = _create_mock_snapshot()
+    queued_wf = WorkflowRunSummary(
+        app_id=AppId.ALERT_BOT,
+        workflow_file="check_alerts.yaml",
+        state=WorkflowRunState.QUEUED,
+        status_label="Queued",
+        conclusion="",
+        run_url="https://github.com/hschenke/alert-bot/actions/runs/999",
+        branch="main",
+        started_at="2026-11-13T13:00:00Z",
+        updated_at="2026-11-13T13:00:00Z",
+        message="check_alerts.yaml: Queued",
+    )
+    queued_snap = AppFleetSnapshot(
+        spec=base.spec,
+        overall_status=HealthStatus.ONLINE,
+        url_check=base.url_check,
+        workflow_check=queued_wf,
+        db_check=base.db_check,
+        checked_at=base.checked_at,
+    )
+    coordinator = MagicMock(spec=FleetCheckCoordinator)
+    repository = MagicMock()
+
+    with (
+        patch("streamlit.columns", side_effect=_fake_columns),
+        patch("streamlit.expander", return_value=_DummyContext()) as mock_exp,
+        patch("streamlit.title"),
+        patch("streamlit.subheader"),
+        patch("streamlit.caption") as mock_cap,
+        patch("streamlit.markdown") as mock_md,
+        patch("streamlit.divider"),
+        patch("streamlit.dataframe"),
+        patch("streamlit.link_button"),
+        patch("streamlit.button", return_value=False),
+    ):
+        render_overview_view([queued_snap], coordinator, repository, role=AuthRole.ADMIN)
+
+    expander_title = mock_exp.call_args.args[0]
+    assert "⏳ Queued" in expander_title
+    assert "Warteschlange" not in expander_title
+
+    md_calls = [call.args[0] for call in mock_md.call_args_list]
+    cap_calls = [call.args[0] for call in mock_cap.call_args_list]
+    assert any("[⏳ Queued](https://github.com/hschenke/alert-bot/actions/runs/999)" in m for m in md_calls)
+    assert any("**Finished:** ⏳ Active" in m for m in md_calls)
+    assert any("[`check_alerts.yaml`](https://github.com/hschenke/alert-bot/actions/runs/999)" in c for c in cap_calls)
+
+
 class _RerunCalled(Exception):
     pass
 
 
-def test_compact_feedback_banner_and_refresh_button_updates_table() -> None:
+def test_check_all_button_runs_spinner_outside_header_columns() -> None:
     awake_snap = _create_mock_snapshot()
-    session_state: dict[str, Any] = {
-        "fleet_snapshots": [awake_snap],
-        "overview_feedback": {
-            "level": "success",
-            "message": "Wakeup gesendet (HTTP 204): News-Bot fährt noch hoch.",
-            "wake_titles": ["News-Bot"],
-            "needs_refresh": True,
-        },
-    }
+    session_state: dict[str, Any] = {"fleet_snapshots": [awake_snap]}
     coordinator = MagicMock(spec=FleetCheckCoordinator)
     coordinator.check_all_apps.return_value = [awake_snap]
     repository = MagicMock()
 
-    with (
-        patch("streamlit.session_state", session_state),
-        patch("streamlit.columns", side_effect=_fake_columns),
-        patch("streamlit.expander", return_value=_DummyContext()),
-        patch("streamlit.spinner", return_value=_DummyContext()),
-        patch("streamlit.title"),
-        patch("streamlit.subheader"),
-        patch("streamlit.caption"),
-        patch("streamlit.markdown"),
-        patch("streamlit.divider"),
-        patch("streamlit.dataframe"),
-        patch("streamlit.link_button"),
-        patch("streamlit.success") as mock_success,
-        patch("streamlit.button", return_value=False) as mock_btn,
-    ):
-        render_overview_view([awake_snap], coordinator, repository, role=AuthRole.ADMIN)
-        mock_success.assert_called_once_with(
-            "Wakeup gesendet (HTTP 204): News-Bot fährt noch hoch."
-        )
-        assert "🔄 Aktualisieren" in [call.args[0] for call in mock_btn.call_args_list]
+    col_depth = {"current": 0, "max": 0}
+    spinner_depths: list[int] = []
 
-    # Klick auf "🔄 Aktualisieren" prüft alle Apps und aktualisiert Banner + Snapshots
+    class _TrackedCol:
+        def __enter__(self) -> _TrackedCol:
+            col_depth["current"] += 1
+            col_depth["max"] = max(col_depth["max"], col_depth["current"])
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            col_depth["current"] -= 1
+            return False
+
+    class _TrackedSpinner:
+        def __enter__(self) -> _TrackedSpinner:
+            spinner_depths.append(col_depth["current"])
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+    def _tracked_cols(spec: Any, **kwargs: Any) -> list[_TrackedCol]:
+        count = spec if isinstance(spec, int) else len(spec)
+        return [_TrackedCol() for _ in range(count)]
+
     with (
         patch("streamlit.session_state", session_state),
-        patch("streamlit.columns", side_effect=_fake_columns),
-        patch("streamlit.spinner", return_value=_DummyContext()),
+        patch("streamlit.columns", side_effect=_tracked_cols),
+        patch("streamlit.spinner", return_value=_TrackedSpinner()),
         patch("streamlit.title"),
-        patch("streamlit.success"),
-        patch(
-            "streamlit.button",
-            side_effect=lambda *args, **kwargs: kwargs.get("key") == "refresh_after_wake",
-        ),
+        patch("streamlit.button", side_effect=lambda label, **kwargs: label == "⚡ Alle prüfen"),
         patch("streamlit.rerun", side_effect=_RerunCalled),
         pytest.raises(_RerunCalled),
     ):
         render_overview_view([awake_snap], coordinator, repository, role=AuthRole.ADMIN)
 
     coordinator.check_all_apps.assert_called_once_with(repository=repository)
-    assert session_state["fleet_snapshots"] == [awake_snap]
-    assert session_state["overview_feedback"]["needs_refresh"] is False
-    assert session_state["overview_feedback"]["message"] == "Aktiv & wach: News-Bot."
+    assert col_depth == {"current": 0, "max": 1}
+    assert spinner_depths == [0]
 
 
-def test_wake_all_action_builds_single_compact_feedback() -> None:
-    from src.ui.views.overview_feedback import run_wake_all_action
+def test_wake_all_action_and_single_wake_and_worker_feedback() -> None:
+    from src.ui.views.overview_feedback import (
+        run_wake_all_action,
+        run_wake_single_action,
+        run_worker_trigger_action,
+        update_single_snapshot_state,
+    )
 
     awake_news = _create_mock_snapshot()
     asleep_spec = ManagedAppSpec(
@@ -279,7 +330,7 @@ def test_wake_all_action_builds_single_compact_feedback() -> None:
         latency_ms=100,
         is_streamlit_awake=False,
         health_endpoint_ok=False,
-        message="Cloud-Status: Ruhezustand/Inaktiv (status=12)",
+        message="Cloud-Status: status=12",
         checked_at="2026-11-13T10:00:00+00:00",
     )
     asleep_research = AppFleetSnapshot(
@@ -291,12 +342,13 @@ def test_wake_all_action_builds_single_compact_feedback() -> None:
         checked_at=awake_news.checked_at,
     )
 
-    session_state: dict[str, Any] = {}
+    session_state: dict[str, Any] = {"fleet_snapshots": [awake_news]}
     coordinator = MagicMock(spec=FleetCheckCoordinator)
     coordinator.wake_and_refresh_apps.return_value = (
         [("News-Bot", True, "OK"), ("Research-Bot", True, "HTTP 204")],
         [awake_news, asleep_research],
     )
+    coordinator.wake_and_refresh_single_app.return_value = (True, "HTTP 204", awake_news)
     repository = MagicMock()
 
     with (
@@ -308,25 +360,9 @@ def test_wake_all_action_builds_single_compact_feedback() -> None:
         run_wake_all_action([asleep_research], coordinator, repository)
 
     feedback = session_state["overview_feedback"]
-    assert feedback["needs_refresh"] is True
     assert feedback["wake_titles"] == ["Research-Bot"]
-    assert "Aktiv & wach: News-Bot" in feedback["message"]
-    assert "Research-Bot fährt noch hoch" in feedback["message"]
-
-
-def test_single_wake_and_worker_actions_set_compact_feedback() -> None:
-    from src.ui.views.overview_feedback import (
-        run_wake_single_action,
-        run_worker_trigger_action,
-        update_single_snapshot_state,
-    )
-
-    awake_news = _create_mock_snapshot()
-    session_state: dict[str, Any] = {"fleet_snapshots": [awake_news]}
-    coordinator = MagicMock(spec=FleetCheckCoordinator)
-    coordinator.wake_and_refresh_single_app.return_value = (True, "HTTP 204", awake_news)
-    coordinator.github_probe.trigger_workflow_dispatch.return_value = "Workflow gestartet."
-    repository = MagicMock()
+    assert "Online & Awake: News-Bot" in feedback["message"]
+    assert "Research-Bot startet" in feedback["message"]
 
     with (
         patch("streamlit.session_state", session_state),
@@ -335,29 +371,161 @@ def test_single_wake_and_worker_actions_set_compact_feedback() -> None:
         pytest.raises(_RerunCalled),
     ):
         run_wake_single_action(awake_news, 0, coordinator, repository)
+    assert session_state["overview_feedback"]["message"] == "Online & Awake: News-Bot."
 
-    assert session_state["overview_feedback"]["needs_refresh"] is False
-    assert session_state["overview_feedback"]["message"] == "Aktiv & wach: News-Bot."
+    # Worker trigger aktualisiert Status-Link & markiert Live-Update wenn Queued
+    queued_wf = WorkflowRunSummary(
+        app_id=AppId.NEWS_BOT,
+        workflow_file="daily_digest.yaml",
+        state=WorkflowRunState.QUEUED,
+        status_label="Queued",
+        conclusion="",
+        run_url="https://github.com/hschenke/news-bot/actions/runs/555",
+        branch="main",
+        started_at="2026-11-13T13:05:00Z",
+        updated_at="2026-11-13T13:05:00Z",
+        message="daily_digest.yaml: Queued",
+    )
+    queued_snap = AppFleetSnapshot(
+        spec=awake_news.spec,
+        overall_status=HealthStatus.ONLINE,
+        url_check=awake_news.url_check,
+        workflow_check=queued_wf,
+        db_check=awake_news.db_check,
+        checked_at=awake_news.checked_at,
+    )
+    coordinator.trigger_and_refresh_worker.return_value = ("Workflow gestartet.", queued_snap)
+    with (
+        patch("streamlit.session_state", session_state),
+        patch("streamlit.spinner", return_value=_DummyContext()),
+        patch("streamlit.rerun", side_effect=_RerunCalled),
+        pytest.raises(_RerunCalled),
+    ):
+        run_worker_trigger_action(awake_news, 0, coordinator, repository)
+
+    fb = session_state["overview_feedback"]
+    assert fb["worker_titles"] == ["News-Bot"]
+    assert "[⏳ Queued](https://github.com/hschenke/news-bot/actions/runs/555)" in fb["message"]
+    assert "Live-Update aktiv" in fb["message"]
+
+    # Wenn neuer Run noch nicht in der GitHub-API sichtbar ist, zeigt Pending-Feedback Queued statt Alt-Failure
+    from src.ui.views.overview_feedback import build_worker_feedback
+
+    failed_prev_wf = WorkflowRunSummary(
+        app_id=AppId.NEWS_BOT,
+        workflow_file="daily_digest.yaml",
+        state=WorkflowRunState.FAILURE,
+        status_label="Failed",
+        conclusion="failure",
+        run_url="https://github.com/hschenke/news-bot/actions/runs/111",
+        branch="main",
+        started_at="2026-11-12T07:00:00Z",
+        updated_at="2026-11-12T07:05:00Z",
+        message="Failed",
+    )
+    failed_prev_snap = AppFleetSnapshot(
+        spec=awake_news.spec,
+        overall_status=HealthStatus.DEGRADED,
+        url_check=awake_news.url_check,
+        workflow_check=failed_prev_wf,
+        db_check=awake_news.db_check,
+        checked_at=awake_news.checked_at,
+    )
+    delayed_fb = build_worker_feedback(failed_prev_snap, pending=True)
+    assert delayed_fb["level"] == "success"
+    assert delayed_fb["worker_titles"] == ["News-Bot"]
+    assert f"[⏳ Queued]({awake_news.spec.github_actions_url})" in delayed_fb["message"]
 
     # Offenen Wakeup-Status bei Einzelprüfung auflösen
     session_state["overview_feedback"] = {
         "level": "success",
         "message": "Wakeup gesendet",
         "wake_titles": ["News-Bot", "Alert-Bot"],
-        "needs_refresh": True,
+        "worker_titles": [],
     }
     with patch("streamlit.session_state", session_state):
         update_single_snapshot_state(0, awake_news)
     assert session_state["overview_feedback"]["wake_titles"] == ["Alert-Bot"]
-    assert "Alert-Bot fährt noch hoch" in session_state["overview_feedback"]["message"]
 
-    with (
-        patch("streamlit.session_state", session_state),
-        patch("streamlit.rerun", side_effect=_RerunCalled),
-        pytest.raises(_RerunCalled),
-    ):
-        run_worker_trigger_action(awake_news, coordinator)
-    assert session_state["overview_feedback"]["message"] == "News-Bot: Workflow gestartet."
+
+def test_poll_live_updates_detects_queued_worker_completion_and_steady_refresh() -> None:
+    from src.ui.views.live_poller import poll_live_updates
+
+    done_snap = _create_mock_snapshot()
+    queued_wf = WorkflowRunSummary(
+        app_id=AppId.NEWS_BOT,
+        workflow_file="daily_digest.yaml",
+        state=WorkflowRunState.QUEUED,
+        status_label="Queued",
+        conclusion="",
+        run_url="https://github.com/hschenke/news-bot/actions/runs/777",
+        branch="main",
+        started_at="2026-11-13T13:00:00Z",
+        updated_at="2026-11-13T13:00:00Z",
+        message="daily_digest.yaml: Queued",
+    )
+    queued_snap = AppFleetSnapshot(
+        spec=done_snap.spec,
+        overall_status=HealthStatus.ONLINE,
+        url_check=done_snap.url_check,
+        workflow_check=queued_wf,
+        db_check=done_snap.db_check,
+        checked_at=done_snap.checked_at,
+    )
+
+    session_state: dict[str, Any] = {
+        "fleet_snapshots": [queued_snap],
+        "overview_feedback": {
+            "level": "success",
+            "message": "News-Bot: Worker [⏳ Queued](...) · Live-Update aktiv.",
+            "wake_titles": [],
+            "worker_titles": ["News-Bot"],
+        },
+    }
+    coordinator = MagicMock(spec=FleetCheckCoordinator)
+    coordinator.check_single_app.return_value = queued_snap
+
+    # Keine Änderung -> kein Rerun nötig
+    with patch("streamlit.session_state", session_state):
+        assert poll_live_updates(coordinator, fast_only=True) is False
+
+    # Worker wird fertig (Queued -> Success) -> State & Banner aktualisieren sich automatisch
+    coordinator.check_single_app.return_value = done_snap
+    with patch("streamlit.session_state", session_state):
+        assert poll_live_updates(coordinator, fast_only=True) is True
+
+    assert session_state["fleet_snapshots"] == [done_snap]
+    assert session_state["_persist_snapshot_indices"] == [0]
+    assert session_state["overview_feedback"]["worker_titles"] == []
+    assert "[🟢 Success](" in session_state["overview_feedback"]["message"]
+
+    # Steady 60s-Polling ohne Änderung -> False; mit DB-Zuwachs -> True
+    coordinator.refresh_quiet_all.return_value = [done_snap]
+    with patch("streamlit.session_state", session_state):
+        assert poll_live_updates(coordinator, fast_only=False) is False
+
+    more_rows_db = DatabaseHealthSummary(
+        app_id=AppId.NEWS_BOT,
+        backend_label="Turso Cloud",
+        status=HealthStatus.ONLINE,
+        latency_ms=40,
+        table_metrics=(DatabaseTableMetric("articles", 125),),
+        message="Verbunden",
+        checked_at="2026-11-12T10:05:00+00:00",
+    )
+    updated_db_snap = AppFleetSnapshot(
+        spec=done_snap.spec,
+        overall_status=HealthStatus.ONLINE,
+        url_check=done_snap.url_check,
+        workflow_check=done_snap.workflow_check,
+        db_check=more_rows_db,
+        checked_at="2026-11-12T10:05:00+00:00",
+    )
+    coordinator.refresh_quiet_all.return_value = [updated_db_snap]
+    with patch("streamlit.session_state", session_state):
+        assert poll_live_updates(coordinator, fast_only=False) is True
+    assert session_state["fleet_snapshots"] == [updated_db_snap]
+
 
 
 

@@ -73,10 +73,7 @@ def render_ki_view(
 
     btn_col, info_col = st.columns([1.4, 2.6])
     with btn_col:
-        if st.button("✨ KI-Tiefendiagnose starten", type="primary", use_container_width=True):
-            with st.spinner("Analysiere Live-Telemetrie aller Apps mit Google Gemini..."):
-                st.session_state["fleet_ai_analysis"] = gateway.analyze_fleet(snapshots)
-            st.rerun()
+        run_analysis = st.button("✨ KI-Tiefendiagnose starten", type="primary", use_container_width=True)
     with info_col:
         if settings.has_gemini_configured:
             st.caption(
@@ -86,6 +83,10 @@ def render_ki_view(
             st.caption(
                 "Hinweis: Kein `GEMINI_API_KEY` gesetzt – das Dashboard nutzt die deterministische Diagnose-Engine."
             )
+    if run_analysis:
+        with st.spinner("Analysiere Live-Telemetrie aller Apps mit Google Gemini..."):
+            st.session_state["fleet_ai_analysis"] = gateway.analyze_fleet(snapshots)
+        st.rerun()
 
     _render_analysis_report(st.session_state["fleet_ai_analysis"])
     st.divider()

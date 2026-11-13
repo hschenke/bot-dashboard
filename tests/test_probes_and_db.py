@@ -204,6 +204,40 @@ def test_github_workflow_probe_parses_runs_and_triggers_dispatch() -> None:
     msg = probe.trigger_workflow_dispatch(spec)
     assert "check_alerts.yaml" in msg
 
+    # Mapping nutzt kurze englische Fachbegriffe und erkennt Queued beim Polling sofort
+    from src.checks.github_probe import _map_workflow_state
+
+    assert _map_workflow_state("queued", "") == (WorkflowRunState.QUEUED, "Queued")
+    assert _map_workflow_state("in_progress", "") == (WorkflowRunState.RUNNING, "Running")
+    assert _map_workflow_state("completed", "timed_out") == (WorkflowRunState.FAILURE, "Timed out")
+
+    queued_resp = MagicMock()
+    queued_resp.status_code = 200
+    queued_resp.json.return_value = {
+        "workflow_runs": [
+            {
+                "status": "queued",
+                "conclusion": "",
+                "html_url": "https://github.com/hschenke/alert-bot/actions/runs/999",
+                "head_branch": "main",
+                "run_started_at": "2026-11-13T13:10:00Z",
+                "updated_at": "2026-11-13T13:10:00Z",
+            }
+        ]
+    }
+    mock_session.get.return_value = queued_resp
+    waited = probe.wait_for_triggered_run(
+        spec,
+        prev_run_url="https://github.com/hschenke/alert-bot/actions/runs/123",
+        prev_started_at="2026-11-11T17:00:00Z",
+        wait_timeout_seconds=6.0,
+        poll_interval_seconds=2.0,
+        sleep_fn=lambda _: None,
+    )
+    assert waited is not None
+    assert waited.state == WorkflowRunState.QUEUED
+    assert waited.status_label == "Queued"
+
 
 def test_bot_database_inspector_reads_alert_research_and_news_schemas() -> None:
     inspector = BotDatabaseInspector()

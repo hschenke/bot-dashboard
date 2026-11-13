@@ -28,18 +28,16 @@ def _utc_now_iso() -> str:
 
 def _wake_targets(snapshots: list[AppFleetSnapshot]) -> list[AppFleetSnapshot]:
     return [
-        snap
-        for snap in snapshots
-        if snap.spec.streamlit_url.strip()
-        and not snap.url_check.is_streamlit_awake
-        and snap.url_check.status in {HealthStatus.ASLEEP, HealthStatus.DEGRADED}
+        s
+        for s in snapshots
+        if s.spec.streamlit_url.strip()
+        and not s.url_check.is_streamlit_awake
+        and s.url_check.status in {HealthStatus.ASLEEP, HealthStatus.DEGRADED}
     ]
 
 
 def derive_overall_health(
-    url_check: UrlCheckResult,
-    workflow_check: WorkflowRunSummary,
-    db_check: DatabaseHealthSummary,
+    url_check: UrlCheckResult, workflow_check: WorkflowRunSummary, db_check: DatabaseHealthSummary
 ) -> HealthStatus:
     """Aggregiert URL-, Worker- und DB-Status zu einem Gesamtzustand der App."""
     if url_check.status == HealthStatus.OFFLINE and db_check.status == HealthStatus.OFFLINE:
@@ -83,22 +81,15 @@ class FleetCheckCoordinator:
     def check_dashboard_url(self) -> UrlCheckResult | None:
         """Prüft die eigene Streamlit-URL des Dashboards (`STREAMLIT_APP_URL`)."""
         raw = self._settings.streamlit_app_url.strip()
-        if not raw:
-            return None
-        return self._url_probe.check_url(raw, app_id="bot_dashboard")
+        return self._url_probe.check_url(raw, app_id="bot_dashboard") if raw else None
 
     def wake_sleeping_apps(self, snapshots: list[AppFleetSnapshot]) -> list[tuple[str, bool, str]]:
         """Sendet Wakeup-Signale parallel an alle nicht wachen überwachten Streamlit Cloud Apps."""
         targets = _wake_targets(snapshots)
         if not targets:
             return []
-
-        def _wake_one(snap: AppFleetSnapshot) -> tuple[str, bool, str]:
-            ok, msg = self._url_probe.wake_app(snap.spec.streamlit_url.strip())
-            return snap.spec.title, ok, msg
-
         with ThreadPoolExecutor(max_workers=len(targets)) as pool:
-            return list(pool.map(_wake_one, targets))
+            return list(pool.map(lambda s: (s.spec.title, *self._url_probe.wake_app(s.spec.streamlit_url.strip())), targets))
 
     def _wait_until_specs_awake(
         self,
@@ -116,9 +107,7 @@ class FleetCheckCoordinator:
             elapsed += step
             with ThreadPoolExecutor(max_workers=len(pending)) as pool:
                 url_results = list(pool.map(self._url_probe.check_app_url, pending))
-            pending = [
-                s for s, r in zip(pending, url_results, strict=True) if not r.is_streamlit_awake
-            ]
+            pending = [s for s, r in zip(pending, url_results, strict=True) if not r.is_streamlit_awake]
 
     def wake_and_refresh_apps(
         self,
@@ -150,43 +139,59 @@ class FleetCheckCoordinator:
             self._wait_until_specs_awake([spec], wait_timeout_seconds, poll_interval_seconds, sleep_fn)
         return ok, msg, self.check_single_app(spec, repository=repository)
 
+    def trigger_and_refresh_worker(
+        self,
+        snapshot: AppFleetSnapshot,
+        repository: SqlDashboardRepository | None = None,
+        wait_timeout_seconds: float = 6.0,
+        poll_interval_seconds: float = 2.0,
+        sleep_fn: Callable[[float], None] = time.sleep,
+    ) -> tuple[str, AppFleetSnapshot]:
+        """Startet den Worker, wartet kurz auf den neuen Run und aktualisiert den Snapshot."""
+        wf = snapshot.workflow_check
+        msg = self._github_probe.trigger_workflow_dispatch(snapshot.spec)
+        self._github_probe.wait_for_triggered_run(
+            snapshot.spec, wf.run_url, wf.started_at, wait_timeout_seconds, poll_interval_seconds, sleep_fn
+        )
+        return msg, self.check_single_app(snapshot.spec, repository=repository)
+
     def check_single_app(
         self,
         spec: ManagedAppSpec,
         repository: SqlDashboardRepository | None = None,
+        *,
+        cached_workflow: WorkflowRunSummary | None = None,
     ) -> AppFleetSnapshot:
-        """Prüft URL, GitHub Actions Worker und Datenbank einer einzelnen App."""
-        checked_at = _utc_now_iso()
+        """Prüft URL, GitHub Actions Worker (optional gecacht) und DB einer einzelnen App."""
         url_res = self._url_probe.check_app_url(spec)
-        wf_res = self._github_probe.check_primary_workflow(spec)
+        wf_res = cached_workflow or self._github_probe.check_primary_workflow(spec)
         db_res = self._db_inspector.inspect_bot_database(spec)
-        overall = derive_overall_health(url_res, wf_res, db_res)
-
         snapshot = AppFleetSnapshot(
             spec=spec,
-            overall_status=overall,
+            overall_status=derive_overall_health(url_res, wf_res, db_res),
             url_check=url_res,
             workflow_check=wf_res,
             db_check=db_res,
-            checked_at=checked_at,
+            checked_at=_utc_now_iso(),
         )
         if repository is not None:
             repository.record_snapshot(snapshot)
         return snapshot
 
-    def check_all_apps(
-        self,
-        repository: SqlDashboardRepository | None = None,
-    ) -> list[AppFleetSnapshot]:
-        """Prüft alle 3 überwachten Apps parallel und speichert optional das Protokoll."""
+    def refresh_quiet_all(self, current: list[AppFleetSnapshot]) -> list[AppFleetSnapshot]:
+        """Hintergrund-Refresh: prüft URLs/DBs (und Workflows falls GitHub-Token aktiv ist)."""
+        if bool(getattr(self._github_probe, "has_token", True)) or not current:
+            return self.check_all_apps(repository=None)
+        with ThreadPoolExecutor(max_workers=len(current)) as pool:
+            return list(pool.map(lambda s: self.check_single_app(s.spec, None, cached_workflow=s.workflow_check), current))
+
+    def check_all_apps(self, repository: SqlDashboardRepository | None = None) -> list[AppFleetSnapshot]:
+        """Prüft alle überwachten Apps parallel und speichert optional das Protokoll."""
         specs = self._settings.managed_apps
         if not specs:
             return []
-
         with ThreadPoolExecutor(max_workers=len(specs)) as pool:
-            futures = [pool.submit(self.check_single_app, spec, None) for spec in specs]
-            snapshots = [fut.result() for fut in futures]
-
+            snapshots = list(pool.map(lambda spec: self.check_single_app(spec, None), specs))
         if repository is not None:
             for snap in snapshots:
                 repository.record_snapshot(snap)

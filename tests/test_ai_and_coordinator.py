@@ -274,3 +274,55 @@ def test_wake_and_refresh_apps_respects_timeout_and_single_app_wake() -> None:
     assert single_updated.url_check.is_streamlit_awake is True
 
 
+def test_trigger_and_refresh_worker_and_quiet_refresh() -> None:
+    from src.checks.github_probe import GitHubWorkflowProbe
+
+    settings = load_app_settings(allow_sibling_env_fallback=False)
+    mock_url = MagicMock()
+    mock_gh = MagicMock(spec=GitHubWorkflowProbe)
+    mock_db = MagicMock()
+
+    snap = _make_snapshot(AppId.ALERT_BOT, url_status=HealthStatus.ONLINE)
+    queued_wf = WorkflowRunSummary(
+        app_id=AppId.ALERT_BOT,
+        workflow_file="daily_digest.yaml",
+        state=WorkflowRunState.QUEUED,
+        status_label="Queued",
+        conclusion="",
+        run_url="https://github.com/hschenke/alert-bot/actions/runs/888",
+        branch="main",
+        started_at="2026-11-13T13:05:00Z",
+        updated_at="2026-11-13T13:05:00Z",
+        message="daily_digest.yaml: Queued",
+    )
+    mock_url.check_app_url.return_value = snap.url_check
+    mock_db.inspect_bot_database.return_value = snap.db_check
+    mock_gh.trigger_workflow_dispatch.return_value = "Workflow gestartet."
+    mock_gh.wait_for_triggered_run.return_value = queued_wf
+    mock_gh.check_primary_workflow.return_value = queued_wf
+
+    coord = FleetCheckCoordinator(
+        settings,
+        url_probe=mock_url,
+        github_probe=mock_gh,
+        db_inspector=mock_db,
+    )
+    sleep_calls: list[float] = []
+    msg, refreshed = coord.trigger_and_refresh_worker(
+        snap, wait_timeout_seconds=4.0, poll_interval_seconds=2.0, sleep_fn=sleep_calls.append
+    )
+    assert msg == "Workflow gestartet."
+    assert refreshed.workflow_check.state == WorkflowRunState.QUEUED
+    mock_gh.trigger_workflow_dispatch.assert_called_once_with(snap.spec)
+    mock_gh.wait_for_triggered_run.assert_called_once()
+
+    # Ohne Token überspringt refresh_quiet_all anonyme GitHub API Calls
+    mock_gh.has_token = False
+    mock_gh.check_primary_workflow.reset_mock()
+    quiet_res = coord.refresh_quiet_all([snap])
+    assert len(quiet_res) == 1
+    assert quiet_res[0].workflow_check == snap.workflow_check
+    mock_gh.check_primary_workflow.assert_not_called()
+
+
+

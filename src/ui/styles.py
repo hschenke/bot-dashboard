@@ -53,6 +53,9 @@ div[data-testid="stAlert"] p {
     font-size: 0.92rem !important;
     line-height: 1.35 !important;
 }
+div[data-testid="stSpinner"] {
+    margin: 0.25rem 0 !important;
+}
 
 /* Kompakte App-Cards im Dashboard */
 div[data-testid="stVerticalBlockBorderWrapper"] {

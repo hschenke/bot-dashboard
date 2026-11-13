@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from typing import Any
 
 import requests
@@ -18,17 +20,41 @@ def _map_workflow_state(status: str, conclusion: str) -> tuple[WorkflowRunState,
     clean_conclusion = (conclusion or "").strip().lower()
 
     if clean_status == "in_progress":
-        return WorkflowRunState.RUNNING, "Läuft gerade (Active Worker)"
+        return WorkflowRunState.RUNNING, "Running"
     if clean_status in {"queued", "waiting", "requested", "pending"}:
-        return WorkflowRunState.QUEUED, "In Warteschlange (Queued)"
+        return WorkflowRunState.QUEUED, "Queued"
     if clean_status == "completed":
         if clean_conclusion == "success":
-            return WorkflowRunState.SUCCESS, "Erfolgreich abgeschlossen"
-        if clean_conclusion in {"failure", "timed_out", "startup_failure"}:
-            return WorkflowRunState.FAILURE, f"Fehlgeschlagen ({clean_conclusion})"
+            return WorkflowRunState.SUCCESS, "Success"
+        if clean_conclusion == "timed_out":
+            return WorkflowRunState.FAILURE, "Timed out"
+        if clean_conclusion in {"failure", "startup_failure"}:
+            return WorkflowRunState.FAILURE, (
+                "Failed" if clean_conclusion == "failure" else "Startup failure"
+            )
         if clean_conclusion in {"cancelled", "skipped"}:
-            return WorkflowRunState.CANCELLED, f"Abgebrochen / Übersprungen ({clean_conclusion})"
-    return WorkflowRunState.UNKNOWN, f"Status: {clean_status or 'unbekannt'}"
+            return WorkflowRunState.CANCELLED, clean_conclusion.capitalize()
+    return WorkflowRunState.UNKNOWN, clean_status.capitalize() if clean_status else "Unknown"
+
+
+def _unknown_summary(
+    spec: ManagedAppSpec,
+    workflow_file: str,
+    status_label: str,
+    message: str,
+) -> WorkflowRunSummary:
+    return WorkflowRunSummary(
+        app_id=spec.app_id,
+        workflow_file=workflow_file,
+        state=WorkflowRunState.UNKNOWN,
+        status_label=status_label,
+        conclusion="",
+        run_url=spec.github_actions_url,
+        branch="main",
+        started_at="",
+        updated_at="",
+        message=message,
+    )
 
 
 class GitHubWorkflowProbe:
@@ -50,6 +76,11 @@ class GitHubWorkflowProbe:
             headers["Authorization"] = f"Bearer {self._token}"
         self._session.headers.update(headers)
 
+    @property
+    def has_token(self) -> bool:
+        """Zeigt an, ob ein GitHub API Token für erhöhte Rate-Limits & Dispatch vorliegt."""
+        return bool(self._token)
+
     def check_primary_workflow(self, spec: ManagedAppSpec) -> WorkflowRunSummary:
         """Prüft den letzten Lauf des primären Hintergrund-Workflows einer App."""
         return self.check_workflow(spec, spec.primary_workflow)
@@ -60,18 +91,7 @@ class GitHubWorkflowProbe:
             repo_slug = validate_github_repo_slug(spec.github_repo)
             wf_name = validate_workflow_filename(workflow_file)
         except ValidationError as exc:
-            return WorkflowRunSummary(
-                app_id=spec.app_id,
-                workflow_file=workflow_file,
-                state=WorkflowRunState.UNKNOWN,
-                status_label="Konfigurationsfehler",
-                conclusion="",
-                run_url=spec.github_actions_url,
-                branch="main",
-                started_at="",
-                updated_at="",
-                message=str(exc),
-            )
+            return _unknown_summary(spec, workflow_file, "Config Error", str(exc))
 
         api_url = (
             f"https://api.github.com/repos/{repo_slug}/actions/workflows/{wf_name}/runs?per_page=1"
@@ -79,46 +99,22 @@ class GitHubWorkflowProbe:
         try:
             resp = self._session.get(api_url, timeout=GITHUB_API_TIMEOUT_SECONDS)
             if resp.status_code != 200:
-                return WorkflowRunSummary(
-                    app_id=spec.app_id,
-                    workflow_file=wf_name,
-                    state=WorkflowRunState.UNKNOWN,
-                    status_label=f"GitHub HTTP {resp.status_code}",
-                    conclusion="",
-                    run_url=spec.github_actions_url,
-                    branch="main",
-                    started_at="",
-                    updated_at="",
-                    message=f"GitHub API antwortete mit Status {resp.status_code}.",
+                return _unknown_summary(
+                    spec,
+                    wf_name,
+                    f"GitHub HTTP {resp.status_code}",
+                    f"GitHub API antwortete mit Status {resp.status_code}.",
                 )
             data: dict[str, Any] = resp.json()
         except requests.RequestException as exc:
-            return WorkflowRunSummary(
-                app_id=spec.app_id,
-                workflow_file=wf_name,
-                state=WorkflowRunState.UNKNOWN,
-                status_label="API nicht erreichbar",
-                conclusion="",
-                run_url=spec.github_actions_url,
-                branch="main",
-                started_at="",
-                updated_at="",
-                message=f"GitHub API Fehler: {exc.__class__.__name__}",
+            return _unknown_summary(
+                spec, wf_name, "API Offline", f"GitHub API Fehler: {exc.__class__.__name__}"
             )
 
         runs = data.get("workflow_runs", [])
         if not isinstance(runs, list) or not runs:
-            return WorkflowRunSummary(
-                app_id=spec.app_id,
-                workflow_file=wf_name,
-                state=WorkflowRunState.UNKNOWN,
-                status_label="Noch keine Läufe",
-                conclusion="",
-                run_url=spec.github_actions_url,
-                branch="main",
-                started_at="",
-                updated_at="",
-                message=f"Keine Ausführungen für {wf_name} gefunden.",
+            return _unknown_summary(
+                spec, wf_name, "No Runs", f"Keine Ausführungen für {wf_name} gefunden."
             )
 
         latest = runs[0]
@@ -138,6 +134,33 @@ class GitHubWorkflowProbe:
             updated_at=str(latest.get("updated_at", "") or ""),
             message=f"{wf_name}: {label}",
         )
+
+    def wait_for_triggered_run(
+        self,
+        spec: ManagedAppSpec,
+        prev_run_url: str,
+        prev_started_at: str,
+        wait_timeout_seconds: float = 6.0,
+        poll_interval_seconds: float = 2.0,
+        sleep_fn: Callable[[float], None] = time.sleep,
+    ) -> WorkflowRunSummary | None:
+        """Wartet kurz nach Dispatch, bis der neue Run als Queued/Running/Completed erscheint."""
+        if wait_timeout_seconds <= 0 or poll_interval_seconds <= 0:
+            return None
+        elapsed = 0.0
+        latest: WorkflowRunSummary | None = None
+        while elapsed < wait_timeout_seconds:
+            step = min(poll_interval_seconds, wait_timeout_seconds - elapsed)
+            sleep_fn(step)
+            elapsed += step
+            latest = self.check_primary_workflow(spec)
+            if (
+                latest.run_url != prev_run_url
+                or latest.started_at != prev_started_at
+                or latest.state in {WorkflowRunState.QUEUED, WorkflowRunState.RUNNING}
+            ):
+                return latest
+        return latest
 
     def trigger_workflow_dispatch(
         self,
@@ -172,4 +195,4 @@ class GitHubWorkflowProbe:
             raise ProbeError(
                 f"GitHub Dispatch abgelehnt (HTTP {resp.status_code}). Prüfe Token-Rechte (Actions: Write)."
             )
-        return f"Workflow '{wf_name}' in {repo_slug} erfolgreich gestartet."
+        return f"Workflow '{wf_name}' gestartet."
