@@ -6,6 +6,7 @@ import streamlit as st
 from ki_brain import BrainTier, KIWebsearchBrain, ProbeStatus, TierSequenceConfig
 
 from src.ui.formatters import format_iso_timestamp
+from src.ui.views.ki_secret_dialog import render_missing_keys_action_bar
 
 _STATUS_BADGES: dict[ProbeStatus, str] = {
     ProbeStatus.OK: "🟢 OK",
@@ -74,7 +75,7 @@ def _render_sequence_editor(brain: KIWebsearchBrain, seqs: dict[BrainTier, TierS
                 value=", ".join(cur.model_sequence),
                 help=f"Verfügbare Modelle: {', '.join(all_model_ids)}",
             )
-            c1, c2, c3 = st.columns(3)
+            c1, c2, c3 = st.columns(3, vertical_alignment="bottom")
             with c1:
                 max_tools = st.number_input("Max Such-Tools", min_value=1, max_value=25, value=cur.max_search_tools)
             with c2:
@@ -126,6 +127,7 @@ def render_sequences_tab(brain: KIWebsearchBrain, is_admin: bool) -> None:
     report = brain.get_latest_benchmark()
     if report is None:
         st.caption("Noch kein Benchmark-Testlauf ausgeführt. Starte oben den Testlauf zur automatischen Optimierung.")
+        render_missing_keys_action_bar(brain, is_admin=is_admin, section_key="seq")
         return
 
     st.caption(
@@ -147,3 +149,4 @@ def render_sequences_tab(brain: KIWebsearchBrain, is_admin: bool) -> None:
         for e in sorted(report.entries, key=lambda x: (x.item_type, -x.quality_score, x.latency_ms))
     ]
     st.dataframe(rows, use_container_width=True, hide_index=True)
+    render_missing_keys_action_bar(brain, is_admin=is_admin, section_key="seq_bench")

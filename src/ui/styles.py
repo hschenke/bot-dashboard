@@ -21,7 +21,7 @@ div[data-testid="stMetric"] [data-testid="stMetricValue"] {
     font-size: 1.45rem !important;
 }
 
-/* Einheitliche Button- & Link-Button-Größe & Geometrie */
+/* Einheitliche Button-, Link- & Selectbox-Höhe für saubere horizontale Linien */
 div[data-testid="stButton"] > button,
 div[data-testid="stLinkButton"] > a {
     min-height: 42px !important;
@@ -37,6 +37,9 @@ div[data-testid="stLinkButton"] > a {
     width: 100% !important;
     text-decoration: none !important;
     white-space: nowrap !important;
+}
+div[data-testid="stSelectbox"] div[data-baseweb="select"] > div {
+    min-height: 42px !important;
 }
 
 /* Kompakte Feedback-Banner ohne vertikales Aufblähen */
@@ -74,78 +77,59 @@ div[data-testid="stVerticalBlockBorderWrapper"] li {
     font-size: 0.92rem !important;
 }
 
-/* Sidebar Navigation: Vollflächig, gleichmäßig lang & touch-freundlich */
-[data-testid="stSidebar"] div[data-testid="stRadio"],
-[data-testid="stSidebar"] div[data-testid="stRadio"] > div {
-    width: 100% !important;
-}
-
-[data-testid="stSidebar"] [data-testid="stRadioGroup"],
-[data-testid="stSidebar"] div[role="radiogroup"] {
-    width: 100% !important;
-    display: flex !important;
-    flex-direction: column !important;
-    align-items: stretch !important;
-    gap: 8px !important;
-}
-
-[data-testid="stSidebar"] [data-testid="stRadioGroup"] > div,
-[data-testid="stSidebar"] div[role="radiogroup"] > div {
-    width: 100% !important;
-    display: flex !important;
-    flex-direction: column !important;
-    align-items: stretch !important;
-}
-
-[data-testid="stSidebar"] div[role="radiogroup"] label,
-[data-testid="stSidebar"] [data-testid="stRadioOption"] {
-    display: flex !important;
-    align-items: center !important;
-    width: 100% !important;
-    min-width: 100% !important;
-    box-sizing: border-box !important;
+/* Sidebar Navigation: Exakte vertikale Ausrichtung aller Icons & Labels */
+section[data-testid="stSidebar"] :is([class*="st-key-nav_page_"], [class*="st-key-nav_logout_btn"]) div[data-testid="stButton"] > button {
     min-height: 48px !important;
+    height: 48px !important;
     padding: 10px 16px !important;
     margin-bottom: 4px !important;
     border-radius: 10px !important;
-    background: rgba(255, 255, 255, 0.04) !important;
-    border: 1px solid rgba(255, 255, 255, 0.08) !important;
-    cursor: pointer !important;
+    justify-content: flex-start !important;
+    align-items: center !important;
+    text-align: left !important;
+    font-size: 1.02rem !important;
+    font-weight: 500 !important;
     transition: all 0.15s ease-in-out !important;
 }
-
-/* Radio-Button-Kreis vollständig ausblenden */
-[data-testid="stSidebar"] div[role="radiogroup"] label > div:first-child,
-[data-testid="stSidebar"] [data-testid="stRadioOption"] > div:first-child {
-    display: none !important;
-}
-
-/* Text in Navi-Punkten: lesbar & sauber formatiert */
-[data-testid="stSidebar"] div[role="radiogroup"] label p,
-[data-testid="stSidebar"] [data-testid="stRadioOption"] p {
-    font-size: 1.05rem !important;
-    font-weight: 500 !important;
-    margin: 0 !important;
-    line-height: 1.4 !important;
+section[data-testid="stSidebar"] :is([class*="st-key-nav_page_"], [class*="st-key-nav_logout_btn"]) div[data-testid="stButton"] > button > div,
+section[data-testid="stSidebar"] :is([class*="st-key-nav_page_"], [class*="st-key-nav_logout_btn"]) div[data-testid="stButton"] > button > div > div {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: flex-start !important;
     width: 100% !important;
-    white-space: pre-wrap !important;
+    gap: 12px !important;
 }
-
-/* Hover-Status */
-[data-testid="stSidebar"] div[role="radiogroup"] label:hover,
-[data-testid="stSidebar"] [data-testid="stRadioOption"]:hover {
+section[data-testid="stSidebar"] :is([class*="st-key-nav_page_"], [class*="st-key-nav_logout_btn"]) div[data-testid="stButton"] > button :is([data-testid="stIconEmoji"], [data-testid="stIconMaterial"]) {
+    width: 24px !important;
+    min-width: 24px !important;
+    height: 24px !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    font-size: 1.15rem !important;
+    line-height: 1 !important;
+    flex-shrink: 0 !important;
+    margin: 0 !important;
+}
+section[data-testid="stSidebar"] :is([class*="st-key-nav_page_"], [class*="st-key-nav_logout_btn"]) div[data-testid="stButton"] > button p {
+    font-size: 1.02rem !important;
+    font-weight: 500 !important;
+    line-height: 1.35 !important;
+    margin: 0 !important;
+}
+section[data-testid="stSidebar"] :is([class*="st-key-nav_page_"], [class*="st-key-nav_logout_btn"]) div[data-testid="stButton"] > button[kind="secondary"] {
+    background: rgba(255, 255, 255, 0.04) !important;
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+}
+section[data-testid="stSidebar"] :is([class*="st-key-nav_page_"], [class*="st-key-nav_logout_btn"]) div[data-testid="stButton"] > button[kind="secondary"]:hover {
     background: rgba(255, 255, 255, 0.09) !important;
     border-color: rgba(255, 255, 255, 0.2) !important;
 }
-
-/* Aktiver / Ausgewählter Navi-Punkt */
-[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked),
-[data-testid="stSidebar"] [data-testid="stRadioOption"][data-selected="true"],
-[data-testid="stSidebar"] [data-testid="stRadioOption"]:has(input:checked),
-[data-testid="stSidebar"] div[data-selected="true"] [data-testid="stRadioOption"] {
+section[data-testid="stSidebar"] [class*="st-key-nav_page_"] div[data-testid="stButton"] > button[kind="primary"] {
     background: rgba(59, 130, 246, 0.25) !important;
-    border-color: #3b82f6 !important;
+    border: 1px solid #3b82f6 !important;
     box-shadow: 0 0 10px rgba(59, 130, 246, 0.25) !important;
+    color: #ffffff !important;
 }
 
 @media (max-width: 768px) {
@@ -153,11 +137,11 @@ div[data-testid="stVerticalBlockBorderWrapper"] li {
         padding-top: 2rem;
         padding-bottom: 1.5rem;
     }
-    [data-testid="stSidebar"] div[role="radiogroup"] label,
-    [data-testid="stSidebar"] [data-testid="stRadioOption"] {
+    section[data-testid="stSidebar"] :is([class*="st-key-nav_page_"], [class*="st-key-nav_logout_btn"]) div[data-testid="stButton"] > button {
         min-height: 52px !important;
+        height: 52px !important;
         padding: 12px 16px !important;
-        margin-bottom: 10px !important;
+        margin-bottom: 8px !important;
     }
 }
 

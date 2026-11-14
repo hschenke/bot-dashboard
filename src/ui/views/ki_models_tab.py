@@ -11,6 +11,7 @@ from ki_brain import (
     ModelProvider,
 )
 
+from src.ui.views.ki_secret_dialog import render_missing_keys_action_bar
 from src.ui.views.ki_sequences_tab import format_probe_badge
 
 
@@ -41,13 +42,16 @@ def render_models_tab(brain: KIWebsearchBrain, is_admin: bool) -> None:
     ]
     st.dataframe(rows, use_container_width=True, hide_index=True)
 
+    model_envs = {m.api_key_env.strip().upper() for m in models if m.api_key_env.strip()}
+    render_missing_keys_action_bar(brain, is_admin=is_admin, env_filter=model_envs, section_key="models")
+
     if not is_admin:
         return
 
     st.subheader("⚙️ Modell aktivieren, bearbeiten oder entfernen")
     model_ids = [m.id for m in models]
     if model_ids:
-        sel_col, toggle_col, del_col = st.columns([2, 1, 1])
+        sel_col, toggle_col, del_col = st.columns([2, 1, 1], vertical_alignment="bottom")
         with sel_col:
             selected_id = st.selectbox("Modell wählen", options=model_ids, key="ki_model_quick_sel")
         selected_obj = next(m for m in models if m.id == selected_id)

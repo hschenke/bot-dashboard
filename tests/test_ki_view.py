@@ -52,6 +52,17 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
     assert "🧹 Bereinigen (Error & Quota 429)" in btn_labels
     assert "🔒 Secret sicher speichern / komplett ersetzen" in btn_labels
 
+    for top_lbl in (
+        "🚀 Testlauf starten & Sequenzen optimieren",
+        "🔄 Auto-Sync (Modelle & Tools)",
+        "🧹 Bereinigen (Error & Quota 429)",
+    ):
+        top_btn = next(b for b in at.button if b.label == top_lbl)
+        assert top_btn.proto.type == "secondary"
+
+    reset_btn = next(b for b in at.button if "Standardkatalog" in b.label)
+    assert "Research-Bot & Alert-Bot" in (reset_btn.help or "")
+
     # Read-Only Nutzer sieht deaktivierte Buttons
     def _app_ro() -> None:
         import os
@@ -164,4 +175,86 @@ def test_ki_view_apptest_sequence_edit_and_settings_matrix(
     settings_df = at.table[0].value
     assert "KI & Websearch Brain" in list(settings_df["Komponente"])
     assert any("Groq" in str(val) for val in settings_df["Details"])
+
+
+def test_ki_view_click_missing_key_dialog_saves_and_probes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ki_brain import ProbeStatus
+    from ki_brain.models import BrainFetchedPage
+    from streamlit.testing.v1 import AppTest
+
+    db_file = tmp_path / "ui_missing_key_dlg.db"
+    monkeypatch.setenv("BRAIN_SQLITE_PATH", str(db_file))
+    monkeypatch.delenv("BROWSERBASE_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "ki_brain.benchmark.execute_extractor_tool",
+        lambda tool, url, secrets=None: BrainFetchedPage(
+            url=url, title="Python", text_content="Python Inhalt " * 12, extractor_used=tool.id, latency_ms=80
+        ),
+    )
+
+    def _app() -> None:
+        import os
+
+        from src.config.settings import AppSettings
+        from src.domain.enums import AuthRole
+        from src.ui.views.ki_view import render_ki_view
+
+        app_settings = AppSettings(brain_sqlite_path=os.environ["BRAIN_SQLITE_PATH"])
+        render_ki_view(app_settings, role=AuthRole.ADMIN)
+
+    at = AppTest.from_function(_app).run()
+    assert not at.exception
+
+    missing_btn = next(b for b in at.button if b.label == "🔑 Missing Key: BROWSERBASE_API_KEY")
+    at = missing_btn.click().run()
+    assert not at.exception
+
+    dlg_input = next(t for t in at.text_input if "BROWSERBASE_API_KEY" in t.label)
+    dlg_input.set_value("bb_live_dialog_key_777")
+    save_and_test_btn = next(b for b in at.button if b.label == "🔒 Speichern & testen")
+    at = save_and_test_btn.click().run()
+    assert not at.exception
+    assert any("BROWSERBASE_API_KEY" in s.value and "OK" in s.value for s in at.success)
+
+    reopened = create_dashboard_brain(AppSettings(brain_sqlite_path=str(db_file)))
+    assert reopened._secrets.resolve_key("BROWSERBASE_API_KEY") == "bb_live_dialog_key_777"  # noqa: SLF001
+    bb_tool = reopened.get_tool("browserbase_fetch")
+    assert bb_tool is not None and bb_tool.last_status == ProbeStatus.OK
+    reopened.close()
+
+
+def test_app_sidebar_button_navigation_and_alignment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from streamlit.testing.v1 import AppTest
+
+    monkeypatch.setenv("BRAIN_SQLITE_PATH", str(tmp_path / "nav_brain.db"))
+    monkeypatch.setenv("DASHBOARD_SQLITE_PATH", str(tmp_path / "nav_dash.db"))
+    monkeypatch.delenv("DASHBOARD_APP_PASSWORD", raising=False)
+
+    def _app() -> None:
+        from unittest.mock import patch
+
+        from src.ui.app import run_streamlit_app
+
+        with patch("src.checks.coordinator.FleetCheckCoordinator.check_all_apps", return_value=[]):
+            run_streamlit_app()
+
+    at = AppTest.from_function(_app).run()
+    assert not at.exception
+
+    nav_buttons = [b for b in at.sidebar.button if b.label in {"Dashboard", "DB-Inspektor", "KI-View", "System & Historie"}]
+    assert [b.label for b in nav_buttons] == ["Dashboard", "DB-Inspektor", "KI-View", "System & Historie"]
+    assert nav_buttons[0].proto.type == "primary"
+    assert [b.proto.icon for b in nav_buttons] == ["📡", "🗄️", "🤖", "⚙️"]
+
+    ki_nav_btn = next(b for b in nav_buttons if b.label == "KI-View")
+    at = ki_nav_btn.click().run()
+    assert not at.exception
+    assert "🧠 KI & Websearch Brain" in [h.value for h in at.header]
+    active_ki_btn = next(b for b in at.sidebar.button if b.label == "KI-View")
+    assert active_ki_btn.proto.type == "primary"
+
 

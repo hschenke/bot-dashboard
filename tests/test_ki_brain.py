@@ -177,8 +177,22 @@ def test_auto_sync_discovers_gemini_groq_and_openrouter_models(monkeypatch: pyte
     mock_client = MagicMock()
     mock_client.models.list.return_value = [
         SimpleNamespace(name="models/gemini-3.9-flash-preview", display_name="Gemini 3.9 Flash", supported_actions=["generateContent"]),
+        SimpleNamespace(name="models/gemini-3.9-dead-preview", display_name="Gemini Dead", supported_actions=["generateContent"]),
         SimpleNamespace(name="models/text-embedding-004", display_name="Embed", supported_actions=["embedContent"]),
     ]
+    probed_gemini_calls: list[str] = []
+
+    def _fake_gemini_create(**kwargs: object) -> MagicMock:
+        mid = str(kwargs.get("model") or "")
+        probed_gemini_calls.append(mid)
+        if mid == "gemini-3.9-dead-preview":
+            raise RuntimeError("404 NOT_FOUND model unavailable")
+        resp = MagicMock()
+        resp.output_text = "OK"
+        resp.steps = []
+        return resp
+
+    mock_client.interactions.create.side_effect = _fake_gemini_create
     secrets = BrainSecrets(
         gemini_api_key="AIzaSyTestKey123",
         groq_api_key="gsk_test_123",
@@ -186,20 +200,49 @@ def test_auto_sync_discovers_gemini_groq_and_openrouter_models(monkeypatch: pyte
     )
     brain = KIWebsearchBrain(repo, secrets, genai_client=mock_client)
 
-    def _fake_http(_method: str, url: str, **_kw: object) -> tuple[int, str, str, bytes]:
+    def _fake_http(_method: str, url: str, json_body: dict[str, object] | None = None, **_kw: object) -> tuple[int, str, str, bytes]:
+        if url.endswith("/chat/completions"):
+            req_model = str((json_body or {}).get("model") or "")
+            if "dead" in req_model:
+                return 429, url, "application/json", b'{"error": "rate_limit"}'
+            return 200, url, "application/json", b'{"choices": [{"message": {"content": "OK"}}]}'
         if "groq.com" in url:
             return 200, url, "application/json", b'{"data": [{"id": "llama-3.1-8b-instant"}]}'
         if "openrouter.ai" in url:
-            return 200, url, "application/json", b'{"data": [{"id": "qwen/qwen-2.5:free", "name": "Qwen Free", "pricing": {"prompt": "0", "completion": "0"}}]}'
+            return (
+                200,
+                url,
+                "application/json",
+                b'{"data": [{"id": "qwen/qwen-2.5:free", "name": "Qwen Free", "pricing": {"prompt": "0", "completion": "0"}}, {"id": "broken/dead:free", "name": "Broken Dead", "pricing": {"prompt": "0", "completion": "0"}}]}',
+            )
         return 404, url, "text/plain", b""
 
     monkeypatch.setattr("ki_brain.discovery.safe_http_request", _fake_http)
+    monkeypatch.setattr("ki_brain.llm_runner.safe_http_request", _fake_http)
+
     summary = brain.auto_sync()
     assert "gemini-3.9-flash-preview" in summary.added_models
     assert "groq/llama-3.1-8b-instant" in summary.added_models
     assert "or/qwen/qwen-2.5-free" in summary.added_models
+    assert "gemini-3.9-dead-preview" in summary.skipped_unhealthy
+    assert "or/broken/dead-free" in summary.skipped_unhealthy
     assert brain.get_model("gemini-3.9-flash-preview") is not None
+    assert brain.get_model("gemini-3.9-flash-preview").last_status == ProbeStatus.OK  # type: ignore[union-attr]
+    assert brain.get_model("gemini-3.9-dead-preview") is None
+    assert brain.get_model("or/broken/dead-free") is None
     assert brain.get_model("text-embedding-004") is None
+
+    # Manuell gelöschte + defekt verworfene Modelle kommen beim nächsten Auto-Sync NICHT zurück
+    assert brain.remove_model("gemini-3.9-flash-preview") is True
+    probed_gemini_calls.clear()
+    summary_again = brain.auto_sync()
+    assert brain.get_model("gemini-3.9-flash-preview") is None
+    assert brain.get_model("gemini-3.9-dead-preview") is None
+    assert brain.get_model("or/broken/dead-free") is None
+    assert "gemini-3.9-flash-preview" in summary_again.skipped_excluded
+    assert "gemini-3.9-dead-preview" in summary_again.skipped_excluded
+    assert "or/broken/dead-free" in summary_again.skipped_excluded
+    assert probed_gemini_calls == []
     brain.close()
 
 
@@ -329,30 +372,68 @@ def test_brain_execution_search_ask_structured_and_snapshot(monkeypatch: pytest.
     brain.close()
 
 
-def test_cleanup_unhealthy_items_and_write_only_secrets_vault(tmp_path: Path) -> None:
+def test_cleanup_unhealthy_items_and_write_only_secrets_vault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ki_brain.models import BenchmarkEntry, BenchmarkReport, BrainFetchedPage
+
     db_file = tmp_path / "vault_and_cleanup.db"
     repo = create_brain_repository(sqlite_path=db_file)
     brain = KIWebsearchBrain(repo, BrainSecrets())
 
-    # 1. Modelle & Tools auf Error / Quota 429 setzen und automatisch bereinigen
+    # 1. Modelle & Tools auf Error / Quota 429 / Blocked / Missing Key setzen und bereinigen
     m_err = brain.get_model("gemini-2.0-flash")
     t_q429 = brain.get_tool("gemini_google_search")
+    t_blocked = brain.get_tool("duckduckgo_html")
     t_missing = brain.get_tool("browserbase_fetch")
-    assert m_err is not None and t_q429 is not None and t_missing is not None
+    assert m_err is not None and t_q429 is not None and t_blocked is not None and t_missing is not None
 
     brain.add_or_update_model(m_err.model_copy(update={"last_status": ProbeStatus.ERROR}))
     brain.add_or_update_tool(t_q429.model_copy(update={"last_status": ProbeStatus.QUOTA_LIMITED}))
+    brain.add_or_update_tool(t_blocked.model_copy(update={"last_status": ProbeStatus.BLOCKED}))
     brain.add_or_update_tool(t_missing.model_copy(update={"last_status": ProbeStatus.AUTH_MISSING}))
+
+    repo.save_benchmark_run(
+        BenchmarkReport(
+            run_id="init_run",
+            started_at="2026-11-14T10:00:00+00:00",
+            finished_at="2026-11-14T10:00:05+00:00",
+            test_query="Python AI",
+            test_url="https://de.wikipedia.org/wiki/Python_(Programmiersprache)",
+            entries=[
+                BenchmarkEntry(
+                    item_type="tool",
+                    item_id="browserbase_fetch",
+                    name=t_missing.name,
+                    status=ProbeStatus.AUTH_MISSING,
+                    latency_ms=0,
+                    quality_score=0.0,
+                    details="Key BROWSERBASE_API_KEY fehlt.",
+                )
+            ],
+            healthy_tools_count=0,
+            healthy_models_count=0,
+        )
+    )
 
     rem_models, rem_tools = brain.cleanup_unhealthy_items()
     assert rem_models == ["gemini-2.0-flash"]
     assert rem_tools == ["gemini_google_search"]
     assert brain.get_model("gemini-2.0-flash") is None
     assert brain.get_tool("gemini_google_search") is None
-    # Missing-Key-Eintrag bleibt erhalten, damit man den Key nachtragen kann
+    # Blocked-Tools und Missing-Key-Einträge MÜSSEN zur Analyse/Key-Eintragung erhalten bleiben!
+    kept_blocked = brain.get_tool("duckduckgo_html")
+    assert kept_blocked is not None and kept_blocked.last_status == ProbeStatus.BLOCKED
     assert brain.get_tool("browserbase_fetch") is not None
 
-    # 2. Write-Only Secret eintragen (wie GitHub Secrets): niemals im Klartext sichtbar, schaltet Missing Key frei
+    # Nach Cleanup darf auto_sync bereinigte Items nicht wieder aufnehmen
+    sync_after_clean = brain.auto_sync()
+    assert brain.get_model("gemini-2.0-flash") is None
+    assert brain.get_tool("gemini_google_search") is None
+    assert "gemini-2.0-flash" in sync_after_clean.skipped_excluded
+    assert "gemini_google_search" in sync_after_clean.skipped_excluded
+
+    # 2. Write-Only Secret eintragen + sofortigen Direkt-Test ausführen
     raw_secret = "bb_live_super_secret_token_999"
     brain.set_secret("BROWSERBASE_API_KEY", raw_secret)
 
@@ -362,14 +443,26 @@ def test_cleanup_unhealthy_items_and_write_only_secrets_vault(tmp_path: Path) ->
     assert "Brain Vault" in bb_status.source
     assert raw_secret not in bb_status.model_dump_json()
 
-    # In der SQLite-Tabelle steht nur das Chiffrat (enc_v1:...), niemals der Klartext
     raw_db_row = repo._executor.execute("SELECT encrypted_value FROM brain_secrets WHERE env_name = ?", ("BROWSERBASE_API_KEY",)).rows[0]  # noqa: SLF001
     assert str(raw_db_row["encrypted_value"]).startswith("enc_v1:")
     assert raw_secret not in str(raw_db_row["encrypted_value"])
 
-    # Status von browserbase_fetch wurde automatisch von AUTH_MISSING auf UNTESTED zurückgesetzt
     unlocked_tool = brain.get_tool("browserbase_fetch")
     assert unlocked_tool is not None and unlocked_tool.last_status == ProbeStatus.UNTESTED
+
+    monkeypatch.setattr(
+        "ki_brain.benchmark.execute_extractor_tool",
+        lambda tool, url, secrets=None: BrainFetchedPage(
+            url=url, title="Python", text_content="Python Inhalt " * 20, extractor_used=tool.id, latency_ms=95
+        ),
+    )
+    probed_entries = brain.probe_items_for_secret("BROWSERBASE_API_KEY")
+    assert len(probed_entries) == 1
+    assert probed_entries[0].item_id == "browserbase_fetch"
+    assert probed_entries[0].status == ProbeStatus.OK
+    assert brain.get_tool("browserbase_fetch").last_status == ProbeStatus.OK  # type: ignore[union-attr]
+    latest_bench = brain.get_latest_benchmark()
+    assert latest_bench is not None and latest_bench.healthy_tools_count == 1
 
     # Komplettes Überschreiben mit neuem Key & Persistenz über Neustart
     brain.set_secret("BROWSERBASE_API_KEY", "bb_live_overwritten_token_111")

@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
 from google import genai
 
+from ki_brain.benchmark import BrainBenchmarkRunner
 from ki_brain.catalog import build_default_models, build_default_tools
-from ki_brain.enums import BrainTier, ModelProvider
+from ki_brain.enums import BrainTier, ModelProvider, ProbeStatus
+from ki_brain.llm_runner import UnifiedLLMRunner
 from ki_brain.models import AIModelSpec, BrainSecrets, ToolSpec
 from ki_brain.security import validate_identifier
 from ki_brain.storage import BrainRepository
@@ -18,7 +21,21 @@ from ki_brain.tools.http_utils import API_HEADERS, safe_http_request
 
 logger = logging.getLogger(__name__)
 
-_GEMINI_SKIP_PARTS = ("embedding", "imagen", "veo", "aqa", "tts", "audio", "robotics", "gemini-1.")
+_GEMINI_SKIP_PARTS = (
+    "embedding",
+    "imagen",
+    "veo",
+    "aqa",
+    "tts",
+    "audio",
+    "robotics",
+    "gemini-1.",
+    "-live",
+    "image",
+    "computer-use",
+    "customtools",
+    "thinking-exp",
+)
 _GEMINI_INCLUDE_PREFIXES = ("gemini-2.", "gemini-3.", "gemini-4.", "gemma-", "deep-research", "learnlm")
 
 
@@ -30,6 +47,8 @@ class DiscoverySummary:
     added_tools: list[str] = field(default_factory=list)
     checked_sources: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    skipped_excluded: list[str] = field(default_factory=list)
+    skipped_unhealthy: list[str] = field(default_factory=list)
 
 
 def _guess_gemini_tier(model_id: str) -> tuple[BrainTier, bool]:
@@ -43,7 +62,11 @@ def _guess_gemini_tier(model_id: str) -> tuple[BrainTier, bool]:
     return BrainTier.STANDARD, False
 
 
-def _sync_new_builtins(repo: BrainRepository) -> tuple[list[str], list[str]]:
+def _sync_new_builtins(
+    repo: BrainRepository,
+    excluded_models: set[str],
+    excluded_tools: set[str],
+) -> tuple[list[str], list[str], list[str]]:
     raw_meta = repo.get_meta("known_builtin_ids", "{}")
     try:
         known = json.loads(raw_meta)
@@ -55,15 +78,20 @@ def _sync_new_builtins(repo: BrainRepository) -> tuple[list[str], list[str]]:
     existing_tools = {t.id for t in repo.list_tools()}
 
     added_m: list[str] = []
+    skipped: list[str] = []
     for m in build_default_models():
-        if m.id not in known_models and m.id not in existing_models:
+        if m.id in excluded_models:
+            skipped.append(m.id)
+        elif m.id not in known_models and m.id not in existing_models:
             repo.upsert_model(m)
             added_m.append(m.id)
         known_models.add(m.id)
 
     added_t: list[str] = []
     for t in build_default_tools():
-        if t.id not in known_tools and t.id not in existing_tools:
+        if t.id in excluded_tools:
+            skipped.append(t.id)
+        elif t.id not in known_tools and t.id not in existing_tools:
             repo.upsert_tool(t)
             added_t.append(t.id)
         known_tools.add(t.id)
@@ -72,7 +100,7 @@ def _sync_new_builtins(repo: BrainRepository) -> tuple[list[str], list[str]]:
         "known_builtin_ids",
         json.dumps({"models": sorted(known_models), "tools": sorted(known_tools)}),
     )
-    return added_m, added_t
+    return added_m, added_t, skipped
 
 
 def _discover_gemini_models(client: genai.Client) -> list[AIModelSpec]:
@@ -107,7 +135,7 @@ def _discover_gemini_models(client: genai.Client) -> list[AIModelSpec]:
                 notes="Automatisch über Gemini API (`models.list`) erkannt.",
             )
         )
-    return discovered
+    return discovered[:24]
 
 
 def _discover_groq_models(api_key: str) -> list[AIModelSpec]:
@@ -144,7 +172,7 @@ def _discover_groq_models(api_key: str) -> list[AIModelSpec]:
                 notes="Kostenfreier Groq-OpenAI-Compat-Endpunkt.",
             )
         )
-    return specs[:6]
+    return specs[:24]
 
 
 def _discover_openrouter_free_models(api_key: str) -> list[AIModelSpec]:
@@ -182,30 +210,55 @@ def _discover_openrouter_free_models(api_key: str) -> list[AIModelSpec]:
                 notes="Automatisch erkanntes `:free`-Modell über OpenRouter.",
             )
         )
-        if len(specs) >= 6:
+        if len(specs) >= 24:
             break
     return specs
 
 
-def _sync_remote_manifest(repo: BrainRepository, manifest_url: str) -> tuple[list[str], list[str]]:
+def _sync_remote_manifest(
+    repo: BrainRepository,
+    manifest_url: str,
+    excluded_tools: set[str],
+    skipped_excluded: list[str],
+) -> tuple[list[AIModelSpec], list[str]]:
     status, _, _, body = safe_http_request("GET", manifest_url, headers=API_HEADERS, timeout_seconds=6.0, max_bytes=300_000)
     if status != 200 or not body:
         return [], []
     data: dict[str, Any] = json.loads(body.decode("utf-8", errors="replace"))
-    existing_m = {m.id for m in repo.list_models()}
     existing_t = {t.id for t in repo.list_tools()}
-    added_m, added_t = [], []
-    for raw_m in data.get("models", []):
-        spec = AIModelSpec.model_validate(raw_m).model_copy(update={"source": "auto_discovered"})
-        if spec.id not in existing_m:
-            repo.upsert_model(spec)
-            added_m.append(spec.id)
+    candidate_models = [
+        AIModelSpec.model_validate(raw_m).model_copy(update={"source": "auto_discovered"})
+        for raw_m in data.get("models", [])
+    ]
+    added_t: list[str] = []
     for raw_t in data.get("tools", []):
         spec_t = ToolSpec.model_validate(raw_t).model_copy(update={"source": "auto_discovered"})
-        if spec_t.id not in existing_t:
+        if spec_t.id in excluded_tools:
+            skipped_excluded.append(spec_t.id)
+        elif spec_t.id not in existing_t:
             repo.upsert_tool(spec_t)
+            existing_t.add(spec_t.id)
             added_t.append(spec_t.id)
-    return added_m, added_t
+    return candidate_models, added_t
+
+
+def _probe_candidate_models(
+    candidates: list[AIModelSpec],
+    bench: BrainBenchmarkRunner,
+) -> list[tuple[AIModelSpec, ProbeStatus]]:
+    if not candidates:
+        return []
+    openai_items = [m for m in candidates if m.provider == ModelProvider.OPENAI_COMPATIBLE]
+    gemini_items = [m for m in candidates if m.provider != ModelProvider.OPENAI_COMPATIBLE]
+    results: list[tuple[AIModelSpec, ProbeStatus]] = []
+    if openai_items:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for probed, entry in pool.map(bench.probe_model, openai_items):
+                results.append((probed, entry.status))
+    for spec in gemini_items:
+        probed, entry = bench.probe_model(spec)
+        results.append((probed, entry.status))
+    return results
 
 
 def auto_sync_catalog(
@@ -214,26 +267,39 @@ def auto_sync_catalog(
     *,
     genai_client: genai.Client | None = None,
     manifest_url: str = "",
+    runner: UnifiedLLMRunner | None = None,
+    verify_discovered: bool = True,
 ) -> DiscoverySummary:
-    """Erkennt neue Builtins, Gemini-, Groq-, OpenRouter-Free-Modelle und optionale Manifeste."""
-    added_models, added_tools = _sync_new_builtins(repo)
+    """Erkennt neue Builtins, Gemini-, Groq-, OpenRouter-Free-Modelle und schließt defekte/entfernte IDs aus."""
+    excluded_models, excluded_tools = repo.list_excluded_ids()
+    added_models, added_tools, skipped_excluded = _sync_new_builtins(repo, excluded_models, excluded_tools)
     sources = ["builtins"]
     warnings: list[str] = []
+    skipped_unhealthy: list[str] = []
     existing_ids = {m.id for m in repo.list_models()}
+    candidates: list[AIModelSpec] = []
+    seen_candidates: set[str] = set()
 
-    def _register_new(items: list[AIModelSpec]) -> None:
+    def _collect(items: list[AIModelSpec], limit: int = 8) -> None:
+        collected_here = 0
         for spec in items:
-            if spec.id not in existing_ids:
-                repo.upsert_model(spec)
-                existing_ids.add(spec.id)
-                added_models.append(spec.id)
+            if spec.id in existing_ids or spec.id in seen_candidates:
+                continue
+            seen_candidates.add(spec.id)
+            if spec.id in excluded_models:
+                skipped_excluded.append(spec.id)
+                continue
+            candidates.append(spec)
+            collected_here += 1
+            if limit > 0 and collected_here >= limit:
+                break
 
     gem_key = secrets.resolve_key("GEMINI_API_KEY")
     if genai_client is not None or gem_key:
         sources.append("gemini-models")
         try:
             client = genai_client or genai.Client(api_key=gem_key)
-            _register_new(_discover_gemini_models(client))
+            _collect(_discover_gemini_models(client), limit=8)
         except Exception as exc:
             warnings.append(f"Gemini Auto-Discovery: {exc}")
 
@@ -241,7 +307,7 @@ def auto_sync_catalog(
     if groq_key:
         sources.append("groq-models")
         try:
-            _register_new(_discover_groq_models(groq_key))
+            _collect(_discover_groq_models(groq_key), limit=6)
         except Exception as exc:
             warnings.append(f"Groq Auto-Discovery: {exc}")
 
@@ -249,22 +315,44 @@ def auto_sync_catalog(
     if or_key:
         sources.append("openrouter-free")
         try:
-            _register_new(_discover_openrouter_free_models(or_key))
+            _collect(_discover_openrouter_free_models(or_key), limit=6)
         except Exception as exc:
             warnings.append(f"OpenRouter Auto-Discovery: {exc}")
 
     if manifest_url.strip():
         sources.append("remote-manifest")
         try:
-            rm, rt = _sync_remote_manifest(repo, manifest_url.strip())
-            added_models.extend(rm)
+            rm_candidates, rt = _sync_remote_manifest(
+                repo, manifest_url.strip(), excluded_tools, skipped_excluded
+            )
+            _collect(rm_candidates, limit=0)
             added_tools.extend(rt)
         except Exception as exc:
             warnings.append(f"Manifest-Sync: {exc}")
+
+    if verify_discovered and candidates:
+        probe_runner = runner or UnifiedLLMRunner(secrets, genai_client=genai_client)
+        bench = BrainBenchmarkRunner(repo, secrets, probe_runner)
+        for probed, status in _probe_candidate_models(candidates, bench):
+            if status in {ProbeStatus.ERROR, ProbeStatus.QUOTA_LIMITED}:
+                skipped_unhealthy.append(probed.id)
+                continue
+            repo.upsert_model(probed)
+            existing_ids.add(probed.id)
+            added_models.append(probed.id)
+        if skipped_unhealthy:
+            repo.add_excluded_ids(model_ids=skipped_unhealthy)
+    else:
+        for spec in candidates:
+            repo.upsert_model(spec)
+            existing_ids.add(spec.id)
+            added_models.append(spec.id)
 
     return DiscoverySummary(
         added_models=added_models,
         added_tools=added_tools,
         checked_sources=sources,
         warnings=warnings,
+        skipped_excluded=skipped_excluded,
+        skipped_unhealthy=skipped_unhealthy,
     )

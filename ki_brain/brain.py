@@ -24,6 +24,7 @@ from ki_brain.execution import (
 from ki_brain.llm_runner import UnifiedLLMRunner
 from ki_brain.models import (
     AIModelSpec,
+    BenchmarkEntry,
     BenchmarkReport,
     BrainConfigSnapshot,
     BrainFetchedPage,
@@ -113,14 +114,46 @@ class KIWebsearchBrain:
     def add_or_update_model(self, spec: AIModelSpec) -> AIModelSpec:
         if spec.base_url.strip():
             validate_safe_external_url(spec.base_url.strip(), resolve_dns=False)
-        return self._repo.upsert_model(spec)
+        saved = self._repo.upsert_model(spec)
+        self._repo.remove_excluded_id(model_id=saved.id)
+        return saved
 
     def set_model_enabled(self, model_id: str, enabled: bool) -> AIModelSpec | None:
         current = self._repo.get_model(model_id)
         return self._repo.upsert_model(current.model_copy(update={"enabled": enabled})) if current else None
 
+    def _prune_ids_from_sequences(
+        self, *, model_ids: set[str] | None = None, tool_ids: set[str] | None = None
+    ) -> None:
+        drop_m = model_ids or set()
+        drop_t = tool_ids or set()
+        if not drop_m and not drop_t:
+            return
+        for seq in self._repo.list_sequences().values():
+            new_s = [tid for tid in seq.search_tool_sequence if tid not in drop_t]
+            new_e = [tid for tid in seq.extractor_tool_sequence if tid not in drop_t]
+            new_m = [mid for mid in seq.model_sequence if mid not in drop_m]
+            if (
+                new_s != seq.search_tool_sequence
+                or new_e != seq.extractor_tool_sequence
+                or new_m != seq.model_sequence
+            ):
+                self._repo.upsert_sequence(
+                    seq.model_copy(
+                        update={
+                            "search_tool_sequence": new_s,
+                            "extractor_tool_sequence": new_e,
+                            "model_sequence": new_m,
+                        }
+                    )
+                )
+
     def remove_model(self, model_id: str) -> bool:
-        return self._repo.delete_model(model_id)
+        removed = self._repo.delete_model(model_id)
+        if removed:
+            self._repo.add_excluded_ids(model_ids=[model_id])
+            self._prune_ids_from_sequences(model_ids={model_id.strip().lower()})
+        return removed
 
     def list_tools(self, enabled_only: bool = False) -> list[ToolSpec]:
         return self._repo.list_tools(enabled_only=enabled_only)
@@ -131,14 +164,20 @@ class KIWebsearchBrain:
     def add_or_update_tool(self, spec: ToolSpec) -> ToolSpec:
         if spec.endpoint_url.strip():
             validate_safe_external_url(spec.endpoint_url.strip(), resolve_dns=False)
-        return self._repo.upsert_tool(spec)
+        saved = self._repo.upsert_tool(spec)
+        self._repo.remove_excluded_id(tool_id=saved.id)
+        return saved
 
     def set_tool_enabled(self, tool_id: str, enabled: bool) -> ToolSpec | None:
         current = self._repo.get_tool(tool_id)
         return self._repo.upsert_tool(current.model_copy(update={"enabled": enabled})) if current else None
 
     def remove_tool(self, tool_id: str) -> bool:
-        return self._repo.delete_tool(tool_id)
+        removed = self._repo.delete_tool(tool_id)
+        if removed:
+            self._repo.add_excluded_ids(tool_ids=[tool_id])
+            self._prune_ids_from_sequences(tool_ids={tool_id.strip().lower()})
+        return removed
 
     def list_sequences(self) -> dict[BrainTier, TierSequenceConfig]:
         return self._repo.list_sequences()
@@ -157,19 +196,20 @@ class KIWebsearchBrain:
         statuses: tuple[ProbeStatus, ...] = (
             ProbeStatus.ERROR,
             ProbeStatus.QUOTA_LIMITED,
-            ProbeStatus.BLOCKED,
         ),
     ) -> tuple[list[str], list[str]]:
-        """Entfernt alle Modelle & Tools mit `Error`, `Quota 429` oder `Blocked` und bereinigt die Sequenzen."""
+        """Entfernt Modelle & Tools mit `Error` oder `Quota 429` dauerhaft; `Blocked` bleibt zur Analyse erhalten."""
         bad = set(statuses)
         removed_models = [m.id for m in self._repo.list_models() if m.last_status in bad and self._repo.delete_model(m.id)]
         removed_tools = [t.id for t in self._repo.list_tools() if t.last_status in bad and self._repo.delete_tool(t.id)]
         if removed_models or removed_tools:
+            self._repo.add_excluded_ids(model_ids=removed_models, tool_ids=removed_tools)
+            self._prune_ids_from_sequences(model_ids=set(removed_models), tool_ids=set(removed_tools))
             seqs = optimize_tier_sequences(
                 self._repo.list_models(),
                 self._repo.list_tools(),
                 self._repo.list_sequences(),
-                force_overwrite=True,
+                force_overwrite=False,
             )
             for seq in seqs.values():
                 self._repo.upsert_sequence(seq)
@@ -202,6 +242,57 @@ class KIWebsearchBrain:
         self._refresh_runtime_secrets()
         return removed
 
+    def probe_items_for_secret(self, env_name: str) -> list[BenchmarkEntry]:
+        """Testet alle zu einem Secret gehörenden Modelle/Tools live und aktualisiert Tier-Sequenzen bei Erfolg."""
+        clean_name = validate_secret_env_name(env_name)
+        self._refresh_runtime_secrets()
+        bench = BrainBenchmarkRunner(self._repo, self._secrets, self._runner)
+        entries: list[BenchmarkEntry] = []
+
+        target_models = [m for m in self._repo.list_models(enabled_only=True) if m.api_key_env.strip().upper() == clean_name]
+        for model in target_models:
+            um, entry = bench.probe_model(model)
+            self._repo.upsert_model(um)
+            entries.append(entry)
+
+        all_models = self._repo.list_models(enabled_only=True)
+        grounding_model = next(
+            (m for m in all_models if not m.is_deep_agent and m.provider.value == "google_gemini" and m.last_status == ProbeStatus.OK),
+            next((m for m in all_models if not m.is_deep_agent and m.provider.value == "google_gemini"), None),
+        )
+        target_tools = [t for t in self._repo.list_tools(enabled_only=True) if t.api_key_env.strip().upper() == clean_name]
+        for tool in target_tools:
+            ut, entry = bench.probe_tool(tool, DEFAULT_TEST_QUERY, DEFAULT_TEST_URL, grounding_model)
+            self._repo.upsert_tool(ut)
+            entries.append(entry)
+
+        updated_seqs = self._repo.list_sequences()
+        if any(e.status == ProbeStatus.OK for e in entries):
+            seqs = optimize_tier_sequences(
+                self._repo.list_models(),
+                self._repo.list_tools(),
+                updated_seqs,
+                force_overwrite=False,
+            )
+            updated_seqs = {t: self._repo.upsert_sequence(seq) for t, seq in seqs.items()}
+
+        latest = self._repo.get_latest_benchmark()
+        if latest is not None and entries:
+            by_key = {(e.item_type, e.item_id): e for e in latest.entries}
+            for new_entry in entries:
+                by_key[(new_entry.item_type, new_entry.item_id)] = new_entry
+            merged = list(by_key.values())
+            refreshed = latest.model_copy(
+                update={
+                    "entries": merged,
+                    "sequences": {t.value: cfg for t, cfg in updated_seqs.items()},
+                    "healthy_tools_count": sum(1 for e in merged if e.item_type == "tool" and e.status == ProbeStatus.OK),
+                    "healthy_models_count": sum(1 for e in merged if e.item_type == "model" and e.status == ProbeStatus.OK),
+                }
+            )
+            self._repo.save_benchmark_run(refreshed)
+        return entries
+
     def list_secret_statuses(self) -> list[SecretStatusEntry]:
         """Liefert Write-Only-Metadaten aller relevanten API-Keys (NIEMALS den Klartext-Wert!)."""
         vault_ts = self._repo.list_secret_timestamps()
@@ -233,9 +324,14 @@ class KIWebsearchBrain:
         return entries
 
     # --- Auto-Discovery & Testlauf (Fast, Standard, Deep) ---
-    def auto_sync(self, manifest_url: str = "") -> DiscoverySummary:
+    def auto_sync(self, manifest_url: str = "", *, verify_discovered: bool = True) -> DiscoverySummary:
         return auto_sync_catalog(
-            self._repo, self._secrets, genai_client=self._genai_client, manifest_url=manifest_url
+            self._repo,
+            self._secrets,
+            genai_client=self._genai_client,
+            manifest_url=manifest_url,
+            runner=self._runner,
+            verify_discovered=verify_discovered,
         )
 
     def run_benchmark(

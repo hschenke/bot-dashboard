@@ -124,13 +124,62 @@ class BrainRepository:
         stmts.append(("INSERT OR REPLACE INTO brain_meta (key, value) VALUES (?, ?)", ("seeded_v1", "1")))
         self._executor.execute_batch(stmts)
 
+    def list_excluded_ids(self) -> tuple[set[str], set[str]]:
+        """Liefert persistent ausgeschlossene (gelöschte/defekte) Modell- und Tool-IDs."""
+        raw = self.get_meta("excluded_ids", "{}")
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return set(), set()
+        models = {str(x).strip() for x in data.get("models", []) if str(x).strip()}
+        tools = {str(x).strip() for x in data.get("tools", []) if str(x).strip()}
+        return models, tools
+
+    def _save_excluded_ids(self, models: set[str], tools: set[str]) -> None:
+        self.set_meta(
+            "excluded_ids",
+            json.dumps({"models": sorted(models), "tools": sorted(tools)}),
+        )
+
+    def add_excluded_ids(
+        self,
+        *,
+        model_ids: list[str] | set[str] | tuple[str, ...] = (),
+        tool_ids: list[str] | set[str] | tuple[str, ...] = (),
+    ) -> None:
+        """Markiert entfernte oder nicht funktionierende IDs dauerhaft gegen Auto-Sync-Wiederaufnahme."""
+        clean_m = {str(x).strip().lower() for x in model_ids if str(x).strip()}
+        clean_t = {str(x).strip().lower() for x in tool_ids if str(x).strip()}
+        if not clean_m and not clean_t:
+            return
+        models, tools = self.list_excluded_ids()
+        updated_m = models | clean_m
+        updated_t = tools | clean_t
+        if updated_m != models or updated_t != tools:
+            self._save_excluded_ids(updated_m, updated_t)
+
+    def remove_excluded_id(self, *, model_id: str = "", tool_id: str = "") -> None:
+        """Hebt den Auto-Sync-Ausschluss bei expliziter manueller Neuanlage wieder auf."""
+        models, tools = self.list_excluded_ids()
+        changed = False
+        clean_m = model_id.strip().lower()
+        clean_t = tool_id.strip().lower()
+        if clean_m and clean_m in models:
+            models.discard(clean_m)
+            changed = True
+        if clean_t and clean_t in tools:
+            tools.discard(clean_t)
+            changed = True
+        if changed:
+            self._save_excluded_ids(models, tools)
+
     def reset_to_defaults(self) -> None:
         self._executor.execute_batch(
             [
                 ("DELETE FROM brain_models", ()),
                 ("DELETE FROM brain_tools", ()),
                 ("DELETE FROM brain_sequences", ()),
-                ("DELETE FROM brain_meta WHERE key IN ('seeded_v1', 'known_builtin_ids')", ()),
+                ("DELETE FROM brain_meta WHERE key IN ('seeded_v1', 'known_builtin_ids', 'excluded_ids')", ()),
             ]
         )
         self.ensure_seeded()

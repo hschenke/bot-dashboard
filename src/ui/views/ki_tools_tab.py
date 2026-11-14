@@ -5,6 +5,7 @@ from __future__ import annotations
 import streamlit as st
 from ki_brain import BrainError, KIWebsearchBrain, ToolCategory, ToolSpec
 
+from src.ui.views.ki_secret_dialog import render_missing_keys_action_bar
 from src.ui.views.ki_sequences_tab import format_probe_badge
 
 _EXECUTOR_OPTIONS: tuple[str, ...] = (
@@ -53,6 +54,9 @@ def render_tools_tab(brain: KIWebsearchBrain, is_admin: bool) -> None:
     ]
     st.dataframe(rows, use_container_width=True, hide_index=True)
 
+    tool_envs = {t.api_key_env.strip().upper() for t in tools if t.api_key_env.strip()}
+    render_missing_keys_action_bar(brain, is_admin=is_admin, env_filter=tool_envs, section_key="tools")
+
     if is_admin:
         _render_tool_controls(brain, tools)
         _render_tool_form(brain, tools)
@@ -66,7 +70,7 @@ def _render_tool_controls(brain: KIWebsearchBrain, tools: list[ToolSpec]) -> Non
     if not tool_ids:
         return
     st.subheader("🔧 Tool aktivieren, bearbeiten oder löschen")
-    c_sel, c_tog, c_del = st.columns([2, 1, 1])
+    c_sel, c_tog, c_del = st.columns([2, 1, 1], vertical_alignment="bottom")
     with c_sel:
         sel_id = st.selectbox("Tool wählen", options=tool_ids, key="ki_tool_quick_sel")
     cur = next(t for t in tools if t.id == sel_id)
@@ -179,7 +183,11 @@ def _render_snapshot_controls(brain: KIWebsearchBrain, is_admin: bool) -> None:
             except (BrainError, ValueError) as exc:
                 _set_feedback("error", f"Import fehlgeschlagen: {exc}")
             st.rerun()
-    if st.button("♻️ Standardkatalog (Research-Bot & Alert-Bot) zurücksetzen", key="ki_reset_defaults_btn"):
+    if st.button(
+        "♻️ Standardkatalog (Research-Bot & Alert-Bot) zurücksetzen",
+        key="ki_reset_defaults_btn",
+        help="Setzt Modelle, Tools, ausgeschlossene Einträge und Tier-Sequenzen auf den Werkskatalog aus Research-Bot & Alert-Bot zurück. Gespeicherte API-Keys im Tresor und Benchmark-Logs bleiben erhalten.",
+    ):
         brain.reset_defaults()
         _set_feedback("success", "Standardmodelle, Tools & Startsequenzen wiederhergestellt.")
         st.rerun()

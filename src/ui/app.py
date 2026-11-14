@@ -17,6 +17,14 @@ from src.ui.views.ki_view import render_ki_view
 from src.ui.views.overview_view import render_overview_view
 from src.ui.views.settings_view import render_settings_view
 
+_NAV_PAGES: tuple[tuple[str, str, str], ...] = (
+    ("dashboard", "📡", "Dashboard"),
+    ("db", "🗄️", "DB-Inspektor"),
+    ("ki", "🤖", "KI-View"),
+    ("settings", "⚙️", "System & Historie"),
+)
+_NAV_VALID_KEYS: frozenset[str] = frozenset(k for k, _, _ in _NAV_PAGES)
+
 
 def _ensure_initial_snapshots(
     coordinator: FleetCheckCoordinator,
@@ -51,41 +59,40 @@ def run_streamlit_app() -> None:
     try:
         snapshots = _ensure_initial_snapshots(coordinator, repository)
 
+        if st.session_state.get("active_page") not in _NAV_VALID_KEYS:
+            st.session_state["active_page"] = "dashboard"
+
         with st.sidebar:
             st.title("🎛️ Holli Dashboard")
             st.caption(f"v{__version__} • Control Center")
 
-            pages = [
-                "📡 Dashboard",
-                "🗄️ DB-Inspektor",
-                "🤖  KI-View",
-                "⚙️ System & Historie",
-            ]
-            selected_page = st.radio(
-                "Navigation",
-                options=pages,
-                index=0,
-                label_visibility="collapsed",
-            )
+            for page_key, page_icon, page_label in _NAV_PAGES:
+                is_active = st.session_state["active_page"] == page_key
+                if st.button(
+                    page_label,
+                    icon=page_icon,
+                    key=f"nav_page_{page_key}",
+                    type="primary" if is_active else "secondary",
+                    use_container_width=True,
+                ):
+                    st.session_state["active_page"] = page_key
+                    st.rerun()
 
             if role == AuthRole.ADMIN and settings.app_password.strip():
                 st.markdown("<div style='height: 16px;'></div>", unsafe_allow_html=True)
-                if st.button("🚪 Abmelden", use_container_width=True):
+                if st.button("Abmelden", icon="🚪", key="nav_logout_btn", use_container_width=True):
                     from src.ui.auth_view import clear_auth_cookie
 
                     clear_auth_cookie()
                     st.session_state["just_logged_out"] = True
                     st.rerun()
 
-        if selected_page in {
-            "📡 Dashboard",
-            "📡 Übersicht",
-            "🌐 Running & URLs",
-        }:
+        selected_page = st.session_state["active_page"]
+        if selected_page == "dashboard":
             render_overview_view(snapshots, coordinator, repository, role)
-        elif selected_page == "🗄️ DB-Inspektor":
+        elif selected_page == "db":
             render_db_view(snapshots)
-        elif selected_page in {"🤖  KI-View", "🤖 KI-View"}:
+        elif selected_page == "ki":
             render_ki_view(settings, role=role)
         else:
             render_settings_view(settings, repository)

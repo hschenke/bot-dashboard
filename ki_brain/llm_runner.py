@@ -122,10 +122,12 @@ class UnifiedLLMRunner:
         cancel_check: Callable[[], None] | None = None,
     ) -> tuple[str, list[BrainCitation]]:
         """Führt eine Text- oder Agenten-Anfrage gegen genau ein Modell aus."""
-        self._rate_limiter.acquire(cancel_check)
         if model.provider == ModelProvider.OPENAI_COMPATIBLE:
+            if cancel_check is not None:
+                cancel_check()
             text = self._call_openai_compat(model, prompt, system_instruction, timeout_seconds=timeout_seconds)
             return text, []
+        self._rate_limiter.acquire(cancel_check)
         if model.provider == ModelProvider.GEMINI_DEEP_AGENT or model.is_deep_agent:
             return self._call_gemini_deep_agent(
                 model, prompt, timeout_seconds=max(timeout_seconds, 120.0), on_poll_tick=on_poll_tick, cancel_check=cancel_check
@@ -152,12 +154,12 @@ class UnifiedLLMRunner:
         timeout_seconds: float = 40.0,
     ) -> ModelT:
         """Erzwingt gültiges Pydantic-JSON vom gewählten Modell."""
-        self._rate_limiter.acquire()
         if model.provider == ModelProvider.OPENAI_COMPATIBLE:
             schema_hint = json.dumps(schema_cls.model_json_schema(), ensure_ascii=False)
             sys_txt = f"{system_instruction}\nGib ausschließlich valides JSON gemäß Schema zurück:\n{schema_hint}".strip()
             raw = self._call_openai_compat(model, prompt, sys_txt, timeout_seconds=timeout_seconds, json_mode=True)
             return schema_cls.model_validate_json(strip_json_fences(raw))
+        self._rate_limiter.acquire()
 
         client = self._get_genai_client(timeout_seconds=timeout_seconds)
         interaction = client.interactions.create(

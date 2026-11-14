@@ -10,6 +10,7 @@ from src.config.settings import AppSettings
 from src.domain.enums import AuthRole
 from src.ui.views.ki_models_tab import render_models_tab
 from src.ui.views.ki_playground_tab import render_playground_tab
+from src.ui.views.ki_secret_dialog import render_active_secret_dialog
 from src.ui.views.ki_secrets_section import render_secrets_manager_expander
 from src.ui.views.ki_sequences_tab import render_sequences_tab
 from src.ui.views.ki_tools_tab import render_tools_tab
@@ -69,11 +70,10 @@ def render_ki_view(
             )
             st.metric("Letzter Testlauf", bench_txt)
 
-        btn_bench, btn_sync, btn_clean = st.columns([1.8, 1.3, 1.3])
+        btn_bench, btn_sync, btn_clean = st.columns([1.65, 1.2, 1.3], vertical_alignment="center")
         with btn_bench:
             run_bench = st.button(
                 "🚀 Testlauf starten & Sequenzen optimieren",
-                type="primary",
                 disabled=not is_admin,
                 use_container_width=True,
             )
@@ -88,7 +88,7 @@ def render_ki_view(
                 "🧹 Bereinigen (Error & Quota 429)",
                 disabled=not is_admin,
                 use_container_width=True,
-                help="Entfernt automatisch alle Modelle und Tools mit Status Error, Quota 429 oder Blocked.",
+                help="Entfernt Modelle und Tools mit Status Error oder Quota 429 dauerhaft. Blocked-Tools bleiben zur Analyse erhalten.",
             )
 
         # Spinner & Alerts strikt außerhalb schmaler Spalten rendern
@@ -110,13 +110,19 @@ def render_ki_view(
 
         if run_sync:
             try:
-                with st.spinner("Erkenne kostenfreie Modelle & neue Standard-Tools..."):
-                    summary = brain.auto_sync()
+                with st.spinner("Erkenne funktionierende kostenfreie Modelle & neue Standard-Tools..."):
+                    summary = brain.auto_sync(verify_discovered=True)
+                skipped_total = len(summary.skipped_excluded) + len(summary.skipped_unhealthy)
+                skip_note = (
+                    f" ({skipped_total} defekte/ausgeschlossene übersprungen)"
+                    if skipped_total
+                    else ""
+                )
                 st.session_state["ki_brain_feedback"] = {
                     "level": "success" if not summary.warnings else "warning",
                     "message": (
                         f"Auto-Sync fertig ({', '.join(summary.checked_sources)}): "
-                        f"+{len(summary.added_models)} Modelle, +{len(summary.added_tools)} Tools."
+                        f"+{len(summary.added_models)} Modelle, +{len(summary.added_tools)} Tools{skip_note}."
                     ),
                 }
             except BrainError as exc:
@@ -129,9 +135,9 @@ def render_ki_view(
                 total_rem = len(rem_models) + len(rem_tools)
                 msg = (
                     f"Bereinigung abgeschlossen: {len(rem_models)} Modelle ({', '.join(rem_models) or '–'}) & "
-                    f"{len(rem_tools)} Tools ({', '.join(rem_tools) or '–'}) entfernt."
+                    f"{len(rem_tools)} Tools ({', '.join(rem_tools) or '–'}) dauerhaft entfernt (Blocked-Tools erhalten)."
                     if total_rem > 0
-                    else "Keine fehlerhaften oder Quota-429-Elemente zum Entfernen gefunden."
+                    else "Keine Error- oder Quota-429-Elemente zum Entfernen gefunden (Blocked-Tools bleiben erhalten)."
                 )
                 st.session_state["ki_brain_feedback"] = {"level": "success" if total_rem else "info", "message": msg}
             except BrainError as exc:
@@ -160,3 +166,5 @@ def render_ki_view(
             render_playground_tab(brain, is_admin=is_admin)
     finally:
         brain.close()
+
+    render_active_secret_dialog(settings, is_admin=is_admin)
