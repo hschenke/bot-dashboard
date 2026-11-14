@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from src.ai.llm_gateway import DashboardAIGateway, build_heuristic_fleet_analysis
 from src.checks.coordinator import FleetCheckCoordinator, derive_overall_health
 from src.config.settings import AppSettings, load_app_settings
 from src.domain.enums import AppId, HealthStatus, WorkflowRunState
@@ -90,40 +89,6 @@ def test_dashboard_repository_records_and_lists_snapshots() -> None:
     assert len(logs) == 1
     assert logs[0].overall_status == "online"
     repo.close()
-
-
-def test_heuristic_and_gemini_ai_analysis() -> None:
-    snapshots = [
-        _make_snapshot(AppId.NEWS_BOT, url_status=HealthStatus.ONLINE),
-        _make_snapshot(AppId.RESEARCH_BOT, url_status=HealthStatus.ASLEEP),
-        _make_snapshot(AppId.ALERT_BOT, wf_state=WorkflowRunState.FAILURE),
-    ]
-    heuristic = build_heuristic_fleet_analysis(snapshots)
-    assert heuristic.fleet_health_score < 100
-    assert heuristic.headline.startswith("System-Status:")
-    assert "Flotten" not in heuristic.headline
-    assert len(heuristic.app_insights) == 3
-    assert len(heuristic.anomalies_or_warnings) >= 2
-
-    # Mock Gemini Interactions API call
-    mock_client = MagicMock()
-    mock_interaction = MagicMock()
-    mock_interaction.output_text = (
-        '{"fleet_health_score": 92, "headline": "System stabil", '
-        '"executive_summary": "Alle Systeme geprüft.", "app_insights": [], '
-        '"anomalies_or_warnings": [], "next_steps": ["Weiter beobachten"]}'
-    )
-    mock_client.interactions.create.return_value = mock_interaction
-
-    settings = AppSettings(gemini_api_key="AIzaSyRealKeyForTest123")
-    gateway = DashboardAIGateway(settings, client=mock_client)
-    ai_res = gateway.analyze_fleet(snapshots)
-    assert ai_res.fleet_health_score == 92
-    assert ai_res.headline == "System stabil"
-
-    mock_interaction.output_text = "News-Bot hat 42 Artikel gespeichert."
-    answer = gateway.answer_fleet_question(snapshots, "Wie viele Artikel hat der News-Bot?")
-    assert "42 Artikel" in answer
 
 
 def test_coordinator_checks_all_three_apps() -> None:

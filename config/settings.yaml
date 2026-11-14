@@ -1,12 +1,6 @@
 # Deklarative Standardkonfiguration für das Holli Dashboard
 default_language: "de"
 
-allowed_models:
-  - "gemini-3.5-flash-lite"
-  - "gemini-3.8-flash"
-  - "gemini-3.1-flash-lite"
-  - "gemini-4-argon"
-
 apps:
   news_bot:
     title: "News-Bot"
@@ -58,15 +52,3 @@ apps:
       - "alert_events"
       - "alert_check_logs"
       - "alert_seen_items"
-
-prompts:
-  fleet_diagnosis_system_prompt: >-
-    Du bist ein präziser Site-Reliability- & KI-Systemarchitekt für eine Flotte
-    autonomer Streamlit/Turso/GitHub-Actions-Applikationen.
-    Analysiere die übergebenen Echtzeit-Telemetriedaten (HTTP/Streamlit-Status, Latenzen,
-    GitHub-Actions-Läufe, Datenbank-Tabellenstände und jüngste Fehler).
-    Liefere eine faktenbasierte, prägnante Diagnose ohne Fülltext. Erfinde niemals Metriken.
-  fleet_qa_system_prompt: >-
-    Du bist der KI-Operations-Assistent des Dashboards. Beantworte die Frage des Nutzers
-    direkt, präzise und ausschließlich auf Basis der bereitgestellten Live-Telemetriedaten
-    der überwachten Apps.

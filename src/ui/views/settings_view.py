@@ -17,11 +17,26 @@ def render_settings_view(
     st.header("⚙️ System-Konfiguration & Check-Historie")
 
     st.subheader("🔐 Konfigurations-Matrix")
+    configured_providers = [
+        name
+        for name, flag in (
+            ("Gemini", settings.has_gemini_configured),
+            ("Groq", bool(settings.groq_api_key)),
+            ("OpenRouter", bool(settings.openrouter_api_key)),
+            ("Cerebras", bool(settings.cerebras_api_key)),
+            ("Mistral", bool(settings.mistral_api_key)),
+        )
+        if flag
+    ]
     matrix_rows = [
         {
-            "Komponente": "Google Gemini API (KI-View)",
-            "Status": "✅ Konfiguriert" if settings.has_gemini_configured else "⚪ Heuristik-Modus (kein Key)",
-            "Details": f"Primärmodell: {settings.gemini_fast_model}",
+            "Komponente": "KI & Websearch Brain",
+            "Status": "✅ Aktiv (KI + Web)" if settings.has_any_ai_key_configured else "⚪ Heuristik-Modus (Keyless Web-Tools aktiv)",
+            "Details": (
+                f"Aktive Provider: {', '.join(configured_providers)}"
+                if configured_providers
+                else "Key-freie Web/Wissens-Tools einsatzbereit; KI-Keys optional"
+            ),
         },
         {
             "Komponente": "GitHub Actions Token",

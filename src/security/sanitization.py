@@ -6,11 +6,7 @@ import re
 from pathlib import Path
 from urllib.parse import urlparse
 
-from src.config.constants import (
-    ALLOWED_INSPECTION_TABLES,
-    ALLOWED_URL_SCHEMES,
-    MAX_QUESTION_LENGTH,
-)
+from src.config.constants import ALLOWED_INSPECTION_TABLES, ALLOWED_URL_SCHEMES
 from src.domain.exceptions import ValidationError
 
 _GITHUB_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}/[A-Za-z0-9_.-]{1,64}$")
@@ -38,16 +34,6 @@ def validate_workflow_filename(filename: str) -> str:
     cleaned = (filename or "").strip()
     if not _WORKFLOW_FILE_RE.match(cleaned):
         raise ValidationError(f"Ungültiger Workflow-Dateiname: '{filename}'.")
-    return cleaned
-
-
-def validate_user_question(question: str) -> str:
-    """Bereinigt und begrenzt eine Benutzerfrage für den KI-Assistenten."""
-    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", (question or "")).strip()
-    if not cleaned:
-        raise ValidationError("Bitte gib eine Frage für die KI-Analyse ein.")
-    if len(cleaned) > MAX_QUESTION_LENGTH:
-        raise ValidationError(f"Frage ist zu lang (max. {MAX_QUESTION_LENGTH} Zeichen).")
     return cleaned
 
 

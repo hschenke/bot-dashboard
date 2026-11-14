@@ -26,6 +26,3 @@ class StorageConnectionError(StorageError):
 class ProbeError(DashboardError):
     """Fehler beim Prüfen einer URL, GitHub Action oder Fremd-Datenbank."""
 
-
-class LLMProviderError(DashboardError):
-    """Fehler bei der Kommunikation mit der Google Gemini Interactions API."""

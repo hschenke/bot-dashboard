@@ -20,7 +20,6 @@ from src.security.sanitization import (
     resolve_safe_sqlite_path,
     sanitize_display_url,
     validate_github_repo_slug,
-    validate_user_question,
     validate_whitelisted_table_name,
     validate_workflow_filename,
 )
@@ -98,7 +97,6 @@ def test_sanitization_and_path_traversal_protection(tmp_path: Path) -> None:
 
     assert sanitize_display_url("https://example.com/a") == "https://example.com/a"
     assert sanitize_display_url("javascript:alert(1)") == "#"
-    assert validate_user_question("  Wie ist der Status? ") == "Wie ist der Status?"
 
     safe_file = resolve_safe_sqlite_path(tmp_path, "data/test.db")
     assert safe_file.is_relative_to(tmp_path)

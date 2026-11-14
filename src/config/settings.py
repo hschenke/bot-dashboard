@@ -13,9 +13,7 @@ import yaml
 from dotenv import load_dotenv
 
 from src.config.constants import (
-    CANDIDATE_MODELS,
-    DEFAULT_DEEP_MODEL,
-    DEFAULT_FAST_MODEL,
+    DEFAULT_BRAIN_SQLITE_REL_PATH,
     DEFAULT_SQLITE_REL_PATH,
 )
 from src.domain.enums import AppId
@@ -106,30 +104,54 @@ def _is_placeholder(val: str) -> bool:
     )
 
 
+def _clean_secret(key: str) -> str:
+    raw = get_secret_or_env(key)
+    return "" if _is_placeholder(raw) else raw.strip()
+
+
 @dataclass(frozen=True)
 class AppSettings:
     """Zentrales Konfigurationsobjekt (`repr=False` auf allen Geheimnissen)."""
 
     gemini_api_key: str = field(default="", repr=False)
-    gemini_fast_model: str = DEFAULT_FAST_MODEL
-    gemini_deep_model: str = DEFAULT_DEEP_MODEL
-    allowed_models: tuple[str, ...] = CANDIDATE_MODELS
+    browserbase_api_key: str = field(default="", repr=False)
+    browserbase_project_id: str = ""
+    reddit_client_id: str = field(default="", repr=False)
+    reddit_client_secret: str = field(default="", repr=False)
+    groq_api_key: str = field(default="", repr=False)
+    openrouter_api_key: str = field(default="", repr=False)
+    cerebras_api_key: str = field(default="", repr=False)
+    mistral_api_key: str = field(default="", repr=False)
 
     github_token: str = field(default="", repr=False)
     turso_url: str = ""
     turso_auth_token: str = field(default="", repr=False)
     sqlite_path: str = DEFAULT_SQLITE_REL_PATH
+    brain_turso_url: str = ""
+    brain_turso_auth_token: str = field(default="", repr=False)
+    brain_sqlite_path: str = DEFAULT_BRAIN_SQLITE_REL_PATH
 
     app_password: str = field(default="", repr=False)
     streamlit_app_url: str = ""
     default_language: str = "de"
-    fleet_diagnosis_prompt: str = ""
-    fleet_qa_prompt: str = ""
     managed_apps: tuple[ManagedAppSpec, ...] = ()
 
     @property
     def has_gemini_configured(self) -> bool:
         return not _is_placeholder(self.gemini_api_key)
+
+    @property
+    def has_any_ai_key_configured(self) -> bool:
+        return any(
+            not _is_placeholder(k)
+            for k in (
+                self.gemini_api_key,
+                self.groq_api_key,
+                self.openrouter_api_key,
+                self.cerebras_api_key,
+                self.mistral_api_key,
+            )
+        )
 
     @property
     def has_github_token(self) -> bool:
@@ -191,28 +213,27 @@ def load_app_settings(
     """Lädt und validiert die Dashboard-Konfiguration ausschließlich aus ENV/Secrets/YAML."""
     data = _load_yaml_defaults(yaml_path)
     apps = data.get("apps", {}) if isinstance(data.get("apps"), dict) else {}
-    prompts = data.get("prompts", {}) if isinstance(data.get("prompts"), dict) else {}
-    raw_models = data.get("allowed_models")
-    models = (
-        tuple(str(m).strip() for m in raw_models if str(m).strip())
-        if isinstance(raw_models, list) and raw_models
-        else CANDIDATE_MODELS
-    )
 
     return AppSettings(
-        gemini_api_key="" if _is_placeholder(get_secret_or_env("GEMINI_API_KEY")) else get_secret_or_env("GEMINI_API_KEY"),
-        gemini_fast_model=get_secret_or_env("GEMINI_MODEL", DEFAULT_FAST_MODEL),
-        gemini_deep_model=get_secret_or_env("GEMINI_DEEP_MODEL", DEFAULT_DEEP_MODEL),
-        allowed_models=models,
-        github_token="" if _is_placeholder(get_secret_or_env("GITHUB_TOKEN")) else get_secret_or_env("GITHUB_TOKEN"),
+        gemini_api_key=_clean_secret("GEMINI_API_KEY"),
+        browserbase_api_key=_clean_secret("BROWSERBASE_API_KEY"),
+        browserbase_project_id=get_secret_or_env("BROWSERBASE_PROJECT_ID"),
+        reddit_client_id=_clean_secret("REDDIT_CLIENT_ID"),
+        reddit_client_secret=_clean_secret("REDDIT_CLIENT_SECRET"),
+        groq_api_key=_clean_secret("GROQ_API_KEY"),
+        openrouter_api_key=_clean_secret("OPENROUTER_API_KEY"),
+        cerebras_api_key=_clean_secret("CEREBRAS_API_KEY"),
+        mistral_api_key=_clean_secret("MISTRAL_API_KEY"),
+        github_token=_clean_secret("GITHUB_TOKEN"),
         turso_url=get_secret_or_env("TURSO_URL"),
         turso_auth_token=get_secret_or_env("TURSO_KEY"),
         sqlite_path=get_secret_or_env("SQLITE_PATH", DEFAULT_SQLITE_REL_PATH),
+        brain_turso_url=get_secret_or_env("BRAIN_TURSO_URL"),
+        brain_turso_auth_token=get_secret_or_env("BRAIN_TURSO_KEY"),
+        brain_sqlite_path=get_secret_or_env("BRAIN_SQLITE_PATH", DEFAULT_BRAIN_SQLITE_REL_PATH),
         app_password=get_secret_or_env("APP_PASSWORD"),
         streamlit_app_url=get_secret_or_env("STREAMLIT_APP_URL"),
         default_language=str(data.get("default_language", "de")),
-        fleet_diagnosis_prompt=str(prompts.get("fleet_diagnosis_system_prompt", "")),
-        fleet_qa_prompt=str(prompts.get("fleet_qa_system_prompt", "")),
         managed_apps=(
             _build_app_spec(AppId.NEWS_BOT, "NEWS_BOT", apps),
             _build_app_spec(AppId.RESEARCH_BOT, "RESEARCH_BOT", apps),

@@ -1,1 +1,1 @@
-"""Domänenschicht mit unveränderlichen Datenmodellen, Enums, Schemata und Exceptions."""
+"""Domänenschicht mit unveränderlichen Datenmodellen, Enums und Exceptions."""

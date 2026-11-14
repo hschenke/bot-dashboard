@@ -2,16 +2,6 @@
 
 from __future__ import annotations
 
-# Gemini KI-Modelle (aktuelle Generation gem. google-genai >= 2.30.1)
-DEFAULT_FAST_MODEL: str = "gemini-3.5-flash-lite"
-DEFAULT_DEEP_MODEL: str = "gemini-3.8-flash"
-CANDIDATE_MODELS: tuple[str, ...] = (
-    "gemini-3.5-flash-lite",
-    "gemini-3.8-flash",
-    "gemini-3.1-flash-lite",
-    "gemini-4-argon",
-)
-
 # HTTP & Netzwerk-Timeouts (DoS-Prävention)
 HTTP_CONNECT_TIMEOUT_SECONDS: float = 4.0
 HTTP_READ_TIMEOUT_SECONDS: float = 10.0
@@ -29,10 +19,8 @@ DEFAULT_HTTP_RETRIES: int = 2
 RETRY_BACKOFF_BASE_SECONDS: float = 0.6
 SQLITE_TIMEOUT_SECONDS: float = 10.0
 
-# GitHub API & KI-Grenzwerte
+# GitHub API Grenzwerte
 GITHUB_API_TIMEOUT_SECONDS: float = 10.0
-LLM_TIMEOUT_SECONDS: float = 40.0
-LLM_MAX_ATTEMPTS: int = 3
 
 # SSRF-Whitelist
 ALLOWED_URL_SCHEMES: frozenset[str] = frozenset({"http", "https"})
@@ -59,9 +47,9 @@ ALLOWED_INSPECTION_TABLES: frozenset[str] = frozenset(
 
 # Persistenz & Grenzwerte
 DEFAULT_SQLITE_REL_PATH: str = "data/bot_dashboard.db"
+DEFAULT_BRAIN_SQLITE_REL_PATH: str = "data/ki_brain.db"
 MAX_RECENT_ITEMS_PER_APP: int = 8
 MAX_CHECK_LOG_HISTORY: int = 60
-MAX_QUESTION_LENGTH: int = 1200
 
 # Auth, 30-Tage-Cookie & Brute-Force-Schutz
 AUTH_COOKIE_NAME: str = "bot_dashboard_auth_token"

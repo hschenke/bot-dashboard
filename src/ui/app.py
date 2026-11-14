@@ -86,7 +86,7 @@ def run_streamlit_app() -> None:
         elif selected_page == "🗄️ DB-Inspektor":
             render_db_view(snapshots)
         elif selected_page == "🤖 KI-View":
-            render_ki_view(settings, snapshots)
+            render_ki_view(settings, role=role)
         else:
             render_settings_view(settings, repository)
     finally:

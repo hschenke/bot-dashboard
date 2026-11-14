@@ -1,26 +1,42 @@
-# 🎛️ Holli Dashboard (Streamlit Fleet Control Center)
+# 🎛️ Holli Dashboard & 🧠 KI & Websearch Brain
 
-Zentrale Monitoring-, Datenbank-, Worker- und KI-Kommandozentrale für deine **auf Streamlit Community Cloud gehosteten Applikationen** (z. B. News-Bot, Research-Bot, Alert-Bot).
-Alle Konfigurationen, URLs, Repos und Datenbank-Credentials werden sicher und flexibel über **Secrets** (`st.secrets` / `.streamlit/secrets.toml`) bzw. Umgebungsvariablen gesteuert.
+Zentrale Monitoring-, Datenbank-, Worker- und **KI & Websearch Brain**-Kommandozentrale für deine **auf Streamlit Community Cloud gehosteten Applikationen** (`News-Bot`, `Research-Bot`, `Alert-Bot`).
+Alle Konfigurationen, URLs, Repos und Datenbank-Credentials werden sicher über **Secrets** (`st.secrets` / `.streamlit/secrets.toml`) bzw. Umgebungsvariablen gesteuert.
 
-Konzipiert als eigenständige **Streamlit Web-App** auf derselben kostenlosen **0-€-Cloud-Architektur** (**Streamlit Community Cloud + GitHub Actions + Turso LibSQL / SQLite + Google Gemini**).
+Zusätzlich stellt dieses Repository mit [`ki_brain`](ki_brain/__init__.py) ein **eigenständiges, kollisionsfreies Python-Framework** bereit, das direkt in `research-bot`, `alert-bot` und `news-bot` eingebunden werden kann.
 
 ---
 
 ## ✨ Kernfunktionen & Ansichten
 
 - **📡 Dashboard (Zentrale Flotten-Übersicht & Worker-Monitor)**:
-  - **KPI-Header & Sofort-Check**: Flotten-Kennzahlen (Online-Apps, wache Streamlit-URLs, DB-Verbindungen, Zeilenbestand) und 1-Klick-Gesamtcheck aller Apps.
-  - **Streamlit Cloud Health-Check**: Tabellarische Übersicht aller Apps inkl. offiziellem `/_stcore/health`-Endpunkt, HTTP-Status, Latenz (`ms`) und Ruhezustand-Erkennung (`🟢 Wach` / `🌙 Schläft`).
-  - **GitHub Actions Worker-Monitor & Trigger**: Detaillierte Worker-Karten für `daily_digest.yaml`, `run_research.yaml` und `check_alerts.yaml` mit Direktlinks zum Action-Log, Einzel-App-Prüfung (`🔄 Prüfen`) und 1-Klick-Start (`▶️ Worker starten` per `workflow_dispatch`).
+  - **KPI-Header & Sofort-Check**: Flotten-Kennzahlen (Online-Apps, Awake-Apps, DBs Online) und 1-Klick-Gesamtcheck.
+  - **Health & Action**: Streamlit `/_stcore/health`-Check (`🟢 Awake` / `🌙 Sleeping`), GitHub Actions Status (`Queued`, `Running`, `Success`, `Failed`), Einzelprüfung, Aufwecken und `workflow_dispatch`.
 - **🗄️ Datenbank-Inspektor (`Turso Cloud` & `SQLite`)**:
-  - Verbindet sich mit den 3 Bot-Datenbanken (über Turso HTTPS Hrana v2 oder lokal per Read-Only-SQLite).
-  - Zeigt Tabellen-Bestände (`articles`, `briefings`, `research_jobs`, `research_reports`, `alert_rules`, `alert_events`, `alert_check_logs`), aktive Aufträge/Wächter, Fehlerzähler und die jüngsten Einträge.
-- **🤖 KI-View (Google Gemini Fleet Intelligence)**:
-  - Erstellt auf Knopfdruck eine strukturierte Gesamtdiagnose (`FleetAIAnalysis` mit `Fleet Health Score 0–100`, Einzelbewertungen, Anomalie-Warnungen & Handlungsempfehlungen) über die moderne `google-genai` Interactions API (inkl. deterministischem Heuristik-Fallback ohne API-Key).
-  - Interaktiver **KI-Operations-Assistent (Q&A)** für Freitext-Fragen zum Live-Zustand der 3 Apps.
+  - Verbindet sich mit den 3 Bot-Datenbanken (Turso HTTPS Hrana v2 oder lokal per Read-Only-SQLite).
+- **🧠 KI-View (Zentrales KI & Websearch Brain)**:
+  - Vereint alle kostenfrei verfügbaren Modelle (Gemini Flash/Lite/Argon, Deep Research Agent, Groq/OpenRouter/OpenAI-Compat) und kostenfreien Websearch-/Extraktions-Tools aus **Research-Bot** & **Alert-Bot** (Yahoo, DuckDuckGo HTML/Lite/Instant, Google News RSS, Wikipedia, Wikidata, Hacker News, Reddit, arXiv, Jina Reader, Direct HTTP, Browserbase, Open-Meteo).
+  - **Dynamische Verwaltung**: Neue Modelle & Tools (`custom_json_api`, `custom_rss_feed`) manuell oder per **Auto-Sync** (`client.models.list()`, OpenRouter `:free`, Groq) hinzufügen, bearbeiten, aktivieren/deaktivieren oder entfernen.
+  - **Testlauf & Sequenz-Optimierung**: Ermittelt per 1-Klick-Benchmark die optimale Ausführungs-Sequenz für **3 Stufen: `Fast`, `Standard` und `Deep`**.
 - **⚙️ System & Check-Historie**:
   - Konfigurations-Matrix und persistiertes Prüfprotokoll (`fleet_check_logs`).
+
+---
+
+## 🔌 Einbindung von `ki_brain` in andere Projekte (`Research-Bot`, `Alert-Bot`)
+
+```bash
+pip install "git+https://github.com/hschenke/bot-dashboard.git"
+```
+
+```python
+from ki_brain import KIWebsearchBrain
+
+# Nutzt optional dieselbe Turso Cloud DB (BRAIN_TURSO_URL / TURSO_URL)
+with KIWebsearchBrain.from_env() as brain:
+    hits = brain.search("Aktuelle Entwicklungen KI", tier="fast")
+    answer = brain.ask("Tiefgehende Marktanalyse", tier="deep")
+```
 
 ---
 
@@ -30,54 +46,40 @@ Konzipiert als eigenständige **Streamlit Web-App** auf derselben kostenlosen **
 bot-dashboard/
 ├── .github/workflows/
 │   ├── ci.yaml                        # Automatisches Linting (Ruff + Bandit) & Tests (Pytest)
-│   └── scheduled_healthcheck.yaml     # Optionaler 30-Min.-Cron & manueller Dashboard-Check
+│   └── scheduled_healthcheck.yaml     # Cron-Healthcheck & Wakeup
 ├── .streamlit/
-│   ├── config.toml                    # Dark-Theme, XSRF-Schutz & sichere Server-Defaults
+│   ├── config.toml                    # Dark-Theme & sichere Server-Defaults
 │   └── secrets.toml.example           # Vorlage für Streamlit Cloud Secrets
 ├── config/
-│   └── settings.yaml                  # Deklarative Definition der 3 überwachten Apps & KI-Prompts
+│   └── settings.yaml                  # Deklarative Definition der 3 überwachten Apps
+├── ki_brain/                          # Eigenständiges KI & Websearch Brain Framework
+│   ├── tools/                         # Key-freie Such-, Wissens-, Extraktions- & Custom-Tools
+│   ├── brain.py                       # Hauptfassade (CRUD, Benchmark, Search, Ask)
+│   ├── benchmark.py & optimizer.py    # Testlauf & Stufen-Optimierung (Fast / Standard / Deep)
+│   ├── discovery.py                   # Auto-Sync (Gemini, Groq, OpenRouter Free, Builtins)
+│   ├── llm_runner.py & execution.py   # Gemini Interactions API, Deep Agent, OpenAI-Compat
+│   └── storage.py & db_executors.py   # Turso Cloud & SQLite WAL Persistenz
 ├── src/
-│   ├── ai/                            # Gemini Interactions API Gateway & Heuristik-Diagnose
-│   ├── checks/                        # SafeUrlProbe, GitHubWorkflowProbe, BotDatabaseInspector, Coordinator
-│   ├── config/                        # Konstanten & AppSettings (Secrets, ENV & YAML-Defaults)
-│   ├── domain/                        # Enums, Exception-Hierarchie, Dataclasses & Pydantic-Schemata
-│   ├── security/                      # SSRF-Guard, Whitelist-Validierung, HMAC-Auth & Rate-Limiter
-│   ├── storage/                       # SqlExecutor (SQLite & Turso) + SqlDashboardRepository
-│   ├── ui/                            # Schlanke Streamlit-Views (Overview inkl. URLs/Worker, DB, KI, Settings)
+│   ├── ai/brain_bridge.py             # Anbindung von AppSettings an ki_brain
+│   ├── checks/                        # URL-, GitHub- & DB-Probes + FleetCheckCoordinator
+│   ├── config/                        # Konstanten & AppSettings
+│   ├── domain/                        # Unveränderliche Datenmodelle, Enums & Exceptions
+│   ├── security/                      # SSRF-Guard, Whitelisting, HMAC-Auth & Rate-Limiter
+│   ├── storage/                       # SqlExecutor (SQLite & Turso) + Dashboard-Repository
+│   ├── ui/                            # Streamlit-Views (Dashboard, DB, KI Brain, System)
 │   └── worker/                        # CLI-Entrypoint für Hintergrund-Checks
-├── tests/                             # Umfassende Unit- & Integrationstests
+├── tests/                             # Unit-, Security-, Brain- & Streamlit-AppTest-Suite
 ├── streamlit_app.py                   # Root-Entrypoint für Streamlit Cloud
 └── requirements.txt                   # Abhängigkeiten
 ```
 
 ---
 
-## 🚀 Lokaler Start
+## 🚀 Lokaler Start & Qualitätscheck
 
-```powershell
-# 1. Virtuelle Umgebung erstellen & aktivieren
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-
-# 2. Abhängigkeiten installieren
-python -m pip install -r requirements.txt
-
-# 3. Optional: .env anlegen (lokal erkennt das Dashboard automatisch auch ../alert-bot/.env etc.)
-Copy-Item .env.example .env
-
-# 4. Web-App starten
-streamlit run streamlit_app.py
+```bash
+uv sync --extra dev
+uv run --extra dev ruff check .
+uv run --extra dev pytest -v
+uv run streamlit run streamlit_app.py
 ```
-
-### Qualitätssicherung (Linter & Tests)
-```powershell
-.\.venv\Scripts\ruff.exe check .
-.\.venv\Scripts\pytest.exe -v
-```
-
----
-
-## ☁️ Deployment auf Streamlit Community Cloud
-
-1. Auf [share.streamlit.io](https://share.streamlit.io) neue App aus `hschenke/bot-dashboard` (`main`, `streamlit_app.py`) erstellen.
-2. Unter **App Settings -> Secrets** die Werte aus `.streamlit/secrets.toml.example` eintragen.

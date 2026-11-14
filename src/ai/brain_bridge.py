@@ -1,0 +1,56 @@
+"""Brücke zwischen Bot-Dashboard AppSettings und dem eigenständigen ki_brain-Framework."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from ki_brain import BrainSecrets, KIWebsearchBrain, create_brain_repository
+
+from src.config.settings import PROJECT_ROOT, AppSettings
+
+
+def build_brain_secrets(settings: AppSettings) -> BrainSecrets:
+    """Überträgt alle optionalen Free-Tier API-Keys sicher (`repr=False`) an das Brain."""
+    return BrainSecrets(
+        gemini_api_key=settings.gemini_api_key,
+        browserbase_api_key=settings.browserbase_api_key,
+        browserbase_project_id=settings.browserbase_project_id,
+        reddit_client_id=settings.reddit_client_id,
+        reddit_client_secret=settings.reddit_client_secret,
+        groq_api_key=settings.groq_api_key,
+        openrouter_api_key=settings.openrouter_api_key,
+        cerebras_api_key=settings.cerebras_api_key,
+        mistral_api_key=settings.mistral_api_key,
+    )
+
+
+def create_dashboard_brain(
+    settings: AppSettings,
+    *,
+    genai_client: Any = None,
+) -> KIWebsearchBrain:
+    """Erstellt eine `KIWebsearchBrain`-Instanz auf Basis von Turso Cloud oder SQLite."""
+    use_brain_turso = bool(settings.brain_turso_url.strip() and settings.brain_turso_auth_token.strip())
+    use_shared_turso = bool(settings.has_turso_configured)
+
+    turso_url = (
+        settings.brain_turso_url
+        if use_brain_turso
+        else (settings.turso_url if use_shared_turso else "")
+    )
+    turso_key = (
+        settings.brain_turso_auth_token
+        if use_brain_turso
+        else (settings.turso_auth_token if use_shared_turso else "")
+    )
+    repo = create_brain_repository(
+        turso_url=turso_url,
+        turso_auth_token=turso_key,
+        sqlite_path=settings.brain_sqlite_path,
+        base_dir=PROJECT_ROOT,
+    )
+    return KIWebsearchBrain(
+        repository=repo,
+        secrets=build_brain_secrets(settings),
+        genai_client=genai_client,
+    )

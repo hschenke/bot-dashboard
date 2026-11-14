@@ -1,109 +1,138 @@
-"""KI-View (Fleet Intelligence): Strukturierte Systemdiagnose & interaktiver Assistent."""
+"""KI-View: Zentrales KI & Websearch Brain Control Center."""
 
 from __future__ import annotations
 
 import streamlit as st
+from ki_brain import BrainError, BrainTier
 
-from src.ai.llm_gateway import DashboardAIGateway, build_heuristic_fleet_analysis
+from src.ai.brain_bridge import create_dashboard_brain
 from src.config.settings import AppSettings
-from src.domain.exceptions import DashboardError
-from src.domain.models import AppFleetSnapshot
-from src.domain.schemas import FleetAIAnalysis
+from src.domain.enums import AuthRole
+from src.ui.views.ki_models_tab import render_models_tab
+from src.ui.views.ki_playground_tab import render_playground_tab
+from src.ui.views.ki_sequences_tab import render_sequences_tab
+from src.ui.views.ki_tools_tab import render_tools_tab
 
 
-def _rating_badge(rating: str) -> str:
-    clean = (rating or "").strip().lower()
-    if clean == "optimal":
-        return "🟢 Optimal"
-    if clean == "hinweis":
-        return "🟡 Hinweis"
-    if clean == "kritisch":
-        return "🔴 Kritisch"
-    return f"🔵 {rating}"
-
-
-def _render_analysis_report(analysis: FleetAIAnalysis) -> None:
-    score_col, model_col = st.columns([3, 1])
-    with score_col:
-        st.subheader(f"🧠 {analysis.headline}")
-        st.write(analysis.executive_summary)
-    with model_col:
-        st.metric("System Health Score", f"{analysis.fleet_health_score} / 100")
-        st.caption(f"Engine: `{analysis.model_used}`")
-
-    if analysis.app_insights:
-        st.markdown("#### 🔍 Einzelbewertung der Apps")
-        cols = st.columns(len(analysis.app_insights))
-        for idx, insight in enumerate(analysis.app_insights):
-            with cols[idx], st.container(border=True):
-                st.markdown(f"**{insight.app_title}** ({_rating_badge(insight.status_rating)})")
-                st.caption(insight.key_observation)
-                st.markdown(f"👉 *{insight.recommended_action}*")
-
-    col_warn, col_steps = st.columns(2)
-    with col_warn:
-        st.markdown("#### ⚠️ Erkannte Anomalien & Hinweise")
-        if analysis.anomalies_or_warnings:
-            for warning in analysis.anomalies_or_warnings:
-                st.warning(warning)
-        else:
-            st.success("Keine Anomalien oder Störungen erkannt.")
-
-    with col_steps:
-        st.markdown("#### ✅ Empfohlene nächste Schritte")
-        for step in analysis.next_steps:
-            st.info(step)
+def _render_feedback_banner() -> None:
+    feedback = st.session_state.pop("ki_brain_feedback", None)
+    if not isinstance(feedback, dict):
+        return
+    level = str(feedback.get("level") or "info")
+    msg = str(feedback.get("message") or "").strip()
+    if not msg:
+        return
+    if level == "success":
+        st.success(msg)
+    elif level == "warning":
+        st.warning(msg)
+    elif level == "error":
+        st.error(msg)
+    else:
+        st.info(msg)
 
 
 def render_ki_view(
     settings: AppSettings,
-    snapshots: list[AppFleetSnapshot],
+    role: AuthRole = AuthRole.ADMIN,
 ) -> None:
-    """Rendert den KI-View mit Status-Diagnose und interaktivem Operations-Assistenten."""
-    st.header("🤖 KI-View & Dashboard-Intelligenz (Google Gemini)")
+    """Rendert das zentrale KI & Websearch Brain zur Modell-, Tool- & Sequenz-Steuerung."""
+    st.header("🧠 KI & Websearch Brain")
     st.caption(
-        "Automatische Auswertung aller URL-, GitHub-Worker- und Datenbank-Metriken deiner Apps "
-        "mit Google Gemini Structured Output (inkl. sofortigem Heuristik-Fallback)."
+        "Zentrale Schaltstelle für alle kostenfreien KI-Modelle & Websearch-Tools "
+        "(Research-Bot, Alert-Bot & News-Bot) mit automatischem Benchmark-Sequencer für Fast, Standard & Deep."
     )
 
-    gateway = DashboardAIGateway(settings)
+    is_admin = role == AuthRole.ADMIN
+    brain = create_dashboard_brain(settings)
+    try:
+        models = brain.list_models()
+        tools = brain.list_tools()
+        enabled_models = sum(1 for m in models if m.enabled)
+        enabled_tools = sum(1 for t in tools if t.enabled)
+        latest_bench = brain.get_latest_benchmark()
 
-    if "fleet_ai_analysis" not in st.session_state:
-        st.session_state["fleet_ai_analysis"] = build_heuristic_fleet_analysis(snapshots)
-
-    btn_col, info_col = st.columns([1.4, 2.6])
-    with btn_col:
-        run_analysis = st.button("✨ KI-Tiefendiagnose starten", type="primary", use_container_width=True)
-    with info_col:
-        if settings.has_gemini_configured:
-            st.caption(
-                f"Gemini API aktiv (`{settings.gemini_fast_model}` / Fallback `{settings.gemini_deep_model}`)."
+        k1, k2, k3, k4 = st.columns(4)
+        with k1:
+            st.metric("KI-Modelle", f"{enabled_models} / {len(models)}")
+        with k2:
+            st.metric("Websearch & Tools", f"{enabled_tools} / {len(tools)}")
+        with k3:
+            seqs = brain.list_sequences()
+            st.metric("Tier-Profile", f"{len(seqs)} (Fast / Std / Deep)")
+        with k4:
+            bench_txt = (
+                f"{latest_bench.healthy_tools_count} Tools / {latest_bench.healthy_models_count} Modelle OK"
+                if latest_bench
+                else "Noch kein Testlauf"
             )
-        else:
-            st.caption(
-                "Hinweis: Kein `GEMINI_API_KEY` gesetzt – das Dashboard nutzt die deterministische Diagnose-Engine."
+            st.metric("Letzter Testlauf", bench_txt)
+
+        btn_bench, btn_sync = st.columns([2, 1.4])
+        with btn_bench:
+            run_bench = st.button(
+                "🚀 Testlauf starten & Sequenzen optimieren",
+                type="primary",
+                disabled=not is_admin,
+                use_container_width=True,
             )
-    if run_analysis:
-        with st.spinner("Analysiere Live-Telemetrie aller Apps mit Google Gemini..."):
-            st.session_state["fleet_ai_analysis"] = gateway.analyze_fleet(snapshots)
-        st.rerun()
+        with btn_sync:
+            run_sync = st.button(
+                "🔄 Auto-Sync (Modelle & Tools)",
+                disabled=not is_admin,
+                use_container_width=True,
+            )
 
-    _render_analysis_report(st.session_state["fleet_ai_analysis"])
-    st.divider()
+        # Spinner & Alerts strikt außerhalb schmaler Spalten rendern
+        if run_bench:
+            try:
+                with st.spinner("Teste Tools & KI-Modelle live und optimiere Fast / Standard / Deep..."):
+                    report = brain.run_benchmark()
+                fast_top = " → ".join(report.sequences[BrainTier.FAST.value].search_tool_sequence[:3])
+                st.session_state["ki_brain_feedback"] = {
+                    "level": "success",
+                    "message": (
+                        f"Testlauf `{report.run_id}` abgeschlossen: {report.healthy_tools_count} Tools & "
+                        f"{report.healthy_models_count} Modelle OK. Fast-Top: `{fast_top or '–'}`"
+                    ),
+                }
+            except BrainError as exc:
+                st.session_state["ki_brain_feedback"] = {"level": "error", "message": f"Testlauf fehlgeschlagen: {exc}"}
+            st.rerun()
 
-    st.subheader("💬 KI-Operations-Assistent (Frage an deine Bots)")
-    with st.form("ki_fleet_question_form"):
-        question = st.text_input(
-            "Frage zu Status, Datenbank-Inhalten, Fehlern oder Workflows stellen:",
-            placeholder="z. B. Welche App braucht aktuell Aufmerksamkeit und wie viele Datensätze sind gespeichert?",
+        if run_sync:
+            try:
+                with st.spinner("Erkenne kostenfreie Modelle & neue Standard-Tools..."):
+                    summary = brain.auto_sync()
+                st.session_state["ki_brain_feedback"] = {
+                    "level": "success" if not summary.warnings else "warning",
+                    "message": (
+                        f"Auto-Sync fertig ({', '.join(summary.checked_sources)}): "
+                        f"+{len(summary.added_models)} Modelle, +{len(summary.added_tools)} Tools."
+                    ),
+                }
+            except BrainError as exc:
+                st.session_state["ki_brain_feedback"] = {"level": "error", "message": f"Auto-Sync fehlgeschlagen: {exc}"}
+            st.rerun()
+
+        _render_feedback_banner()
+        st.caption(f"Speicher-Backend: `{brain.backend_name}`" + ("" if is_admin else " · Modus: Read-Only"))
+
+        tab_seq, tab_mod, tab_tool, tab_play = st.tabs(
+            [
+                "🎯 Sequenzen (Fast / Standard / Deep)",
+                "🧩 KI-Modelle",
+                "🔧 Websearch & Tools",
+                "🧪 Live-Test & Bots-API",
+            ]
         )
-        ask_submitted = st.form_submit_button("🤖 Frage auswerten", use_container_width=True)
-
-    if ask_submitted:
-        try:
-            with st.spinner("Werte Telemetriedaten aus..."):
-                answer = gateway.answer_fleet_question(snapshots, question)
-            st.markdown("##### Antwort")
-            st.markdown(answer)
-        except DashboardError as exc:
-            st.error(str(exc))
+        with tab_seq:
+            render_sequences_tab(brain, is_admin=is_admin)
+        with tab_mod:
+            render_models_tab(brain, is_admin=is_admin)
+        with tab_tool:
+            render_tools_tab(brain, is_admin=is_admin)
+        with tab_play:
+            render_playground_tab(brain, is_admin=is_admin)
+    finally:
+        brain.close()
