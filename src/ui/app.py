@@ -58,7 +58,7 @@ def run_streamlit_app() -> None:
             pages = [
                 "📡 Dashboard",
                 "🗄️ DB-Inspektor",
-                "🤖 KI-View",
+                "🤖  KI-View",
                 "⚙️ System & Historie",
             ]
             selected_page = st.radio(
@@ -85,7 +85,7 @@ def run_streamlit_app() -> None:
             render_overview_view(snapshots, coordinator, repository, role)
         elif selected_page == "🗄️ DB-Inspektor":
             render_db_view(snapshots)
-        elif selected_page == "🤖 KI-View":
+        elif selected_page in {"🤖  KI-View", "🤖 KI-View"}:
             render_ki_view(settings, role=role)
         else:
             render_settings_view(settings, repository)

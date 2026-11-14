@@ -46,11 +46,27 @@ class BrainSecrets:
             "CEREBRAS_API_KEY": self.cerebras_api_key,
             "MISTRAL_API_KEY": self.mistral_api_key,
         }
-        val = mapping.get(clean) or self.extra_keys.get(clean) or os.getenv(clean, "")
+        val = self.extra_keys.get(clean) or mapping.get(clean) or os.getenv(clean, "")
         return "" if _is_placeholder_secret(val) else val.strip()
 
     def has_key(self, env_name: str) -> bool:
         return bool(self.resolve_key(env_name))
+
+    def with_extra_keys(self, overrides: dict[str, str]) -> BrainSecrets:
+        """Erstellt eine neue `BrainSecrets`-Instanz mit zusammengeführten verschlüsselten DB-Keys."""
+        merged = {**self.extra_keys, **{k.strip().upper(): v.strip() for k, v in overrides.items() if v.strip()}}
+        return BrainSecrets(
+            gemini_api_key=self.gemini_api_key,
+            browserbase_api_key=self.browserbase_api_key,
+            browserbase_project_id=self.browserbase_project_id,
+            reddit_client_id=self.reddit_client_id,
+            reddit_client_secret=self.reddit_client_secret,
+            groq_api_key=self.groq_api_key,
+            openrouter_api_key=self.openrouter_api_key,
+            cerebras_api_key=self.cerebras_api_key,
+            mistral_api_key=self.mistral_api_key,
+            extra_keys=merged,
+        )
 
     @classmethod
     def from_env(cls) -> BrainSecrets:
@@ -242,3 +258,16 @@ class BrainConfigSnapshot(BaseModel):
     sequences: dict[str, TierSequenceConfig] = Field(default_factory=dict)
     last_benchmark: BenchmarkReport | None = None
     exported_at: str = ""
+
+
+class SecretStatusEntry(BaseModel):
+    """Write-Only Status-Metadaten eines API-Keys (enthält niemals den Klartext-Key!)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    env_name: str
+    is_configured: bool
+    source: str = ""
+    updated_at: str = ""
+    affected_items: list[str] = Field(default_factory=list)
+

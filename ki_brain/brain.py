@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from ki_brain.benchmark import BrainBenchmarkRunner
 from ki_brain.discovery import DiscoverySummary, auto_sync_catalog
-from ki_brain.enums import BrainTier
+from ki_brain.enums import BrainTier, ProbeStatus
 from ki_brain.execution import (
     execute_tiered_ask,
     execute_tiered_fetch_page,
@@ -30,15 +30,28 @@ from ki_brain.models import (
     BrainGenerationResult,
     BrainSearchResult,
     BrainSecrets,
+    SecretStatusEntry,
     TierSequenceConfig,
     ToolSpec,
 )
-from ki_brain.optimizer import DEFAULT_TEST_QUERY, DEFAULT_TEST_URL
+from ki_brain.optimizer import DEFAULT_TEST_QUERY, DEFAULT_TEST_URL, optimize_tier_sequences
 from ki_brain.rate_limiter import LlmRateLimiter, get_global_rate_limiter
+from ki_brain.secrets_vault import encrypt_secret_value, validate_secret_env_name
 from ki_brain.security import validate_safe_external_url
 from ki_brain.storage import BrainRepository, create_brain_repository
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
+
+_DEFAULT_SECRET_NAMES: tuple[str, ...] = (
+    "GEMINI_API_KEY",
+    "GROQ_API_KEY",
+    "OPENROUTER_API_KEY",
+    "CEREBRAS_API_KEY",
+    "MISTRAL_API_KEY",
+    "BROWSERBASE_API_KEY",
+    "REDDIT_CLIENT_ID",
+    "REDDIT_CLIENT_SECRET",
+)
 
 
 class KIWebsearchBrain:
@@ -53,7 +66,8 @@ class KIWebsearchBrain:
         rate_limiter: LlmRateLimiter | None = None,
     ) -> None:
         self._repo = repository
-        self._secrets = secrets or BrainSecrets.from_env()
+        self._base_secrets = secrets or BrainSecrets.from_env()
+        self._secrets = self._base_secrets.with_extra_keys(self._repo.load_decrypted_secrets())
         self._genai_client = genai_client
         self._rate_limiter = rate_limiter or get_global_rate_limiter()
         self._runner = UnifiedLLMRunner(
@@ -137,6 +151,86 @@ class KIWebsearchBrain:
 
     def reset_defaults(self) -> None:
         self._repo.reset_to_defaults()
+
+    def cleanup_unhealthy_items(
+        self,
+        statuses: tuple[ProbeStatus, ...] = (
+            ProbeStatus.ERROR,
+            ProbeStatus.QUOTA_LIMITED,
+            ProbeStatus.BLOCKED,
+        ),
+    ) -> tuple[list[str], list[str]]:
+        """Entfernt alle Modelle & Tools mit `Error`, `Quota 429` oder `Blocked` und bereinigt die Sequenzen."""
+        bad = set(statuses)
+        removed_models = [m.id for m in self._repo.list_models() if m.last_status in bad and self._repo.delete_model(m.id)]
+        removed_tools = [t.id for t in self._repo.list_tools() if t.last_status in bad and self._repo.delete_tool(t.id)]
+        if removed_models or removed_tools:
+            seqs = optimize_tier_sequences(
+                self._repo.list_models(),
+                self._repo.list_tools(),
+                self._repo.list_sequences(),
+                force_overwrite=True,
+            )
+            for seq in seqs.values():
+                self._repo.upsert_sequence(seq)
+        return removed_models, removed_tools
+
+    # --- Write-Only Secret-Management (wie GitHub Secrets) ---
+    def _refresh_runtime_secrets(self) -> None:
+        self._secrets = self._base_secrets.with_extra_keys(self._repo.load_decrypted_secrets())
+        self._runner = UnifiedLLMRunner(
+            self._secrets, genai_client=self._genai_client, rate_limiter=self._rate_limiter
+        )
+
+    def set_secret(self, env_name: str, new_secret_value: str) -> str:
+        """Speichert oder überschreibt ein Secret komplett verschlüsselt (Write-Only) und entsperrt Missing-Key-Einträge."""
+        clean_name = validate_secret_env_name(env_name)
+        encrypted = encrypt_secret_value(new_secret_value)
+        updated_at = self._repo.upsert_encrypted_secret(clean_name, encrypted)
+        self._refresh_runtime_secrets()
+        for m in self._repo.list_models():
+            if m.api_key_env.upper() == clean_name and m.last_status == ProbeStatus.AUTH_MISSING:
+                self._repo.upsert_model(m.model_copy(update={"last_status": ProbeStatus.UNTESTED, "last_error": ""}))
+        for t in self._repo.list_tools():
+            if t.api_key_env.upper() == clean_name and t.last_status == ProbeStatus.AUTH_MISSING:
+                self._repo.upsert_tool(t.model_copy(update={"last_status": ProbeStatus.UNTESTED, "last_error": ""}))
+        return updated_at
+
+    def delete_secret(self, env_name: str) -> bool:
+        """Entfernt ein im Brain-Vault gespeichertes Secret."""
+        removed = self._repo.delete_encrypted_secret(env_name)
+        self._refresh_runtime_secrets()
+        return removed
+
+    def list_secret_statuses(self) -> list[SecretStatusEntry]:
+        """Liefert Write-Only-Metadaten aller relevanten API-Keys (NIEMALS den Klartext-Wert!)."""
+        vault_ts = self._repo.list_secret_timestamps()
+        models = self._repo.list_models()
+        tools = self._repo.list_tools()
+        all_names = list(_DEFAULT_SECRET_NAMES)
+        for item_env in [*(m.api_key_env for m in models), *(t.api_key_env for t in tools), *vault_ts.keys()]:
+            clean = item_env.strip().upper()
+            if clean and clean not in all_names:
+                all_names.append(clean)
+        entries: list[SecretStatusEntry] = []
+        for name in all_names:
+            in_vault = name in vault_ts
+            in_env = self._base_secrets.has_key(name)
+            source = "Brain Vault (verschlüsselt)" if in_vault else ("ENV / Streamlit Secrets" if in_env else "Nicht gesetzt")
+            affected = [
+                *[f"Model: {m.id}" for m in models if m.api_key_env.strip().upper() == name],
+                *[f"Tool: {t.id}" for t in tools if t.api_key_env.strip().upper() == name],
+            ]
+            entries.append(
+                SecretStatusEntry(
+                    env_name=name,
+                    is_configured=(in_vault or in_env),
+                    source=source,
+                    updated_at=vault_ts.get(name, ""),
+                    affected_items=affected,
+                )
+            )
+        return entries
 
     # --- Auto-Discovery & Testlauf (Fast, Standard, Deep) ---
     def auto_sync(self, manifest_url: str = "") -> DiscoverySummary:

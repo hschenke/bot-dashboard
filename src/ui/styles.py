@@ -128,6 +128,7 @@ div[data-testid="stVerticalBlockBorderWrapper"] li {
     margin: 0 !important;
     line-height: 1.4 !important;
     width: 100% !important;
+    white-space: pre-wrap !important;
 }
 
 /* Hover-Status */

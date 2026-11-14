@@ -327,3 +327,57 @@ def test_brain_execution_search_ask_structured_and_snapshot(monkeypatch: pytest.
     assert "Recherche-Ergebnis" in fb_res.text
     no_key_brain.close()
     brain.close()
+
+
+def test_cleanup_unhealthy_items_and_write_only_secrets_vault(tmp_path: Path) -> None:
+    db_file = tmp_path / "vault_and_cleanup.db"
+    repo = create_brain_repository(sqlite_path=db_file)
+    brain = KIWebsearchBrain(repo, BrainSecrets())
+
+    # 1. Modelle & Tools auf Error / Quota 429 setzen und automatisch bereinigen
+    m_err = brain.get_model("gemini-2.0-flash")
+    t_q429 = brain.get_tool("gemini_google_search")
+    t_missing = brain.get_tool("browserbase_fetch")
+    assert m_err is not None and t_q429 is not None and t_missing is not None
+
+    brain.add_or_update_model(m_err.model_copy(update={"last_status": ProbeStatus.ERROR}))
+    brain.add_or_update_tool(t_q429.model_copy(update={"last_status": ProbeStatus.QUOTA_LIMITED}))
+    brain.add_or_update_tool(t_missing.model_copy(update={"last_status": ProbeStatus.AUTH_MISSING}))
+
+    rem_models, rem_tools = brain.cleanup_unhealthy_items()
+    assert rem_models == ["gemini-2.0-flash"]
+    assert rem_tools == ["gemini_google_search"]
+    assert brain.get_model("gemini-2.0-flash") is None
+    assert brain.get_tool("gemini_google_search") is None
+    # Missing-Key-Eintrag bleibt erhalten, damit man den Key nachtragen kann
+    assert brain.get_tool("browserbase_fetch") is not None
+
+    # 2. Write-Only Secret eintragen (wie GitHub Secrets): niemals im Klartext sichtbar, schaltet Missing Key frei
+    raw_secret = "bb_live_super_secret_token_999"
+    brain.set_secret("BROWSERBASE_API_KEY", raw_secret)
+
+    statuses = {s.env_name: s for s in brain.list_secret_statuses()}
+    bb_status = statuses["BROWSERBASE_API_KEY"]
+    assert bb_status.is_configured is True
+    assert "Brain Vault" in bb_status.source
+    assert raw_secret not in bb_status.model_dump_json()
+
+    # In der SQLite-Tabelle steht nur das Chiffrat (enc_v1:...), niemals der Klartext
+    raw_db_row = repo._executor.execute("SELECT encrypted_value FROM brain_secrets WHERE env_name = ?", ("BROWSERBASE_API_KEY",)).rows[0]  # noqa: SLF001
+    assert str(raw_db_row["encrypted_value"]).startswith("enc_v1:")
+    assert raw_secret not in str(raw_db_row["encrypted_value"])
+
+    # Status von browserbase_fetch wurde automatisch von AUTH_MISSING auf UNTESTED zurückgesetzt
+    unlocked_tool = brain.get_tool("browserbase_fetch")
+    assert unlocked_tool is not None and unlocked_tool.last_status == ProbeStatus.UNTESTED
+
+    # Komplettes Überschreiben mit neuem Key & Persistenz über Neustart
+    brain.set_secret("BROWSERBASE_API_KEY", "bb_live_overwritten_token_111")
+    brain.close()
+
+    reopened = KIWebsearchBrain(create_brain_repository(sqlite_path=db_file), BrainSecrets())
+    assert reopened._secrets.resolve_key("BROWSERBASE_API_KEY") == "bb_live_overwritten_token_111"  # noqa: SLF001
+    assert reopened.delete_secret("BROWSERBASE_API_KEY") is True
+    assert not reopened._secrets.has_key("BROWSERBASE_API_KEY")  # noqa: SLF001
+    reopened.close()
+

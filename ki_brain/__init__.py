@@ -20,6 +20,7 @@ from ki_brain.models import (
     BrainGenerationResult,
     BrainSearchResult,
     BrainSecrets,
+    SecretStatusEntry,
     TierSequenceConfig,
     ToolSpec,
 )
@@ -46,6 +47,7 @@ __all__ = [
     "KIWebsearchBrain",
     "ModelProvider",
     "ProbeStatus",
+    "SecretStatusEntry",
     "TierSequenceConfig",
     "ToolCategory",
     "ToolSpec",

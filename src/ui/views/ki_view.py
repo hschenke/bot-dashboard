@@ -10,6 +10,7 @@ from src.config.settings import AppSettings
 from src.domain.enums import AuthRole
 from src.ui.views.ki_models_tab import render_models_tab
 from src.ui.views.ki_playground_tab import render_playground_tab
+from src.ui.views.ki_secrets_section import render_secrets_manager_expander
 from src.ui.views.ki_sequences_tab import render_sequences_tab
 from src.ui.views.ki_tools_tab import render_tools_tab
 
@@ -68,7 +69,7 @@ def render_ki_view(
             )
             st.metric("Letzter Testlauf", bench_txt)
 
-        btn_bench, btn_sync = st.columns([2, 1.4])
+        btn_bench, btn_sync, btn_clean = st.columns([1.8, 1.3, 1.3])
         with btn_bench:
             run_bench = st.button(
                 "🚀 Testlauf starten & Sequenzen optimieren",
@@ -81,6 +82,13 @@ def render_ki_view(
                 "🔄 Auto-Sync (Modelle & Tools)",
                 disabled=not is_admin,
                 use_container_width=True,
+            )
+        with btn_clean:
+            run_clean = st.button(
+                "🧹 Bereinigen (Error & Quota 429)",
+                disabled=not is_admin,
+                use_container_width=True,
+                help="Entfernt automatisch alle Modelle und Tools mit Status Error, Quota 429 oder Blocked.",
             )
 
         # Spinner & Alerts strikt außerhalb schmaler Spalten rendern
@@ -115,7 +123,23 @@ def render_ki_view(
                 st.session_state["ki_brain_feedback"] = {"level": "error", "message": f"Auto-Sync fehlgeschlagen: {exc}"}
             st.rerun()
 
+        if run_clean:
+            try:
+                rem_models, rem_tools = brain.cleanup_unhealthy_items()
+                total_rem = len(rem_models) + len(rem_tools)
+                msg = (
+                    f"Bereinigung abgeschlossen: {len(rem_models)} Modelle ({', '.join(rem_models) or '–'}) & "
+                    f"{len(rem_tools)} Tools ({', '.join(rem_tools) or '–'}) entfernt."
+                    if total_rem > 0
+                    else "Keine fehlerhaften oder Quota-429-Elemente zum Entfernen gefunden."
+                )
+                st.session_state["ki_brain_feedback"] = {"level": "success" if total_rem else "info", "message": msg}
+            except BrainError as exc:
+                st.session_state["ki_brain_feedback"] = {"level": "error", "message": f"Bereinigung fehlgeschlagen: {exc}"}
+            st.rerun()
+
         _render_feedback_banner()
+        render_secrets_manager_expander(brain, is_admin=is_admin)
         st.caption(f"Speicher-Backend: `{brain.backend_name}`" + ("" if is_admin else " · Modus: Read-Only"))
 
         tab_seq, tab_mod, tab_tool, tab_play = st.tabs(

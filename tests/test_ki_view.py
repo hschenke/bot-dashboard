@@ -49,6 +49,8 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
     btn_labels = [b.label for b in at.button]
     assert "🚀 Testlauf starten & Sequenzen optimieren" in btn_labels
     assert "🔄 Auto-Sync (Modelle & Tools)" in btn_labels
+    assert "🧹 Bereinigen (Error & Quota 429)" in btn_labels
+    assert "🔒 Secret sicher speichern / komplett ersetzen" in btn_labels
 
     # Read-Only Nutzer sieht deaktivierte Buttons
     def _app_ro() -> None:

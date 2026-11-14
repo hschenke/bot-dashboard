@@ -47,6 +47,13 @@ _SCHEMA_SQL: tuple[str, ...] = (
         value TEXT NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS brain_secrets (
+        env_name TEXT PRIMARY KEY,
+        encrypted_value TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
 )
 
 
@@ -229,6 +236,44 @@ class BrainRepository:
             (safe_limit,),
         )
         return [BenchmarkReport.model_validate_json(str(r["payload_json"])) for r in res.rows]
+
+    def upsert_encrypted_secret(self, env_name: str, encrypted_value: str) -> str:
+        from ki_brain.secrets_vault import validate_secret_env_name
+
+        clean_name = validate_secret_env_name(env_name)
+        now = _utc_now_iso()
+        self._executor.execute(
+            """
+            INSERT INTO brain_secrets (env_name, encrypted_value, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(env_name) DO UPDATE SET
+                encrypted_value = excluded.encrypted_value,
+                updated_at = excluded.updated_at
+            """,
+            (clean_name, encrypted_value, now),
+        )
+        return now
+
+    def delete_encrypted_secret(self, env_name: str) -> bool:
+        from ki_brain.secrets_vault import validate_secret_env_name
+
+        clean_name = validate_secret_env_name(env_name)
+        res = self._executor.execute("DELETE FROM brain_secrets WHERE env_name = ?", (clean_name,))
+        return res.affected_rows > 0
+
+    def list_secret_timestamps(self) -> dict[str, str]:
+        res = self._executor.execute("SELECT env_name, updated_at FROM brain_secrets ORDER BY env_name ASC")
+        return {str(r["env_name"]): str(r["updated_at"]) for r in res.rows}
+
+    def load_decrypted_secrets(self, passphrase: str = "") -> dict[str, str]:
+        from ki_brain.secrets_vault import decrypt_secret_value
+
+        res = self._executor.execute("SELECT env_name, encrypted_value FROM brain_secrets")
+        decrypted: dict[str, str] = {}
+        for row in res.rows:
+            val = decrypt_secret_value(str(row["encrypted_value"]), passphrase=passphrase)
+            if val:
+                decrypted[str(row["env_name"])] = val
+        return decrypted
 
     def close(self) -> None:
         self._executor.close()
