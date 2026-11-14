@@ -13,6 +13,12 @@ from ki_brain.tools.extractors import (
     fetch_via_jina_reader,
     query_open_meteo,
 )
+from ki_brain.tools.search_apis import (
+    search_brave,
+    search_searxng,
+    search_serper,
+    search_tavily,
+)
 from ki_brain.tools.search_knowledge import (
     search_arxiv,
     search_hackernews,
@@ -59,6 +65,16 @@ def execute_search_tool(
     etype = tool.executor_type.strip().lower()
     tmo = tool.timeout_seconds
 
+    if etype == "brave_search":
+        return search_brave(query, secrets=sec, endpoint_url=tool.endpoint_url, max_results=max_res, timeout_seconds=tmo)
+    if etype == "tavily_search":
+        return search_tavily(query, secrets=sec, endpoint_url=tool.endpoint_url, max_results=max_res, timeout_seconds=tmo)
+    if etype == "serper_search":
+        return search_serper(
+            query, secrets=sec, endpoint_url=tool.endpoint_url, language=language, max_results=max_res, timeout_seconds=tmo
+        )
+    if etype == "searxng_search":
+        return search_searxng(tool, query, language=language, max_results=max_res)
     if etype == "yahoo_search":
         return search_yahoo(query, endpoint_url=tool.endpoint_url, max_results=max_res, timeout_seconds=tmo)
     if etype == "duckduckgo_html":

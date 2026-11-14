@@ -178,11 +178,11 @@ def execute_custom_json_api(
     secrets: BrainSecrets,
     limit: int = 5,
 ) -> list[BrainCitation]:
-    """Führt ein dynamisch hinzugefügtes JSON-Suchtool aus."""
+    """Führt ein dynamisch hinzugefügtes JSON-Suchtool aus (inkl. verschachtelter Felder)."""
     if not tool.endpoint_url:
         raise BrainProviderError(f"Tool '{tool.id}' hat keine endpoint_url.")
     cfg = tool.config or {}
-    q_param = str(cfg.get("query_param") or "q")
+    q_param = str(cfg.get("query_param", "q")).strip()
     items_path = str(cfg.get("items_path") or "results")
     title_field = str(cfg.get("title_field") or "title")
     url_field = str(cfg.get("url_field") or "url")
@@ -192,13 +192,15 @@ def execute_custom_json_api(
         key_val = secrets.resolve_key(tool.api_key_env)
         if not key_val:
             raise BrainProviderError(f"API-Key '{tool.api_key_env}' fehlt.")
-        headers[str(cfg.get("api_key_header") or "Authorization")] = (
-            f"Bearer {key_val}" if str(cfg.get("api_key_header") or "Authorization") == "Authorization" else key_val
-        )
+        key_header = str(cfg.get("api_key_header") or "Authorization")
+        headers[key_header] = f"Bearer {key_val}" if key_header == "Authorization" else key_val
+    req_params: dict[str, Any] = dict(cfg.get("extra_params") or {})
+    if q_param:
+        req_params[q_param] = " ".join(query.split())[:180]
     status, _, _, body = safe_http_request(
         "GET",
         tool.endpoint_url,
-        params={q_param: " ".join(query.split())[:180]} if q_param else None,
+        params=req_params or None,
         headers=headers,
         timeout_seconds=tool.timeout_seconds,
         max_bytes=500_000,
@@ -212,9 +214,12 @@ def execute_custom_json_api(
     for entry in raw_items[:limit]:
         if not isinstance(entry, dict):
             continue
-        link = sanitize_display_url(str(entry.get(url_field) or tool.endpoint_url))
-        title = str(entry.get(title_field) or "").strip()[:180]
-        snip = str(entry.get(snippet_field) or "").strip()[:300]
+        raw_url = _resolve_dotted_path(entry, url_field) if "." in url_field else entry.get(url_field)
+        raw_title = _resolve_dotted_path(entry, title_field) if "." in title_field else entry.get(title_field)
+        raw_snip = _resolve_dotted_path(entry, snippet_field) if "." in snippet_field else entry.get(snippet_field)
+        link = sanitize_display_url(str(raw_url or tool.endpoint_url))
+        title = str(raw_title or "").strip()[:180]
+        snip = str(raw_snip or "").strip()[:300]
         if link != "#" and title:
             results.append(BrainCitation(url=link, title=title, snippet=snip, source_tool=tool.id))
     return results

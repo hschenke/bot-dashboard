@@ -116,6 +116,9 @@ class AppSettings:
     gemini_api_key: str = field(default="", repr=False)
     browserbase_api_key: str = field(default="", repr=False)
     browserbase_project_id: str = ""
+    brave_search_api_key: str = field(default="", repr=False)
+    tavily_api_key: str = field(default="", repr=False)
+    serper_api_key: str = field(default="", repr=False)
     reddit_client_id: str = field(default="", repr=False)
     reddit_client_secret: str = field(default="", repr=False)
     groq_api_key: str = field(default="", repr=False)
@@ -218,6 +221,9 @@ def load_app_settings(
         gemini_api_key=_clean_secret("GEMINI_API_KEY"),
         browserbase_api_key=_clean_secret("BROWSERBASE_API_KEY"),
         browserbase_project_id=get_secret_or_env("BROWSERBASE_PROJECT_ID"),
+        brave_search_api_key=_clean_secret("BRAVE_SEARCH_API_KEY") or _clean_secret("BRAVE_API_KEY"),
+        tavily_api_key=_clean_secret("TAVILY_API_KEY"),
+        serper_api_key=_clean_secret("SERPER_API_KEY"),
         reddit_client_id=_clean_secret("REDDIT_CLIENT_ID"),
         reddit_client_secret=_clean_secret("REDDIT_CLIENT_SECRET"),
         groq_api_key=_clean_secret("GROQ_API_KEY"),

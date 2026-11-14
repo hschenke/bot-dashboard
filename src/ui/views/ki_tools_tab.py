@@ -11,6 +11,10 @@ from src.ui.views.ki_sequences_tab import format_probe_badge
 _EXECUTOR_OPTIONS: tuple[str, ...] = (
     "custom_json_api",
     "custom_rss_feed",
+    "searxng_search",
+    "brave_search",
+    "tavily_search",
+    "serper_search",
     "yahoo_search",
     "duckduckgo_html",
     "duckduckgo_lite",
@@ -35,7 +39,7 @@ def _set_feedback(level: str, message: str) -> None:
 
 
 def render_tools_tab(brain: KIWebsearchBrain, is_admin: bool) -> None:
-    """Zeigt alle Websearch- & Extraktions-Tools inkl. CRUD, Export & Reset."""
+    """Zeigt alle Websearch- & Extraktions-Tools inkl. CRUD & HTTP-Diagnose."""
     tools = brain.list_tools()
     rows = [
         {
@@ -48,7 +52,7 @@ def render_tools_tab(brain: KIWebsearchBrain, is_admin: bool) -> None:
             "Quality": t.quality_score,
             "Reliability": t.reliability_score,
             "Key": t.api_key_env or "Keyless",
-            "Herkunft": ", ".join(t.origin_apps) or t.source,
+            "Diagnose": t.last_error or "–",
         }
         for t in tools
     ]
@@ -95,8 +99,8 @@ def _render_tool_form(brain: KIWebsearchBrain, tools: list[ToolSpec]) -> None:
         with st.form(f"ki_tool_crud_form_{mode}"):
             c1, c2 = st.columns(2)
             with c1:
-                t_id = st.text_input("Tool-ID", value=existing.id if existing else "", placeholder="z. B. tagesschau_rss")
-                t_name = st.text_input("Anzeigename", value=existing.name if existing else "", placeholder="z. B. Tagesschau RSS")
+                t_id = st.text_input("Tool-ID", value=existing.id if existing else "", placeholder="z. B. meine_json_api")
+                t_name = st.text_input("Anzeigename", value=existing.name if existing else "", placeholder="z. B. Tagesschau RSS / Custom API")
                 t_cat = st.selectbox("Kategorie", options=list(ToolCategory), index=list(ToolCategory).index(existing.category) if existing else 0, format_func=lambda c: c.value)
                 t_exec = st.selectbox("Executor-Typ", options=list(_EXECUTOR_OPTIONS), index=list(_EXECUTOR_OPTIONS).index(cur_exec))
             with c2:
@@ -112,6 +116,11 @@ def _render_tool_form(brain: KIWebsearchBrain, tools: list[ToolSpec]) -> None:
                 items_path = st.text_input("JSON Items-Pfad", value=str(cfg.get("items_path", "results")))
             with c5:
                 url_field = st.text_input("JSON URL/Title Felder", value=f"{cfg.get('url_field', 'url')},{cfg.get('title_field', 'title')}")
+            c6, c7 = st.columns(2)
+            with c6:
+                snippet_field = st.text_input("JSON Snippet-Feld (optional)", value=str(cfg.get("snippet_field", "snippet")), placeholder="snippet / description")
+            with c7:
+                probe_query = st.text_input("Testlauf-Query Rule (optional)", value=str(cfg.get("probe_query", "")), placeholder="z. B. Python oder Berlin")
             t_desc = st.text_input("Beschreibung", value=existing.description if existing else "")
             t_enabled = st.checkbox("Aktiviert", value=existing.enabled if existing else True)
             submitted = st.form_submit_button("💾 Tool speichern", use_container_width=True)
@@ -125,8 +134,12 @@ def _render_tool_form(brain: KIWebsearchBrain, tools: list[ToolSpec]) -> None:
                     "items_path": items_path.strip(),
                     "url_field": uf.strip() or "url",
                     "title_field": tf.strip() or "title",
-                    "snippet_field": str(cfg.get("snippet_field") or "snippet"),
+                    "snippet_field": snippet_field.strip() or "snippet",
                 }
+                if probe_query.strip():
+                    merged_cfg["probe_query"] = probe_query.strip()
+                else:
+                    merged_cfg.pop("probe_query", None)
                 spec = ToolSpec(
                     id=t_id.strip().lower(),
                     name=t_name.strip() or t_id.strip(),

@@ -40,6 +40,8 @@ from ki_brain.rate_limiter import LlmRateLimiter, get_global_rate_limiter
 from ki_brain.secrets_vault import encrypt_secret_value, validate_secret_env_name
 from ki_brain.security import validate_safe_external_url
 from ki_brain.storage import BrainRepository, create_brain_repository
+from ki_brain.unblock import UnblockSummary
+from ki_brain.unblock import resolve_blocked_tools as _resolve_blocked_tools_impl
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -49,9 +51,10 @@ _DEFAULT_SECRET_NAMES: tuple[str, ...] = (
     "OPENROUTER_API_KEY",
     "CEREBRAS_API_KEY",
     "MISTRAL_API_KEY",
+    "BRAVE_SEARCH_API_KEY",
+    "TAVILY_API_KEY",
+    "SERPER_API_KEY",
     "BROWSERBASE_API_KEY",
-    "REDDIT_CLIENT_ID",
-    "REDDIT_CLIENT_SECRET",
 )
 
 
@@ -214,6 +217,21 @@ class KIWebsearchBrain:
             for seq in seqs.values():
                 self._repo.upsert_sequence(seq)
         return removed_models, removed_tools
+
+    def resolve_blocked_tools(
+        self,
+        *,
+        test_query: str = DEFAULT_TEST_QUERY,
+        test_url: str = DEFAULT_TEST_URL,
+    ) -> UnblockSummary:
+        """Wendet Rules, searx.space-Pool & Endpoint-Fallbacks auf `Blocked`-Tools an und testet live nach."""
+        return _resolve_blocked_tools_impl(
+            self._repo,
+            self._secrets,
+            self._runner,
+            test_query=test_query,
+            test_url=test_url,
+        )
 
     # --- Write-Only Secret-Management (wie GitHub Secrets) ---
     def _refresh_runtime_secrets(self) -> None:

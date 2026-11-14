@@ -24,15 +24,29 @@ from ki_brain.optimizer import (
     optimize_tier_sequences,
 )
 from ki_brain.storage import BrainRepository
+from ki_brain.tools.http_utils import consume_probe_trace, diagnose_empty_probe, start_probe_trace
 from ki_brain.tools.registry import (
     execute_extractor_tool,
     execute_search_tool,
     is_extractor_capable,
 )
 
+_PROBE_RULE_QUERIES: dict[str, str] = {
+    "duckduckgo_instant": "Python",
+    "open_meteo": "Berlin",
+    "wikidata_api": "Python",
+}
+
 
 def _utc_now_iso() -> str:
     return datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds")
+
+
+def _get_probe_query(tool: ToolSpec, default_query: str) -> str:
+    cfg_query = str((tool.config or {}).get("probe_query") or "").strip()
+    if cfg_query:
+        return cfg_query
+    return _PROBE_RULE_QUERIES.get(tool.executor_type.strip().lower(), default_query)
 
 
 class BrainBenchmarkRunner:
@@ -55,22 +69,31 @@ class BrainBenchmarkRunner:
             return self._record_tool_result(tool, ProbeStatus.AUTH_MISSING, 0, 0, 0, f"Key {tool.api_key_env} fehlt.", now)
 
         t0 = time.monotonic()
+        start_probe_trace()
         try:
             if tool.category == ToolCategory.AI_GROUNDING:
+                consume_probe_trace()
                 return self._probe_ai_grounding_tool(tool, test_query, test_url, grounding_model, t0, now)
             if is_extractor_capable(tool):
                 page = execute_extractor_tool(tool, test_url, secrets=self._secrets)
+                consume_probe_trace()
                 lat = int((time.monotonic() - t0) * 1000)
                 chars = len(page.text_content)
                 return self._record_tool_result(tool, ProbeStatus.OK, lat, 1, chars, f"{chars} Zeichen extrahiert.", now)
 
-            query_to_use = "Berlin" if tool.executor_type == "open_meteo" else test_query
+            query_to_use = _get_probe_query(tool, test_query)
             hits = execute_search_tool(tool, query_to_use, language="de", secrets=self._secrets, limit=4)
+            trace_events = consume_probe_trace()
             lat = int((time.monotonic() - t0) * 1000)
             if not hits:
-                return self._record_tool_result(tool, ProbeStatus.BLOCKED, lat, 0, 0, "0 Treffer erhalten (leer/blockiert).", now)
-            return self._record_tool_result(tool, ProbeStatus.OK, lat, len(hits), 0, f"{len(hits)} Treffer ({lat} ms).", now)
+                is_quota, diag = diagnose_empty_probe(trace_events, query_to_use)
+                status = ProbeStatus.QUOTA_LIMITED if is_quota else ProbeStatus.BLOCKED
+                return self._record_tool_result(tool, status, lat, 0, 0, diag, now)
+            return self._record_tool_result(
+                tool, ProbeStatus.OK, lat, len(hits), 0, f"{len(hits)} Treffer ({lat} ms, Query='{query_to_use}').", now
+            )
         except Exception as exc:
+            consume_probe_trace()
             lat = int((time.monotonic() - t0) * 1000)
             status = ProbeStatus.QUOTA_LIMITED if is_quota_error(exc) else ProbeStatus.ERROR
             return self._record_tool_result(tool, status, lat, 0, 0, str(exc)[:300], now)

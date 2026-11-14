@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 import re
 from urllib.parse import quote
 
@@ -13,8 +14,9 @@ import requests
 from ki_brain.models import BrainCitation, BrainSecrets
 from ki_brain.security import sanitize_display_url
 from ki_brain.tools.http_utils import API_HEADERS, safe_http_request
-from ki_brain.tools.search_web import search_duckduckgo_lite
+from ki_brain.tools.search_web import search_duckduckgo_lite, search_yahoo
 
+logger = logging.getLogger(__name__)
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 
@@ -125,13 +127,95 @@ def search_hackernews(
     return results
 
 
+def _search_reddit_pullpush(query: str, max_results: int, timeout_seconds: float) -> list[BrainCitation]:
+    try:
+        st, _, _, body = safe_http_request(
+            "GET",
+            "https://api.pullpush.io/reddit/search/submission/",
+            params={"q": query, "size": min(max(1, max_results), 10), "sort": "desc", "sort_type": "score"},
+            headers=API_HEADERS,
+            timeout_seconds=timeout_seconds,
+            max_bytes=250_000,
+        )
+        if st != 200 or not body:
+            return []
+        rows = json.loads(body.decode("utf-8", errors="replace")).get("data", [])
+        results: list[BrainCitation] = []
+        for post in rows:
+            if not isinstance(post, dict):
+                continue
+            raw_link = str(post.get("full_link") or f"https://www.reddit.com{post.get('permalink', '')}")
+            safe = sanitize_display_url(raw_link)
+            title = str(post.get("title") or "").strip()
+            if safe == "#" or not title or "reddit.com" not in safe:
+                continue
+            sub = post.get("subreddit_name_prefixed") or f"r/{post.get('subreddit', 'reddit')}"
+            snip = f"[{post.get('score') or 0} Upvotes] {str(post.get('selftext') or '')[:220]}"
+            results.append(BrainCitation(url=safe, title=f"Reddit ({sub}): {title[:150]}", snippet=snip, source_tool="reddit_search"))
+            if len(results) >= max_results:
+                break
+        return results
+    except Exception:  # noqa: S110
+        return []
+
+
+def _search_reddit_public_feeds(query: str, max_results: int, timeout_seconds: float) -> list[BrainCitation]:
+    try:
+        st, _, _, body = safe_http_request(
+            "GET",
+            "https://www.reddit.com/search.rss",
+            params={"q": query, "sort": "relevance"},
+            headers=API_HEADERS,
+            timeout_seconds=timeout_seconds,
+            max_bytes=250_000,
+        )
+        if st == 200 and body:
+            root = ET.fromstring(body.decode("utf-8", errors="replace"))
+            hits: list[BrainCitation] = []
+            for entry in root.findall("atom:entry", _ATOM_NS)[:max_results]:
+                tnode, lnode = entry.find("atom:title", _ATOM_NS), entry.find("atom:link", _ATOM_NS)
+                href = str(lnode.attrib.get("href") or "") if lnode is not None else ""
+                safe = sanitize_display_url(href)
+                title = (tnode.text or "").strip()[:160] if tnode is not None else ""
+                if safe != "#" and title:
+                    hits.append(BrainCitation(url=safe, title=f"Reddit: {title}", snippet="Reddit Search Feed", source_tool="reddit_search"))
+            if hits:
+                return hits
+    except Exception:  # noqa: S110
+        pass
+    try:
+        st_j, _, _, jbody = safe_http_request(
+            "GET",
+            "https://www.reddit.com/search.json",
+            params={"q": query, "limit": min(max(1, max_results), 10), "sort": "relevance"},
+            headers=API_HEADERS,
+            timeout_seconds=timeout_seconds,
+            max_bytes=250_000,
+        )
+        if st_j == 200 and jbody:
+            children = json.loads(jbody.decode("utf-8", errors="replace")).get("data", {}).get("children", [])
+            hits_j: list[BrainCitation] = []
+            for child in children[:max_results]:
+                post = child.get("data", {})
+                safe = sanitize_display_url(f"https://www.reddit.com{post.get('permalink', '')}")
+                title = str(post.get("title") or "").strip()[:150]
+                if safe != "#" and title:
+                    sub = post.get("subreddit_name_prefixed") or "r/reddit"
+                    hits_j.append(BrainCitation(url=safe, title=f"Reddit ({sub}): {title}", snippet=str(post.get("selftext") or "")[:220], source_tool="reddit_search"))
+            if hits_j:
+                return hits_j
+    except Exception:  # noqa: S110
+        pass
+    return []
+
+
 def search_reddit(
     query: str,
     secrets: BrainSecrets,
     max_results: int = 5,
     timeout_seconds: float = 5.0,
 ) -> list[BrainCitation]:
-    """Reddit OAuth-Suche (mit kostenfreiem Key) oder DuckDuckGo-Site-Fallback."""
+    """Key-freie Reddit-Community-Suche (PullPush, Reddit-RSS/JSON, Yahoo/DDG Site-Fallback; OAuth optional)."""
     clean_q = " ".join(query.split())[:180]
     if not clean_q:
         return []
@@ -141,12 +225,26 @@ def search_reddit(
         oauth_hits = _search_reddit_oauth(clean_q, cid, csec, max_results, timeout_seconds)
         if oauth_hits:
             return oauth_hits
-    hits = search_duckduckgo_lite(f"site:reddit.com {clean_q}", max_results=max_results * 2, timeout_seconds=timeout_seconds)
-    return [
-        c.model_copy(update={"title": f"Reddit: {c.title}", "source_tool": "reddit_search"})
-        for c in hits
-        if "reddit.com" in c.url
-    ][:max_results]
+
+    for fetcher in (_search_reddit_pullpush, _search_reddit_public_feeds):
+        hits = fetcher(clean_q, max_results, timeout_seconds)
+        if hits:
+            return hits
+
+    site_q = f"site:reddit.com {clean_q}"
+    for web_fn in (search_yahoo, search_duckduckgo_lite):
+        try:
+            raw_hits = web_fn(site_q, max_results=max_results * 2, timeout_seconds=timeout_seconds)
+            filtered = [
+                c.model_copy(update={"title": f"Reddit: {c.title}", "source_tool": "reddit_search"})
+                for c in raw_hits
+                if "reddit.com" in c.url
+            ][:max_results]
+            if filtered:
+                return filtered
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Reddit Site-Fallback fehlgeschlagen: %s", exc)
+    return []
 
 
 def _search_reddit_oauth(

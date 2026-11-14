@@ -36,7 +36,7 @@ def render_models_tab(brain: KIWebsearchBrain, is_admin: bool) -> None:
             "Latenz (ms)": m.last_latency_ms,
             "Score": m.quality_score,
             "Key-Env": m.api_key_env or "–",
-            "Herkunft": ", ".join(m.origin_apps) or m.source,
+            "Diagnose": m.last_error or "–",
         }
         for m in models
     ]

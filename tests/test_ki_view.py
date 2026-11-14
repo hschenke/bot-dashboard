@@ -50,19 +50,32 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
     assert "🔎 Search for New" in btn_labels
     assert "🚀 Testlauf & Optimizing" in btn_labels
     assert "🧹 Clear Errors" in btn_labels
+    assert "🔓 Blocked lösen" in btn_labels
     assert "🔒 Secret sicher speichern / komplett ersetzen" in btn_labels
 
-    top_order = ["🔎 Search for New", "🚀 Testlauf & Optimizing", "🧹 Clear Errors"]
+    top_order = ["🔎 Search for New", "🚀 Testlauf & Optimizing", "🧹 Clear Errors", "🔓 Blocked lösen"]
     assert [btn_labels.index(lbl) for lbl in top_order] == sorted(btn_labels.index(lbl) for lbl in top_order)
     for top_lbl in top_order:
         top_btn = next(b for b in at.button if b.label == top_lbl)
         assert top_btn.proto.type == "secondary"
+
+    # Herkunft-Spalte entfernt in KI-Modelle & Websearch/Tools + Brave/Tavily/Serper Missing Keys angeboten
+    models_df = at.tabs[1].dataframe[0].value
+    tools_df = at.tabs[2].dataframe[0].value
+    assert "Herkunft" not in models_df.columns
+    assert "Herkunft" not in tools_df.columns
+    assert "🔑 Missing Key: BRAVE_SEARCH_API_KEY" in btn_labels
+    assert "🔑 Missing Key: TAVILY_API_KEY" in btn_labels
+    assert "🔑 Missing Key: SERPER_API_KEY" in btn_labels
+    assert "🔑 Missing Key: REDDIT_CLIENT_ID" not in btn_labels
 
     # Bild 2: Manuelles Modell-/Tool-Formular standardmäßig eingeklappt (expanded=False)
     model_exp = next(e for e in at.tabs[1].expander if "Neues Modell" in e.label)
     tool_exp = next(e for e in at.tabs[2].expander if "Neues Tool" in e.label)
     assert model_exp.proto.expanded is False
     assert tool_exp.proto.expanded is False
+    assert any(t.label == "Testlauf-Query Rule (optional)" for t in at.tabs[2].text_input)
+    assert any(t.label == "JSON Snippet-Feld (optional)" for t in at.tabs[2].text_input)
 
     # Bild 3: Export, Import & Standardkatalog liegt im Live-Test-Tab (tabs[3]), nicht im Tools-Tab (tabs[2])
     assert not any("Standardkatalog" in b.label for b in at.tabs[2].button)
@@ -263,5 +276,59 @@ def test_app_sidebar_button_navigation_and_alignment(
     assert "🧠 KI & Websearch Brain" in [h.value for h in at.header]
     active_ki_btn = next(b for b in at.sidebar.button if b.label == "KI-View")
     assert active_ki_btn.proto.type == "primary"
+
+
+def test_ki_view_unblock_button_runs_spinner_outside_columns(tmp_path: Path) -> None:
+    from ki_brain import UnblockSummary
+
+    repo = create_brain_repository(sqlite_path=tmp_path / "unblock_ui.db")
+    brain = KIWebsearchBrain(repo)
+    fake_unblock = UnblockSummary(
+        checked_blocked=["duckduckgo_instant"],
+        rules_applied=["duckduckgo_instant: Probe-Query-Regel 'Python' hinterlegt"],
+        unblocked_ids=["duckduckgo_instant"],
+        activated_alternatives=["searxng_public (https://searx.example/search)"],
+    )
+    brain.resolve_blocked_tools = MagicMock(return_value=fake_unblock)  # type: ignore[method-assign]
+
+    col_depth = {"current": 0}
+    spinner_depths: list[int] = []
+    session_state: dict[str, Any] = {}
+
+    class _TrackedCol:
+        def __enter__(self) -> _TrackedCol:
+            col_depth["current"] += 1
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            col_depth["current"] -= 1
+            return False
+
+    class _TrackedSpinner:
+        def __enter__(self) -> _TrackedSpinner:
+            spinner_depths.append(col_depth["current"])
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+    settings = AppSettings(brain_sqlite_path=str(tmp_path / "unblock_ui.db"))
+    with (
+        patch("src.ui.views.ki_view.create_dashboard_brain", return_value=brain),
+        patch("streamlit.session_state", session_state),
+        patch("streamlit.columns", side_effect=lambda spec, **kw: [_TrackedCol() for _ in range(spec if isinstance(spec, int) else len(spec))]),
+        patch("streamlit.spinner", return_value=_TrackedSpinner()),
+        patch("streamlit.button", side_effect=lambda label, **kw: "Blocked lösen" in label),
+        patch("streamlit.rerun", side_effect=_RerunCalled),
+        pytest.raises(_RerunCalled),
+    ):
+        render_ki_view(settings, role=AuthRole.ADMIN)
+
+    brain.resolve_blocked_tools.assert_called_once()
+    assert spinner_depths == [0]
+    assert session_state["ki_brain_feedback"]["level"] == "success"
+    assert "duckduckgo_instant" in session_state["ki_brain_feedback"]["message"]
+    assert "searxng_public" in session_state["ki_brain_feedback"]["message"]
+
 
 

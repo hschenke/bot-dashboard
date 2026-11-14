@@ -133,22 +133,25 @@ def search_duckduckgo_lite(
     return results
 
 
-def search_duckduckgo_instant(
-    query: str,
-    endpoint_url: str = "https://api.duckduckgo.com/",
-    max_results: int = 5,
-    timeout_seconds: float = 4.5,
+def _pick_entity_keyword(query: str) -> str:
+    stop = {"the", "and", "der", "die", "das", "und", "für", "mit", "bei", "ai", "ki", "in", "on"}
+    tokens = [t.strip(" ,.?!:;()[]\"'") for t in query.split() if len(t.strip(" ,.?!:;()[]\"'")) >= 3]
+    preferred = [t for t in tokens if t.lower() not in stop]
+    return max(preferred, key=len) if preferred else (tokens[0] if tokens else "")
+
+
+def _query_ddg_instant_once(
+    search_term: str,
+    endpoint_url: str,
+    max_results: int,
+    timeout_seconds: float,
 ) -> list[BrainCitation]:
-    """Offizielle JSON-Instant-Answer-API von DuckDuckGo."""
     import json
 
-    clean_q = " ".join(query.split())[:180]
-    if not clean_q:
-        return []
     status, _, _, body = safe_http_request(
         "GET",
         endpoint_url or "https://api.duckduckgo.com/",
-        params={"q": clean_q, "format": "json", "no_html": 1, "skip_disambig": 1},
+        params={"q": search_term, "format": "json", "no_html": 1, "skip_disambig": 1},
         timeout_seconds=timeout_seconds,
         max_bytes=250_000,
     )
@@ -159,7 +162,7 @@ def search_duckduckgo_instant(
     abstract_url = sanitize_display_url(str(payload.get("AbstractURL") or ""))
     abstract_text = str(payload.get("AbstractText") or "").strip()
     if abstract_url != "#" and abstract_text:
-        heading = str(payload.get("Heading") or clean_q)[:180]
+        heading = str(payload.get("Heading") or search_term)[:180]
         results.append(
             BrainCitation(url=abstract_url, title=heading, snippet=abstract_text[:350], source_tool="duckduckgo_instant")
         )
@@ -173,11 +176,28 @@ def search_duckduckgo_instant(
                 results.append(
                     BrainCitation(url=safe, title=text.split(" - ", 1)[0][:150], snippet=text[:300], source_tool="duckduckgo_instant")
                 )
-    if not results:
-        fallback_url = sanitize_display_url(f"https://duckduckgo.com/?q={quote(clean_q)}")
-        if abstract_text:
-            results.append(BrainCitation(url=fallback_url, title=clean_q, snippet=abstract_text[:300], source_tool="duckduckgo_instant"))
+    if not results and abstract_text:
+        fallback_url = sanitize_display_url(f"https://duckduckgo.com/?q={quote(search_term)}")
+        results.append(BrainCitation(url=fallback_url, title=search_term, snippet=abstract_text[:300], source_tool="duckduckgo_instant"))
     return results[:max_results]
+
+
+def search_duckduckgo_instant(
+    query: str,
+    endpoint_url: str = "https://api.duckduckgo.com/",
+    max_results: int = 5,
+    timeout_seconds: float = 4.5,
+) -> list[BrainCitation]:
+    """Offizielle JSON-Instant-Answer-API von DuckDuckGo (inkl. Einzelbegriff-Fallback)."""
+    clean_q = " ".join(query.split())[:180]
+    if not clean_q:
+        return []
+    results = _query_ddg_instant_once(clean_q, endpoint_url, max_results, timeout_seconds)
+    if not results and " " in clean_q:
+        entity = _pick_entity_keyword(clean_q)
+        if entity and entity.lower() != clean_q.lower():
+            results = _query_ddg_instant_once(entity, endpoint_url, max_results, timeout_seconds)
+    return results
 
 
 def search_google_news_rss(

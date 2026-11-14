@@ -23,6 +23,9 @@ class BrainSecrets:
     gemini_api_key: str = field(default="", repr=False)
     browserbase_api_key: str = field(default="", repr=False)
     browserbase_project_id: str = ""
+    brave_search_api_key: str = field(default="", repr=False)
+    tavily_api_key: str = field(default="", repr=False)
+    serper_api_key: str = field(default="", repr=False)
     reddit_client_id: str = field(default="", repr=False)
     reddit_client_secret: str = field(default="", repr=False)
     groq_api_key: str = field(default="", repr=False)
@@ -39,6 +42,9 @@ class BrainSecrets:
         mapping = {
             "GEMINI_API_KEY": self.gemini_api_key,
             "BROWSERBASE_API_KEY": self.browserbase_api_key,
+            "BRAVE_SEARCH_API_KEY": self.brave_search_api_key or os.getenv("BRAVE_API_KEY", ""),
+            "TAVILY_API_KEY": self.tavily_api_key,
+            "SERPER_API_KEY": self.serper_api_key,
             "REDDIT_CLIENT_ID": self.reddit_client_id,
             "REDDIT_CLIENT_SECRET": self.reddit_client_secret,
             "GROQ_API_KEY": self.groq_api_key,
@@ -59,6 +65,9 @@ class BrainSecrets:
             gemini_api_key=self.gemini_api_key,
             browserbase_api_key=self.browserbase_api_key,
             browserbase_project_id=self.browserbase_project_id,
+            brave_search_api_key=self.brave_search_api_key,
+            tavily_api_key=self.tavily_api_key,
+            serper_api_key=self.serper_api_key,
             reddit_client_id=self.reddit_client_id,
             reddit_client_secret=self.reddit_client_secret,
             groq_api_key=self.groq_api_key,
@@ -71,10 +80,14 @@ class BrainSecrets:
     @classmethod
     def from_env(cls) -> BrainSecrets:
         """Lädt bekannte optionale Free-Tier-Keys sicher aus Umgebungsvariablen."""
+        brave_val = os.getenv("BRAVE_SEARCH_API_KEY", "").strip() or os.getenv("BRAVE_API_KEY", "").strip()
         return cls(
             gemini_api_key=os.getenv("GEMINI_API_KEY", "").strip(),
             browserbase_api_key=os.getenv("BROWSERBASE_API_KEY", "").strip(),
             browserbase_project_id=os.getenv("BROWSERBASE_PROJECT_ID", "").strip(),
+            brave_search_api_key=brave_val,
+            tavily_api_key=os.getenv("TAVILY_API_KEY", "").strip(),
+            serper_api_key=os.getenv("SERPER_API_KEY", "").strip(),
             reddit_client_id=os.getenv("REDDIT_CLIENT_ID", "").strip(),
             reddit_client_secret=os.getenv("REDDIT_CLIENT_SECRET", "").strip(),
             groq_api_key=os.getenv("GROQ_API_KEY", "").strip(),

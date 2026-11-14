@@ -474,3 +474,291 @@ def test_cleanup_unhealthy_items_and_write_only_secrets_vault(
     assert not reopened._secrets.has_key("BROWSERBASE_API_KEY")  # noqa: SLF001
     reopened.close()
 
+
+def test_http_probe_diagnostics_and_ddg_entity_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ki_brain.benchmark import BrainBenchmarkRunner
+    from ki_brain.llm_runner import UnifiedLLMRunner
+    from ki_brain.tools.search_web import search_duckduckgo_instant
+
+    # 1. DuckDuckGo Instant Answer Einzelwort-Retry bei Multi-Word-Query
+    ddg_queries: list[str] = []
+
+    def _fake_ddg_http(_method: str, _url: str, params: dict[str, object] | None = None, **_kw: object) -> tuple[int, str, str, bytes]:
+        q = str((params or {}).get("q") or "")
+        ddg_queries.append(q)
+        if q == "Python":
+            return 200, "https://api.duckduckgo.com/", "application/json", b'{"Heading": "Python", "AbstractURL": "https://www.python.org/", "AbstractText": "Programmiersprache"}'
+        return 200, "https://api.duckduckgo.com/", "application/json", b'{"AbstractURL": "", "AbstractText": "", "RelatedTopics": []}'
+
+    monkeypatch.setattr("ki_brain.tools.search_web.safe_http_request", _fake_ddg_http)
+    ddg_hits = search_duckduckgo_instant("Python AI Tools")
+    assert ddg_queries == ["Python AI Tools", "Python"]
+    assert len(ddg_hits) == 1 and ddg_hits[0].url == "https://www.python.org/"
+
+    # 2. HTTP-Diagnose bei Blocked / Quota 429 im BenchmarkRunner
+    repo = create_brain_repository(sqlite_path=":memory:")
+    secrets = BrainSecrets()
+    bench = BrainBenchmarkRunner(repo, secrets, UnifiedLLMRunner(secrets))
+    ddg_html_tool = repo.get_tool("duckduckgo_html")
+    assert ddg_html_tool is not None
+
+    from ki_brain.tools.http_utils import record_http_probe
+
+    def _fake_probe_search(tool: ToolSpec, q: str, **_kw: object) -> list[object]:
+        if tool.id == "duckduckgo_html":
+            record_http_probe("https://html.duckduckgo.com/html/", 202, 0)
+            return []
+        if tool.id == "yahoo_search":
+            record_http_probe("https://de.search.yahoo.com/search", 429, 120)
+            return []
+        if tool.id == "duckduckgo_instant":
+            assert q == "Python"
+            record_http_probe("https://api.duckduckgo.com/", 200, 512)
+            return []
+        return []
+
+    monkeypatch.setattr("ki_brain.benchmark.execute_search_tool", _fake_probe_search)
+    ut_202, entry_202 = bench.probe_tool(ddg_html_tool, test_query="Beliebige Query")
+    assert ut_202.last_status == ProbeStatus.BLOCKED
+    assert "HTTP 202" in entry_202.details
+
+    yahoo_tool = repo.get_tool("yahoo_search")
+    assert yahoo_tool is not None
+    ut_429, entry_429 = bench.probe_tool(yahoo_tool)
+    assert ut_429.last_status == ProbeStatus.QUOTA_LIMITED
+    assert "HTTP 429" in entry_429.details
+
+    ddg_inst = repo.get_tool("duckduckgo_instant")
+    assert ddg_inst is not None
+    ut_200, entry_200 = bench.probe_tool(ddg_inst, test_query="Mehrwort Query")
+    assert ut_200.last_status == ProbeStatus.BLOCKED
+    assert "HTTP 200" in entry_200.details and "Python" in entry_200.details
+    repo.close()
+
+
+def test_keyless_reddit_fallbacks_and_no_reddit_missing_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ki_brain.models import BrainCitation
+    from ki_brain.tools.search_knowledge import search_reddit
+
+    repo = create_brain_repository(sqlite_path=":memory:")
+    brain = KIWebsearchBrain(repo, BrainSecrets())
+    secret_names = {s.env_name for s in brain.list_secret_statuses()}
+    assert "REDDIT_CLIENT_ID" not in secret_names
+    assert "REDDIT_CLIENT_SECRET" not in secret_names
+    assert {"BRAVE_SEARCH_API_KEY", "TAVILY_API_KEY", "SERPER_API_KEY"} <= secret_names
+    reddit_spec = brain.get_tool("reddit_search")
+    assert reddit_spec is not None and reddit_spec.requires_api_key is False
+
+    # Stufe 1: PullPush liefert Treffer ohne API-Key
+    monkeypatch.setattr(
+        "ki_brain.tools.search_knowledge.safe_http_request",
+        lambda _m, url, **_kw: (
+            200,
+            url,
+            "application/json",
+            b'{"data": [{"title": "Local LLM Benchmarks", "full_link": "https://www.reddit.com/r/LocalLLaMA/comments/abc/test/", "subreddit": "LocalLLaMA", "score": 88, "selftext": "Vergleich"}]}',
+        )
+        if "pullpush.io" in url
+        else (403, url, "text/plain", b""),
+    )
+    hits_pp = search_reddit("Local LLM", BrainSecrets())
+    assert len(hits_pp) == 1 and "r/LocalLLaMA" in hits_pp[0].title
+
+    # Stufe 2: PullPush blockiert -> Reddit Atom RSS funktioniert
+    rss_xml = b'<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Python Tip</title><link href="https://www.reddit.com/r/Python/comments/xyz/tip/"/></entry></feed>'
+    monkeypatch.setattr(
+        "ki_brain.tools.search_knowledge.safe_http_request",
+        lambda _m, url, **_kw: (200, url, "application/atom+xml", rss_xml)
+        if "reddit.com/search.rss" in url
+        else (403, url, "text/plain", b""),
+    )
+    hits_rss = search_reddit("Python", BrainSecrets())
+    assert len(hits_rss) == 1 and hits_rss[0].url.startswith("https://www.reddit.com/r/Python")
+
+    # Stufe 3: PullPush + RSS/JSON blockiert -> Yahoo site:reddit.com Fallback
+    monkeypatch.setattr(
+        "ki_brain.tools.search_knowledge.safe_http_request",
+        lambda *_a, **_kw: (403, "https://blocked", "text/plain", b""),
+    )
+    monkeypatch.setattr(
+        "ki_brain.tools.search_knowledge.search_yahoo",
+        lambda q, **_kw: [BrainCitation(url="https://www.reddit.com/r/de/comments/123/", title="Reddit Thread", snippet="Text", source_tool="yahoo_search")]
+        if "site:reddit.com" in q
+        else [],
+    )
+    hits_site = search_reddit("KI News", BrainSecrets())
+    assert len(hits_site) == 1 and "Reddit:" in hits_site[0].title
+    brain.close()
+
+
+def test_brave_tavily_serper_and_sync_new_builtins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
+
+    db_file = tmp_path / "sync_apis.db"
+    repo = create_brain_repository(sqlite_path=db_file)
+    # Simuliere bestehende ältere DB vor v0.8.0 (known_builtin_ids kannte neue APIs noch nicht)
+    repo.set_meta("known_builtin_ids", json.dumps({"models": ["gemini-3.5-flash-lite"], "tools": ["yahoo_search"]}))
+    for tid in ("brave_search", "tavily_search", "serper_search", "openalex_api", "stackexchange_api", "tagesschau_rss"):
+        repo.delete_tool(tid)
+
+    brain = KIWebsearchBrain(repo, BrainSecrets())
+    monkeypatch.setattr("ki_brain.discovery.safe_http_request", lambda *_a, **_kw: (404, "https://searx.space", "text/plain", b""))
+    sync_sum = brain.auto_sync(verify_discovered=False)
+    for new_tid in ("brave_search", "tavily_search", "serper_search", "openalex_api", "stackexchange_api", "tagesschau_rss"):
+        assert new_tid in sync_sum.added_tools
+        assert brain.get_tool(new_tid) is not None
+    assert brain.get_tool("brave_search").last_status == ProbeStatus.AUTH_MISSING  # type: ignore[union-attr]
+    assert brain.get_tool("tavily_search").last_status == ProbeStatus.AUTH_MISSING  # type: ignore[union-attr]
+    assert brain.get_tool("serper_search").last_status == ProbeStatus.AUTH_MISSING  # type: ignore[union-attr]
+
+    # Executors mit API-Keys testen
+    captured_headers: list[dict[str, str]] = []
+
+    def _fake_api_http(_method: str, url: str, headers: dict[str, str] | None = None, **_kw: object) -> tuple[int, str, str, bytes]:
+        captured_headers.append(headers or {})
+        if "search.brave.com" in url:
+            return 200, url, "application/json", b'{"web": {"results": [{"url": "https://brave.example.org/1", "title": "Brave Hit", "description": "Fast"}]}}'
+        if "tavily.com" in url:
+            return 200, url, "application/json", b'{"results": [{"url": "https://tavily.example.org/1", "title": "Tavily Hit", "content": "AI Search"}]}'
+        if "serper.dev" in url:
+            return 200, url, "application/json", b'{"organic": [{"link": "https://serper.example.org/1", "title": "Serper Hit", "snippet": "SERP"}]}'
+        return 404, url, "text/plain", b""
+
+    monkeypatch.setattr("ki_brain.tools.search_apis.safe_http_request", _fake_api_http)
+    keyed = BrainSecrets(brave_search_api_key="brv_123", tavily_api_key="tvly_456", serper_api_key="srp_789")
+    b_hits = execute_search_tool(brain.get_tool("brave_search"), "Python", secrets=keyed)  # type: ignore[arg-type]
+    t_hits = execute_search_tool(brain.get_tool("tavily_search"), "Python", secrets=keyed)  # type: ignore[arg-type]
+    s_hits = execute_search_tool(brain.get_tool("serper_search"), "Python", secrets=keyed)  # type: ignore[arg-type]
+    assert b_hits[0].title == "Brave Hit" and captured_headers[0]["X-Subscription-Token"] == "brv_123"
+    assert t_hits[0].title == "Tavily Hit"
+    assert s_hits[0].title == "Serper Hit" and captured_headers[2]["X-API-KEY"] == "srp_789"
+    brain.close()
+
+
+def test_searx_space_discovery_ssrf_and_pool_rotation(monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
+
+    from ki_brain.tools.searxng import (
+        build_searxng_tool,
+        discover_verified_searxng_pool,
+        parse_searx_space_instances,
+    )
+
+    payload = {
+        "instances": {
+            "http://insecure.example.org": {"network_type": "normal", "http": {"status_code": 200}, "timing": {"search": {"all": {"uptime": 99.9}}}},
+            "https://onionservice.onion": {"network_type": "tor", "http": {"status_code": 200}, "timing": {"search": {"all": {"uptime": 99.9}}}},
+            "https://127.0.0.1": {"network_type": "normal", "http": {"status_code": 200}, "timing": {"search": {"all": {"uptime": 99.9}}}},
+            "https://down.example.com": {"network_type": "normal", "http": {"status_code": 503}, "timing": {"search": {"all": {"uptime": 99.9}}}},
+            "https://nojson.example.com": {"network_type": "normal", "http": {"status_code": 200}, "timing": {"search": {"all": {"uptime": 99.0, "mean": 0.3}}}},
+            "https://good-fast.example.com": {"network_type": "normal", "http": {"status_code": 200}, "timing": {"search": {"all": {"uptime": 99.5, "mean": 0.4}}}},
+            "https://good-slow.example.com": {"network_type": "normal", "http": {"status_code": 200}, "timing": {"search": {"all": {"uptime": 95.0, "mean": 1.2}}}},
+        }
+    }
+    parsed = parse_searx_space_instances(payload)
+    assert "http://insecure.example.org/search" not in parsed
+    assert "https://onionservice.onion/search" not in parsed
+    assert "https://127.0.0.1/search" not in parsed
+    assert "https://down.example.com/search" not in parsed
+    assert parsed[0] == "https://good-fast.example.com/search"
+
+    def _fake_searx_http(_m: str, url: str, **_kw: object) -> tuple[int, str, str, bytes]:
+        if "searx.space" in url:
+            return 200, url, "application/json", json.dumps(payload).encode("utf-8")
+        if "nojson.example.com" in url:
+            return 403, url, "text/html", b"Forbidden"
+        if "good-fast.example.com" in url:
+            return 200, url, "application/json", b'{"results": [{"url": "https://docs.python.org/3/", "title": "Python Docs", "content": "Official"}]}'
+        if "good-slow.example.com" in url:
+            return 200, url, "application/json", b'{"results": [{"url": "https://peps.python.org/", "title": "Python PEPs", "content": "PEPs"}]}'
+        return 404, url, "text/plain", b""
+
+    pool = discover_verified_searxng_pool(max_verify=6, max_keep=3, http_request_fn=_fake_searx_http)
+    assert pool == ["https://good-fast.example.com/search", "https://good-slow.example.com/search"]
+
+    searx_tool = build_searxng_tool(pool)
+    called_eps: list[str] = []
+
+    def _fake_rotated_http(_m: str, url: str, **_kw: object) -> tuple[int, str, str, bytes]:
+        called_eps.append(url)
+        if "good-fast" in url:
+            return 429, url, "text/plain", b"Too Many Requests"
+        return 200, url, "application/json", b'{"results": [{"url": "https://peps.python.org/", "title": "Python PEPs", "content": "Fallback ok"}]}'
+
+    monkeypatch.setattr("ki_brain.tools.search_apis.safe_http_request", _fake_rotated_http)
+    hits = execute_search_tool(searx_tool, "Python")
+    assert called_eps == ["https://good-fast.example.com/search", "https://good-slow.example.com/search"]
+    assert len(hits) == 1 and hits[0].title == "Python PEPs"
+
+
+def test_resolve_blocked_tools_applies_rules_and_unblocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ki_brain.models import BenchmarkEntry, BenchmarkReport, BrainCitation
+    from ki_brain.tools.http_utils import record_http_probe
+
+    repo = create_brain_repository(sqlite_path=":memory:")
+    brain = KIWebsearchBrain(repo, BrainSecrets())
+
+    # Simuliere alte Blocked-Einträge ohne Rules + blockiertes DDG HTML + Yahoo Alternate
+    ddg_inst = brain.get_tool("duckduckgo_instant")
+    ddg_html = brain.get_tool("duckduckgo_html")
+    reddit_t = brain.get_tool("reddit_search")
+    yahoo_t = brain.get_tool("yahoo_search")
+    assert ddg_inst and ddg_html and reddit_t and yahoo_t
+
+    brain.add_or_update_tool(ddg_inst.model_copy(update={"config": {}, "last_status": ProbeStatus.BLOCKED, "last_error": "0 Treffer"}))
+    brain.add_or_update_tool(ddg_html.model_copy(update={"last_status": ProbeStatus.BLOCKED, "last_error": "0 Treffer"}))
+    brain.add_or_update_tool(reddit_t.model_copy(update={"requires_api_key": True, "api_key_env": "REDDIT_CLIENT_ID", "endpoint_url": "https://oauth.reddit.com/search", "last_status": ProbeStatus.BLOCKED}))
+    brain.add_or_update_tool(yahoo_t.model_copy(update={"endpoint_url": "https://de.search.yahoo.com/search", "last_status": ProbeStatus.BLOCKED}))
+
+    repo.save_benchmark_run(
+        BenchmarkReport(
+            run_id="before_unblock",
+            started_at="2026-11-14T10:00:00+00:00",
+            finished_at="2026-11-14T10:00:02+00:00",
+            test_query="Python AI",
+            test_url="https://de.wikipedia.org/wiki/Python",
+            entries=[BenchmarkEntry(item_type="tool", item_id="duckduckgo_html", name=ddg_html.name, status=ProbeStatus.BLOCKED, latency_ms=50, details="alt")],
+            healthy_tools_count=0,
+            healthy_models_count=0,
+        )
+    )
+
+    monkeypatch.setattr(
+        "ki_brain.unblock.discover_verified_searxng_pool",
+        lambda **_kw: ["https://searx.verified.example/search"],
+    )
+
+    def _fake_unblock_exec(tool: ToolSpec, query: str, **_kw: object) -> list[BrainCitation]:
+        if tool.id == "duckduckgo_instant" and query == "Python":
+            return [BrainCitation(url="https://www.python.org/", title="Python", snippet="Rule ok", source_tool=tool.id)]
+        if tool.id == "reddit_search" and not tool.requires_api_key:
+            return [BrainCitation(url="https://www.reddit.com/r/Python/1", title="Reddit OK", snippet="Keyless", source_tool=tool.id)]
+        if tool.id == "yahoo_search" and "de.search.yahoo.com" not in tool.endpoint_url:
+            return [BrainCitation(url="https://python.org/", title="Yahoo US OK", snippet="Alt", source_tool=tool.id)]
+        if tool.id == "searxng_public":
+            return [BrainCitation(url="https://searx.verified.example/", title="SearXNG OK", snippet="Pool", source_tool=tool.id)]
+        if tool.id == "duckduckgo_html":
+            record_http_probe("https://html.duckduckgo.com/html/", 202, 0)
+            return []
+        return []
+
+    monkeypatch.setattr("ki_brain.benchmark.execute_search_tool", _fake_unblock_exec)
+    summary = brain.resolve_blocked_tools()
+
+    assert "duckduckgo_instant" in summary.unblocked_ids
+    assert "reddit_search" in summary.unblocked_ids
+    assert "yahoo_search" in summary.unblocked_ids
+    assert "duckduckgo_html" in summary.still_blocked
+    assert "HTTP 202" in summary.still_blocked["duckduckgo_html"]
+    assert any("searxng_public" in a for a in summary.activated_alternatives)
+
+    saved_inst = brain.get_tool("duckduckgo_instant")
+    saved_reddit = brain.get_tool("reddit_search")
+    saved_searx = brain.get_tool("searxng_public")
+    assert saved_inst is not None and saved_inst.config.get("probe_query") == "Python"
+    assert saved_reddit is not None and saved_reddit.requires_api_key is False
+    assert saved_searx is not None and saved_searx.last_status == ProbeStatus.OK
+    assert "searxng_public" in brain.get_sequence(BrainTier.FAST).search_tool_sequence
+    brain.close()
+
+

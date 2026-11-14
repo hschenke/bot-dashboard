@@ -31,7 +31,7 @@ div[data-testid="stLinkButton"] > a {
     justify-content: center !important;
     font-size: 0.92rem !important;
     font-weight: 500 !important;
-    padding: 0.45rem 0.85rem !important;
+    padding: 0.45rem 0.6rem !important;
     border-radius: 8px !important;
     box-sizing: border-box !important;
     width: 100% !important;

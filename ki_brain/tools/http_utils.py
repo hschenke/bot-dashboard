@@ -1,8 +1,10 @@
-"""Gemeinsame SSRF-sichere HTTP- und Parsing-Hilfsfunktionen für Brain-Tools."""
+"""Gemeinsame SSRF-sichere HTTP-, Parsing- und Probe-Diagnose-Hilfsfunktionen."""
 
 from __future__ import annotations
 
 import logging
+import threading
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
@@ -31,6 +33,67 @@ API_HEADERS: dict[str, str] = {
     "User-Agent": "KIWebsearchBrain/1.0 (+https://github.com/hschenke/bot-dashboard)",
     "Accept": "application/json,application/xml,text/plain;q=0.9,*/*;q=0.8",
 }
+
+_PROBE_TRACE_LOCAL = threading.local()
+_STATUS_LABELS: dict[int, str] = {
+    202: "Anti-Bot-Challenge / Leerantwort",
+    401: "Auth / API-Key ungültig",
+    403: "Zugriff / Bot-Schutz blockiert",
+    404: "Endpunkt nicht gefunden",
+    429: "Rate-Limit / Quota 429",
+    500: "Serverfehler (500)",
+    502: "Bad Gateway (502)",
+    503: "Service Unavailable (503)",
+}
+
+
+@dataclass(frozen=True)
+class HttpProbeEvent:
+    """Protokolliert Status & Größe eines einzelnen HTTP-Probe-Aufrufs (ohne Secrets)."""
+
+    host: str
+    status_code: int
+    body_bytes: int
+
+
+def start_probe_trace() -> None:
+    """Aktiviert thread-lokales HTTP-Diagnose-Tracing für den aktuellen Tool-Testlauf."""
+    _PROBE_TRACE_LOCAL.events = []
+
+
+def consume_probe_trace() -> list[HttpProbeEvent]:
+    """Liest und leert alle gesammelten HTTP-Diagnose-Events des aktuellen Threads."""
+    events = getattr(_PROBE_TRACE_LOCAL, "events", None)
+    _PROBE_TRACE_LOCAL.events = None
+    return list(events) if isinstance(events, list) else []
+
+
+def record_http_probe(url: str, status_code: int, body_bytes: int) -> None:
+    """Zeichnet ein HTTP-Probe-Ergebnis thread-lokal auf (nur Host & Status)."""
+    events = getattr(_PROBE_TRACE_LOCAL, "events", None)
+    if isinstance(events, list) and len(events) < 20:
+        host = (urlparse(url).hostname or url)[:80]
+        events.append(HttpProbeEvent(host=host, status_code=status_code, body_bytes=body_bytes))
+
+
+def diagnose_empty_probe(events: list[HttpProbeEvent], query: str) -> tuple[bool, str]:
+    """Erstellt eine präzise HTTP-Diagnose für 0-Treffer-Läufe (inkl. 429-Erkennung)."""
+    if not events:
+        return False, f"0 Treffer erhalten für Query '{query}' (leer/blockiert)."
+    if all(ev.status_code == 429 for ev in events):
+        hosts = ", ".join(dict.fromkeys(ev.host for ev in events))
+        return True, f"HTTP 429 (Rate-Limit auf {hosts}) — 0 Treffer."
+
+    parts: list[str] = []
+    for ev in events[-3:]:
+        if ev.status_code == 200:
+            kb = ev.body_bytes / 1024.0
+            parts.append(f"HTTP 200 ({ev.host}, {kb:.1f} KB) — 0 Treffer für '{query}'")
+        else:
+            label = _STATUS_LABELS.get(ev.status_code, f"Status {ev.status_code}")
+            parts.append(f"HTTP {ev.status_code} ({label} auf {ev.host})")
+    is_quota = events[-1].status_code == 429
+    return is_quota, " | ".join(parts)[:300]
 
 
 def extract_redirect_target(raw_href: str) -> str:
@@ -65,11 +128,7 @@ def safe_http_request(
     max_bytes: int = 1_500_000,
     dns_resolver: DnsResolver | None = None,
 ) -> tuple[int, str, str, bytes]:
-    """Führt HTTP GET/POST inkl. SSRF-Redirect-Prüfung und Speicherlimit aus.
-
-    Returns:
-        (status_code, final_url, content_type, body_bytes)
-    """
+    """Führt HTTP GET/POST inkl. SSRF-Redirect-Prüfung, Probe-Trace und Speicherlimit aus."""
     validate_fn = (
         (lambda u: validate_safe_external_url(u, dns_resolver=dns_resolver))
         if dns_resolver is not None
@@ -105,6 +164,7 @@ def safe_http_request(
                 continue
             body = read_bounded_response(resp, max_bytes=max_bytes)
             ctype = str(resp.headers.get("Content-Type") or "").lower()
+            record_http_probe(current_url, resp.status_code, len(body))
             return resp.status_code, current_url, ctype, body
 
     raise BrainProviderError(f"Zu viele Redirects (> {MAX_REDIRECT_HOPS}) für '{url}'.")

@@ -25,6 +25,7 @@ from ki_brain.models import (
     ToolSpec,
 )
 from ki_brain.storage import BrainRepository, create_brain_repository
+from ki_brain.unblock import UnblockSummary
 
 __all__ = [
     "AIModelSpec",
@@ -51,5 +52,6 @@ __all__ = [
     "TierSequenceConfig",
     "ToolCategory",
     "ToolSpec",
+    "UnblockSummary",
     "create_brain_repository",
 ]

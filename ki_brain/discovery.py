@@ -64,6 +64,7 @@ def _guess_gemini_tier(model_id: str) -> tuple[BrainTier, bool]:
 
 def _sync_new_builtins(
     repo: BrainRepository,
+    secrets: BrainSecrets,
     excluded_models: set[str],
     excluded_tools: set[str],
 ) -> tuple[list[str], list[str], list[str]]:
@@ -92,7 +93,12 @@ def _sync_new_builtins(
         if t.id in excluded_tools:
             skipped.append(t.id)
         elif t.id not in known_tools and t.id not in existing_tools:
-            repo.upsert_tool(t)
+            to_save = t
+            if t.requires_api_key and t.api_key_env and not secrets.has_key(t.api_key_env):
+                to_save = t.model_copy(
+                    update={"last_status": ProbeStatus.AUTH_MISSING, "last_error": f"Key {t.api_key_env} fehlt."}
+                )
+            repo.upsert_tool(to_save)
             added_t.append(t.id)
         known_tools.add(t.id)
 
@@ -270,12 +276,31 @@ def auto_sync_catalog(
     runner: UnifiedLLMRunner | None = None,
     verify_discovered: bool = True,
 ) -> DiscoverySummary:
-    """Erkennt neue Builtins, Gemini-, Groq-, OpenRouter-Free-Modelle und schließt defekte/entfernte IDs aus."""
+    """Erkennt neue Builtins, searx.space, Gemini-, Groq-, OpenRouter-Free-Modelle und schließt defekte IDs aus."""
+    from ki_brain.tools.searxng import build_searxng_tool, discover_verified_searxng_pool
+
     excluded_models, excluded_tools = repo.list_excluded_ids()
-    added_models, added_tools, skipped_excluded = _sync_new_builtins(repo, excluded_models, excluded_tools)
+    added_models, added_tools, skipped_excluded = _sync_new_builtins(repo, secrets, excluded_models, excluded_tools)
     sources = ["builtins"]
     warnings: list[str] = []
     skipped_unhealthy: list[str] = []
+
+    if "searxng_public" not in excluded_tools:
+        sources.append("searx.space")
+        existing_searx = repo.get_tool("searxng_public")
+        if existing_searx is None or existing_searx.last_status != ProbeStatus.OK:
+            try:
+                verified_pool = discover_verified_searxng_pool(max_verify=8, max_keep=3, http_request_fn=safe_http_request)
+                if verified_pool:
+                    searx_spec = build_searxng_tool(verified_pool).model_copy(
+                        update={"last_status": ProbeStatus.OK, "quality_score": 82.0, "reliability_score": 100.0}
+                    )
+                    repo.upsert_tool(searx_spec)
+                    if existing_searx is None:
+                        added_tools.append("searxng_public")
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(f"searx.space Discovery: {exc}")
+
     existing_ids = {m.id for m in repo.list_models()}
     candidates: list[AIModelSpec] = []
     seen_candidates: set[str] = set()
