@@ -70,22 +70,24 @@ def render_ki_view(
             )
             st.metric("Letzter Testlauf", bench_txt)
 
-        btn_bench, btn_sync, btn_clean = st.columns([1.65, 1.2, 1.3], vertical_alignment="center")
-        with btn_bench:
-            run_bench = st.button(
-                "🚀 Testlauf starten & Sequenzen optimieren",
-                disabled=not is_admin,
-                use_container_width=True,
-            )
+        btn_sync, btn_bench, btn_clean = st.columns(3, vertical_alignment="center")
         with btn_sync:
             run_sync = st.button(
-                "🔄 Auto-Sync (Modelle & Tools)",
+                "🔎 Search for New",
                 disabled=not is_admin,
                 use_container_width=True,
+                help="Sucht nach neuen kostenfreien KI-Modellen (Gemini, Groq, OpenRouter) & Standard-Tools, testet Neuzugänge live und überspringt defekte/ausgeschlossene Einträge.",
+            )
+        with btn_bench:
+            run_bench = st.button(
+                "🚀 Testlauf & Optimizing",
+                disabled=not is_admin,
+                use_container_width=True,
+                help="Testet alle aktivierten Modelle & Tools live und optimiert automatisch die Sequenzen für Fast, Standard & Deep.",
             )
         with btn_clean:
             run_clean = st.button(
-                "🧹 Bereinigen (Error & Quota 429)",
+                "🧹 Clear Errors",
                 disabled=not is_admin,
                 use_container_width=True,
                 help="Entfernt Modelle und Tools mit Status Error oder Quota 429 dauerhaft. Blocked-Tools bleiben zur Analyse erhalten.",
@@ -100,17 +102,17 @@ def render_ki_view(
                 st.session_state["ki_brain_feedback"] = {
                     "level": "success",
                     "message": (
-                        f"Testlauf `{report.run_id}` abgeschlossen: {report.healthy_tools_count} Tools & "
+                        f"Testlauf & Optimizing `{report.run_id}` abgeschlossen: {report.healthy_tools_count} Tools & "
                         f"{report.healthy_models_count} Modelle OK. Fast-Top: `{fast_top or '–'}`"
                     ),
                 }
             except BrainError as exc:
-                st.session_state["ki_brain_feedback"] = {"level": "error", "message": f"Testlauf fehlgeschlagen: {exc}"}
+                st.session_state["ki_brain_feedback"] = {"level": "error", "message": f"Testlauf & Optimizing fehlgeschlagen: {exc}"}
             st.rerun()
 
         if run_sync:
             try:
-                with st.spinner("Erkenne funktionierende kostenfreie Modelle & neue Standard-Tools..."):
+                with st.spinner("Suche nach neuen funktionierenden Modellen & Tools (Search for New)..."):
                     summary = brain.auto_sync(verify_discovered=True)
                 skipped_total = len(summary.skipped_excluded) + len(summary.skipped_unhealthy)
                 skip_note = (
@@ -121,12 +123,12 @@ def render_ki_view(
                 st.session_state["ki_brain_feedback"] = {
                     "level": "success" if not summary.warnings else "warning",
                     "message": (
-                        f"Auto-Sync fertig ({', '.join(summary.checked_sources)}): "
+                        f"Search for New fertig ({', '.join(summary.checked_sources)}): "
                         f"+{len(summary.added_models)} Modelle, +{len(summary.added_tools)} Tools{skip_note}."
                     ),
                 }
             except BrainError as exc:
-                st.session_state["ki_brain_feedback"] = {"level": "error", "message": f"Auto-Sync fehlgeschlagen: {exc}"}
+                st.session_state["ki_brain_feedback"] = {"level": "error", "message": f"Search for New fehlgeschlagen: {exc}"}
             st.rerun()
 
         if run_clean:
@@ -134,14 +136,14 @@ def render_ki_view(
                 rem_models, rem_tools = brain.cleanup_unhealthy_items()
                 total_rem = len(rem_models) + len(rem_tools)
                 msg = (
-                    f"Bereinigung abgeschlossen: {len(rem_models)} Modelle ({', '.join(rem_models) or '–'}) & "
+                    f"Clear Errors abgeschlossen: {len(rem_models)} Modelle ({', '.join(rem_models) or '–'}) & "
                     f"{len(rem_tools)} Tools ({', '.join(rem_tools) or '–'}) dauerhaft entfernt (Blocked-Tools erhalten)."
                     if total_rem > 0
                     else "Keine Error- oder Quota-429-Elemente zum Entfernen gefunden (Blocked-Tools bleiben erhalten)."
                 )
                 st.session_state["ki_brain_feedback"] = {"level": "success" if total_rem else "info", "message": msg}
             except BrainError as exc:
-                st.session_state["ki_brain_feedback"] = {"level": "error", "message": f"Bereinigung fehlgeschlagen: {exc}"}
+                st.session_state["ki_brain_feedback"] = {"level": "error", "message": f"Clear Errors fehlgeschlagen: {exc}"}
             st.rerun()
 
         _render_feedback_banner()

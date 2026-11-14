@@ -47,21 +47,28 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
     assert metric_labels == ["KI-Modelle", "Websearch & Tools", "Tier-Profile", "Letzter Testlauf"]
 
     btn_labels = [b.label for b in at.button]
-    assert "🚀 Testlauf starten & Sequenzen optimieren" in btn_labels
-    assert "🔄 Auto-Sync (Modelle & Tools)" in btn_labels
-    assert "🧹 Bereinigen (Error & Quota 429)" in btn_labels
+    assert "🔎 Search for New" in btn_labels
+    assert "🚀 Testlauf & Optimizing" in btn_labels
+    assert "🧹 Clear Errors" in btn_labels
     assert "🔒 Secret sicher speichern / komplett ersetzen" in btn_labels
 
-    for top_lbl in (
-        "🚀 Testlauf starten & Sequenzen optimieren",
-        "🔄 Auto-Sync (Modelle & Tools)",
-        "🧹 Bereinigen (Error & Quota 429)",
-    ):
+    top_order = ["🔎 Search for New", "🚀 Testlauf & Optimizing", "🧹 Clear Errors"]
+    assert [btn_labels.index(lbl) for lbl in top_order] == sorted(btn_labels.index(lbl) for lbl in top_order)
+    for top_lbl in top_order:
         top_btn = next(b for b in at.button if b.label == top_lbl)
         assert top_btn.proto.type == "secondary"
 
-    reset_btn = next(b for b in at.button if "Standardkatalog" in b.label)
+    # Bild 2: Manuelles Modell-/Tool-Formular standardmäßig eingeklappt (expanded=False)
+    model_exp = next(e for e in at.tabs[1].expander if "Neues Modell" in e.label)
+    tool_exp = next(e for e in at.tabs[2].expander if "Neues Tool" in e.label)
+    assert model_exp.proto.expanded is False
+    assert tool_exp.proto.expanded is False
+
+    # Bild 3: Export, Import & Standardkatalog liegt im Live-Test-Tab (tabs[3]), nicht im Tools-Tab (tabs[2])
+    assert not any("Standardkatalog" in b.label for b in at.tabs[2].button)
+    reset_btn = next(b for b in at.tabs[3].button if "Standardkatalog" in b.label)
     assert "Research-Bot & Alert-Bot" in (reset_btn.help or "")
+    assert any("Snapshot importieren" in b.label for b in at.tabs[3].button)
 
     # Read-Only Nutzer sieht deaktivierte Buttons
     def _app_ro() -> None:
@@ -121,7 +128,7 @@ def test_ki_view_benchmark_button_runs_spinner_outside_columns(tmp_path: Path) -
         patch("streamlit.session_state", session_state),
         patch("streamlit.columns", side_effect=lambda spec, **kw: [_TrackedCol() for _ in range(spec if isinstance(spec, int) else len(spec))]),
         patch("streamlit.spinner", return_value=_TrackedSpinner()),
-        patch("streamlit.button", side_effect=lambda label, **kw: "Testlauf starten" in label),
+        patch("streamlit.button", side_effect=lambda label, **kw: "Testlauf & Optimizing" in label),
         patch("streamlit.rerun", side_effect=_RerunCalled),
         pytest.raises(_RerunCalled),
     ):
