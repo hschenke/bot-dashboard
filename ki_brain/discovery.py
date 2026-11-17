@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
@@ -21,6 +23,8 @@ from ki_brain.tools.http_utils import API_HEADERS, safe_http_request
 
 logger = logging.getLogger(__name__)
 
+ProgressCallback = Callable[[float, str], None]
+
 _GEMINI_SKIP_PARTS = (
     "embedding",
     "imagen",
@@ -30,13 +34,43 @@ _GEMINI_SKIP_PARTS = (
     "audio",
     "robotics",
     "gemini-1.",
+    "gemini-2.0",
+    "gemini-pro",
     "-live",
     "image",
     "computer-use",
     "customtools",
     "thinking-exp",
+    "gemini-4-argon",
+    "gemini-4-carbon",
+    "-ultra",
 )
-_GEMINI_INCLUDE_PREFIXES = ("gemini-2.", "gemini-3.", "gemini-4.", "gemma-", "deep-research", "learnlm")
+_GEMINI_TEXT_SERIES_RE = re.compile(
+    r"^(?:gemini-(?:2\.5|3(?:\.[0-9]+)?|4(?:\.[0-9]+)?|5(?:\.[0-9]+)?|[3-9]-)|gemma-(?:3|4)|deep-research|learnlm)",
+    re.IGNORECASE,
+)
+_PREVIEW_MARKERS = ("-preview", "_preview", "preview-", "-exp", "experimental", "-alpha")
+_VERSION_RE = re.compile(r"(?:gemini|gemma)-(\d+)(?:\.(\d+))?")
+_DATED_CLONE_RE = re.compile(r"-(?:00[1-9]|202\d|\d{2}-\d{2,4})$")
+
+
+def is_preview_or_experimental_model(model_id: str, display_name: str = "") -> bool:
+    """Erkennt Preview-/Experimental-Modelle (ausgenommen autonomer Deep Research Agent)."""
+    low = f"{model_id} {display_name}".lower()
+    if "deep-research" in low:
+        return False
+    return any(tok in low for tok in _PREVIEW_MARKERS) or model_id.lower().endswith("-exp")
+
+
+def _rank_gemini_candidate(spec: AIModelSpec) -> tuple[int, int, int, int, int, str]:
+    low = spec.model_id.lower()
+    m = _VERSION_RE.search(low)
+    major = int(m.group(1)) if m else 0
+    minor = int(m.group(2)) if (m and m.group(2)) else (5 if "hydrogen" in low else 0)
+    is_ga = 0 if is_preview_or_experimental_model(spec.model_id, spec.name) else 1
+    is_alias = 0 if _DATED_CLONE_RE.search(low) else 1
+    is_gemini_family = 1 if low.startswith("gemini-") else 0
+    return (is_ga, is_gemini_family, major, minor, is_alias, spec.id)
 
 
 @dataclass(frozen=True)
@@ -49,6 +83,7 @@ class DiscoverySummary:
     warnings: list[str] = field(default_factory=list)
     skipped_excluded: list[str] = field(default_factory=list)
     skipped_unhealthy: list[str] = field(default_factory=list)
+    skipped_previews: list[str] = field(default_factory=list)
 
 
 def _guess_gemini_tier(model_id: str) -> tuple[BrainTier, bool]:
@@ -57,8 +92,8 @@ def _guess_gemini_tier(model_id: str) -> tuple[BrainTier, bool]:
         return BrainTier.DEEP, True
     if "lite" in low:
         return BrainTier.FAST, False
-    if "argon" in low or "pro" in low:
-        return BrainTier.DEEP, False
+    if "hydrogen" in low or "argon" in low or "pro" in low:
+        return BrainTier.STANDARD if "hydrogen" in low else BrainTier.DEEP, False
     return BrainTier.STANDARD, False
 
 
@@ -109,21 +144,25 @@ def _sync_new_builtins(
     return added_m, added_t, skipped
 
 
-def _discover_gemini_models(client: genai.Client) -> list[AIModelSpec]:
+def _discover_gemini_models(client: genai.Client, *, exclude_previews: bool = True) -> tuple[list[AIModelSpec], list[str]]:
     discovered: list[AIModelSpec] = []
+    skipped_previews: list[str] = []
     for raw in client.models.list():
         raw_name = str(getattr(raw, "name", "") or "").strip()
         model_id = raw_name.removeprefix("models/").strip()
         low = model_id.lower()
         if not low or any(skip in low for skip in _GEMINI_SKIP_PARTS):
             continue
-        if not low.startswith(_GEMINI_INCLUDE_PREFIXES):
+        if not _GEMINI_TEXT_SERIES_RE.match(low):
             continue
         actions = [str(a) for a in (getattr(raw, "supported_actions", None) or [])]
         if actions and not any(act in actions for act in ("generateContent", "streamGenerateContent")) and "deep-research" not in low:
             continue
-        tier, is_deep = _guess_gemini_tier(model_id)
         display = str(getattr(raw, "display_name", "") or model_id).strip()[:120]
+        if exclude_previews and is_preview_or_experimental_model(model_id, display):
+            skipped_previews.append(model_id)
+            continue
+        tier, is_deep = _guess_gemini_tier(model_id)
         discovered.append(
             AIModelSpec(
                 id=validate_identifier(model_id, "Modell-ID"),
@@ -141,7 +180,8 @@ def _discover_gemini_models(client: genai.Client) -> list[AIModelSpec]:
                 notes="Automatisch über Gemini API (`models.list`) erkannt.",
             )
         )
-    return discovered[:24]
+    discovered.sort(key=_rank_gemini_candidate, reverse=True)
+    return discovered[:24], skipped_previews
 
 
 def _discover_groq_models(api_key: str) -> list[AIModelSpec]:
@@ -251,17 +291,26 @@ def _sync_remote_manifest(
 def _probe_candidate_models(
     candidates: list[AIModelSpec],
     bench: BrainBenchmarkRunner,
+    on_progress: ProgressCallback | None = None,
 ) -> list[tuple[AIModelSpec, ProbeStatus]]:
     if not candidates:
         return []
     openai_items = [m for m in candidates if m.provider == ModelProvider.OPENAI_COMPATIBLE]
     gemini_items = [m for m in candidates if m.provider != ModelProvider.OPENAI_COMPATIBLE]
     results: list[tuple[AIModelSpec, ProbeStatus]] = []
+    total = len(candidates)
+    done = 0
     if openai_items:
         with ThreadPoolExecutor(max_workers=4) as pool:
             for probed, entry in pool.map(bench.probe_model, openai_items):
+                done += 1
+                if on_progress:
+                    on_progress(0.55 + 0.40 * (done / total), f"Prüfe neues Modell ({done}/{total}): `{probed.id}`...")
                 results.append((probed, entry.status))
     for spec in gemini_items:
+        done += 1
+        if on_progress:
+            on_progress(0.55 + 0.40 * (done / total), f"Prüfe neues Gemini-Modell ({done}/{total}): `{spec.id}`...")
         probed, entry = bench.probe_model(spec)
         results.append((probed, entry.status))
     return results
@@ -275,22 +324,29 @@ def auto_sync_catalog(
     manifest_url: str = "",
     runner: UnifiedLLMRunner | None = None,
     verify_discovered: bool = True,
+    exclude_previews: bool = True,
+    on_progress: ProgressCallback | None = None,
 ) -> DiscoverySummary:
-    """Erkennt neue Builtins, searx.space, Gemini-, Groq-, OpenRouter-Free-Modelle und schließt defekte IDs aus."""
+    """Erkennt neue Builtins, searx.space, Gemini-, Groq-, OpenRouter-Free-Modelle und schließt defekte/Preview-IDs aus."""
     from ki_brain.tools.searxng import build_searxng_tool, discover_verified_searxng_pool
 
+    if on_progress:
+        on_progress(0.08, "Gleiche Standardkatalog-Erweiterungen (Builtins) ab...")
     excluded_models, excluded_tools = repo.list_excluded_ids()
     added_models, added_tools, skipped_excluded = _sync_new_builtins(repo, secrets, excluded_models, excluded_tools)
     sources = ["builtins"]
     warnings: list[str] = []
     skipped_unhealthy: list[str] = []
+    skipped_previews: list[str] = []
 
     if "searxng_public" not in excluded_tools:
         sources.append("searx.space")
         existing_searx = repo.get_tool("searxng_public")
-        if existing_searx is None or existing_searx.last_status != ProbeStatus.OK:
+        if existing_searx is None or (existing_searx.last_status != ProbeStatus.OK and existing_searx.source != "custom"):
+            if on_progress:
+                on_progress(0.20, "Prüfe öffentliche SearXNG-Instanzen (searx.space + Fallback-Pool)...")
             try:
-                verified_pool = discover_verified_searxng_pool(max_verify=8, max_keep=3, http_request_fn=safe_http_request)
+                verified_pool = discover_verified_searxng_pool(max_verify=10, max_keep=4, http_request_fn=safe_http_request)
                 if verified_pool:
                     searx_spec = build_searxng_tool(verified_pool).model_copy(
                         update={"last_status": ProbeStatus.OK, "quality_score": 82.0, "reliability_score": 100.0}
@@ -305,7 +361,7 @@ def auto_sync_catalog(
     candidates: list[AIModelSpec] = []
     seen_candidates: set[str] = set()
 
-    def _collect(items: list[AIModelSpec], limit: int = 8) -> None:
+    def _collect(items: list[AIModelSpec], limit: int = 12) -> None:
         collected_here = 0
         for spec in items:
             if spec.id in existing_ids or spec.id in seen_candidates:
@@ -313,6 +369,9 @@ def auto_sync_catalog(
             seen_candidates.add(spec.id)
             if spec.id in excluded_models:
                 skipped_excluded.append(spec.id)
+                continue
+            if exclude_previews and is_preview_or_experimental_model(spec.model_id, spec.name):
+                skipped_previews.append(spec.id)
                 continue
             candidates.append(spec)
             collected_here += 1
@@ -322,15 +381,23 @@ def auto_sync_catalog(
     gem_key = secrets.resolve_key("GEMINI_API_KEY")
     if genai_client is not None or gem_key:
         sources.append("gemini-models")
+        if on_progress:
+            on_progress(0.32, "Frage aktuelle Gemini-Modelle über `models.list()` ab...")
         try:
             client = genai_client or genai.Client(api_key=gem_key)
-            _collect(_discover_gemini_models(client), limit=8)
+            gem_found, gem_previews = _discover_gemini_models(client, exclude_previews=exclude_previews)
+            for pid in gem_previews:
+                if pid not in existing_ids and pid not in skipped_previews:
+                    skipped_previews.append(pid)
+            _collect(gem_found, limit=12)
         except Exception as exc:
             warnings.append(f"Gemini Auto-Discovery: {exc}")
 
     groq_key = secrets.resolve_key("GROQ_API_KEY")
     if groq_key:
         sources.append("groq-models")
+        if on_progress:
+            on_progress(0.42, "Frage kostenfreie Groq-Modelle ab...")
         try:
             _collect(_discover_groq_models(groq_key), limit=6)
         except Exception as exc:
@@ -339,6 +406,8 @@ def auto_sync_catalog(
     or_key = secrets.resolve_key("OPENROUTER_API_KEY")
     if or_key:
         sources.append("openrouter-free")
+        if on_progress:
+            on_progress(0.50, "Frage OpenRouter `:free`-Modelle ab...")
         try:
             _collect(_discover_openrouter_free_models(or_key), limit=6)
         except Exception as exc:
@@ -358,7 +427,7 @@ def auto_sync_catalog(
     if verify_discovered and candidates:
         probe_runner = runner or UnifiedLLMRunner(secrets, genai_client=genai_client)
         bench = BrainBenchmarkRunner(repo, secrets, probe_runner)
-        for probed, status in _probe_candidate_models(candidates, bench):
+        for probed, status in _probe_candidate_models(candidates, bench, on_progress=on_progress):
             if status in {ProbeStatus.ERROR, ProbeStatus.QUOTA_LIMITED}:
                 skipped_unhealthy.append(probed.id)
                 continue
@@ -373,6 +442,9 @@ def auto_sync_catalog(
             existing_ids.add(spec.id)
             added_models.append(spec.id)
 
+    if on_progress:
+        on_progress(1.0, f"Discovery fertig: +{len(added_models)} Modelle, +{len(added_tools)} Tools.")
+
     return DiscoverySummary(
         added_models=added_models,
         added_tools=added_tools,
@@ -380,4 +452,5 @@ def auto_sync_catalog(
         warnings=warnings,
         skipped_excluded=skipped_excluded,
         skipped_unhealthy=skipped_unhealthy,
+        skipped_previews=skipped_previews,
     )

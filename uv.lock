@@ -87,7 +87,7 @@ wheels = [
 
 [[package]]
 name = "bot-dashboard"
-version = "0.7.1"
+version = "0.9.0"
 source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4" },
@@ -119,7 +119,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "requests", specifier = ">=2.32.3" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
-    { name = "streamlit", specifier = ">=1.52.0" },
+    { name = "streamlit", specifier = ">=1.60.0" },
 ]
 provides-extras = ["dev"]
 

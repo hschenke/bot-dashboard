@@ -17,9 +17,10 @@ div[data-testid="stMetric"] {
     border-radius: 12px;
     padding: 8px 14px;
 }
-div[data-testid="stMetric"] [data-testid="stMetricValue"] {
-    font-size: 1.45rem !important;
-}
+div[data-testid="stMetric"] [data-testid="stMetricValue"] { font-size: 1.45rem !important; }
+.st-key-ki_kpi_row div[data-testid="stMetric"] { padding: 4px 10px !important; border-radius: 8px !important; min-height: 0 !important; }
+.st-key-ki_kpi_row div[data-testid="stMetric"] [data-testid="stMetricLabel"] p { font-size: 0.74rem !important; line-height: 1.15 !important; }
+.st-key-ki_kpi_row div[data-testid="stMetric"] [data-testid="stMetricValue"] { font-size: 1.05rem !important; line-height: 1.2 !important; }
 
 /* Einheitliche Button-, Link- & Selectbox-Höhe für saubere horizontale Linien */
 div[data-testid="stButton"] > button,
@@ -159,10 +160,35 @@ div[data-testid="stElementContainer"]:has(.bot-dash-health-marker)
 
 /* Unsichtbare Marker & Auth-Storage-Bridge ohne Layout-Abstand */
 div[data-testid="stElementContainer"]:has(:is(.bot-dash-health-marker, .bot-dash-auth-bridge)) {
-    display: none !important;
-    margin: 0 !important;
-    padding: 0 !important;
-    height: 0 !important;
+    display: none !important; margin: 0 !important; padding: 0 !important; height: 0 !important;
+}
+div[data-testid="stElementContainer"]:has(:is(.ki-task-backdrop, #ki-brain-instant-backdrop)) {
+    height: 0 !important; margin: 0 !important; padding: 0 !important;
+}
+
+/* KI-View Task-Overlay: blockierter Hintergrund + lesbare Fortschritts-Box im Vordergrund */
+.ki-task-backdrop,
+#ki-brain-instant-backdrop.active {
+    position: fixed; inset: 0; width: 100vw; height: 100vh;
+    background-color: rgba(15, 23, 42, 0.74);
+    backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px);
+    pointer-events: all; cursor: wait;
+}
+.ki-task-backdrop { z-index: 999990; }
+#ki-brain-instant-backdrop { display: none; z-index: 999985; align-items: center; justify-content: center; }
+#ki-brain-instant-backdrop.active { display: flex; }
+body:has(.st-key-ki_task_overlay) #ki-brain-instant-backdrop .ki-instant-card { display: none; }
+.ki-instant-card {
+    width: min(500px, 90vw); background: rgba(15, 23, 42, 0.96); color: #e2e8f0;
+    border: 1px solid rgba(56, 189, 248, 0.45); border-radius: 14px; padding: 1.1rem 1.35rem;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.7);
+}
+.st-key-ki_task_overlay {
+    position: fixed !important; top: 50% !important; left: 50% !important;
+    transform: translate(-50%, -50%) !important; width: min(560px, 92vw) !important; z-index: 1000001 !important;
+    background: rgba(15, 23, 42, 0.96) !important; border: 1px solid rgba(56, 189, 248, 0.45) !important;
+    border-radius: 14px !important; padding: 1.15rem 1.35rem !important;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.7) !important; pointer-events: all !important;
 }
 </style>
 """

@@ -8,8 +8,8 @@ import logging
 from ki_brain.exceptions import BrainProviderError
 from ki_brain.models import BrainCitation, BrainSecrets, ToolSpec
 from ki_brain.security import sanitize_display_url
-from ki_brain.tools.http_utils import API_HEADERS, safe_http_request
-from ki_brain.tools.searxng import parse_searxng_results
+from ki_brain.tools.http_utils import API_HEADERS, BROWSER_HEADERS, safe_http_request
+from ki_brain.tools.searxng import parse_searxng_html_results, parse_searxng_results
 
 logger = logging.getLogger(__name__)
 
@@ -162,17 +162,18 @@ def search_searxng(
     language: str = "de",
     max_results: int = 6,
 ) -> list[BrainCitation]:
-    """Durchsucht einen rotierenden Pool öffentlicher `searx.space`-Instanzen (key-frei)."""
+    """Durchsucht einen rotierenden Pool öffentlicher `searx.space`-Instanzen (JSON & HTML-Fallback)."""
     clean_q = " ".join(query.split())[:200]
     if not clean_q:
         return []
     candidates = [tool.endpoint_url, *(tool.config.get("fallback_endpoints") or [])]
     endpoints = [str(u).strip() for u in dict.fromkeys(candidates) if str(u).strip()]
     lang_code = "en-US" if language.lower() == "en" else "de-DE"
+    html_retry_eps: list[str] = []
 
     for ep in endpoints:
         try:
-            status, _, _, body = safe_http_request(
+            status, _, ctype, body = safe_http_request(
                 "GET",
                 ep,
                 params={"q": clean_q, "format": "json", "language": lang_code},
@@ -181,9 +182,31 @@ def search_searxng(
                 max_bytes=450_000,
             )
             if status == 200 and body:
-                hits = parse_searxng_results(body, source_tool=tool.id, max_results=max_results)
+                if "html" in ctype and not body.lstrip().startswith(b"{"):
+                    hits = parse_searxng_html_results(body, source_tool=tool.id, max_results=max_results)
+                else:
+                    hits = parse_searxng_results(body, source_tool=tool.id, max_results=max_results)
+                if hits:
+                    return hits
+            elif status in {400, 403}:
+                html_retry_eps.append(ep)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("SearXNG JSON Endpoint '%s' fehlgeschlagen: %s", ep, exc)
+
+    for ep in html_retry_eps:
+        try:
+            status, _, _, body = safe_http_request(
+                "GET",
+                ep,
+                params={"q": clean_q, "language": lang_code},
+                headers=BROWSER_HEADERS,
+                timeout_seconds=tool.timeout_seconds,
+                max_bytes=450_000,
+            )
+            if status == 200 and body:
+                hits = parse_searxng_html_results(body, source_tool=tool.id, max_results=max_results)
                 if hits:
                     return hits
         except Exception as exc:  # noqa: BLE001
-            logger.debug("SearXNG Endpoint '%s' fehlgeschlagen: %s", ep, exc)
+            logger.debug("SearXNG HTML Endpoint '%s' fehlgeschlagen: %s", ep, exc)
     return []

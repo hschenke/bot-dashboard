@@ -64,17 +64,20 @@ def test_default_catalog_contains_research_and_alert_bot_models_and_tools(tmp_pa
     for expected in (
         "gemini-3.5-flash-lite",
         "gemini-3.8-flash",
+        "gemini-3.6-flash",
         "gemini-3.1-flash-lite",
-        "gemini-4-argon",
+        "gemini-4-hydrogen",
         "gemini-2.5-flash",
-        "gemini-2.0-flash",
         "deep-research-preview-04-2026",
     ):
         assert expected in model_ids
+    assert "gemini-2.0-flash" not in model_ids
+    assert "gemini-4-argon" not in model_ids
 
     tool_ids = {t.id for t in brain.list_tools()}
     for expected_tool in (
         "yahoo_search",
+        "searxng_public",
         "duckduckgo_html",
         "duckduckgo_lite",
         "duckduckgo_instant",
@@ -176,8 +179,9 @@ def test_auto_sync_discovers_gemini_groq_and_openrouter_models(monkeypatch: pyte
     repo = create_brain_repository(sqlite_path=":memory:")
     mock_client = MagicMock()
     mock_client.models.list.return_value = [
-        SimpleNamespace(name="models/gemini-3.9-flash-preview", display_name="Gemini 3.9 Flash", supported_actions=["generateContent"]),
-        SimpleNamespace(name="models/gemini-3.9-dead-preview", display_name="Gemini Dead", supported_actions=["generateContent"]),
+        SimpleNamespace(name="models/gemini-3.9-flash", display_name="Gemini 3.9 Flash", supported_actions=["generateContent"]),
+        SimpleNamespace(name="models/gemini-3.9-dead", display_name="Gemini Dead", supported_actions=["generateContent"]),
+        SimpleNamespace(name="models/gemini-3.1-flash-lite-preview", display_name="Gemini 3.1 Flash Lite Preview", supported_actions=["generateContent"]),
         SimpleNamespace(name="models/text-embedding-004", display_name="Embed", supported_actions=["embedContent"]),
     ]
     probed_gemini_calls: list[str] = []
@@ -185,7 +189,7 @@ def test_auto_sync_discovers_gemini_groq_and_openrouter_models(monkeypatch: pyte
     def _fake_gemini_create(**kwargs: object) -> MagicMock:
         mid = str(kwargs.get("model") or "")
         probed_gemini_calls.append(mid)
-        if mid == "gemini-3.9-dead-preview":
+        if mid == "gemini-3.9-dead":
             raise RuntimeError("404 NOT_FOUND model unavailable")
         resp = MagicMock()
         resp.output_text = "OK"
@@ -221,28 +225,37 @@ def test_auto_sync_discovers_gemini_groq_and_openrouter_models(monkeypatch: pyte
     monkeypatch.setattr("ki_brain.llm_runner.safe_http_request", _fake_http)
 
     summary = brain.auto_sync()
-    assert "gemini-3.9-flash-preview" in summary.added_models
+    assert "gemini-3.9-flash" in summary.added_models
     assert "groq/llama-3.1-8b-instant" in summary.added_models
     assert "or/qwen/qwen-2.5-free" in summary.added_models
-    assert "gemini-3.9-dead-preview" in summary.skipped_unhealthy
+    assert "gemini-3.9-dead" in summary.skipped_unhealthy
     assert "or/broken/dead-free" in summary.skipped_unhealthy
-    assert brain.get_model("gemini-3.9-flash-preview") is not None
-    assert brain.get_model("gemini-3.9-flash-preview").last_status == ProbeStatus.OK  # type: ignore[union-attr]
-    assert brain.get_model("gemini-3.9-dead-preview") is None
+    assert "gemini-3.1-flash-lite-preview" in summary.skipped_previews
+    assert brain.get_model("gemini-3.9-flash") is not None
+    assert brain.get_model("gemini-3.9-flash").last_status == ProbeStatus.OK  # type: ignore[union-attr]
+    assert brain.get_model("gemini-3.9-dead") is None
+    assert brain.get_model("gemini-3.1-flash-lite-preview") is None
     assert brain.get_model("or/broken/dead-free") is None
     assert brain.get_model("text-embedding-004") is None
 
     # Manuell gelöschte + defekt verworfene Modelle kommen beim nächsten Auto-Sync NICHT zurück
-    assert brain.remove_model("gemini-3.9-flash-preview") is True
+    assert brain.remove_model("gemini-3.9-flash") is True
     probed_gemini_calls.clear()
     summary_again = brain.auto_sync()
-    assert brain.get_model("gemini-3.9-flash-preview") is None
-    assert brain.get_model("gemini-3.9-dead-preview") is None
+    assert brain.get_model("gemini-3.9-flash") is None
+    assert brain.get_model("gemini-3.9-dead") is None
     assert brain.get_model("or/broken/dead-free") is None
-    assert "gemini-3.9-flash-preview" in summary_again.skipped_excluded
-    assert "gemini-3.9-dead-preview" in summary_again.skipped_excluded
+    assert "gemini-3.9-flash" in summary_again.skipped_excluded
+    assert "gemini-3.9-dead" in summary_again.skipped_excluded
     assert "or/broken/dead-free" in summary_again.skipped_excluded
     assert probed_gemini_calls == []
+
+    # Wenn exclude_previews=False, kann Preview aufgenommen und anschließend gezielt bereinigt werden
+    summary_prev = brain.auto_sync(exclude_previews=False)
+    assert "gemini-3.1-flash-lite-preview" in summary_prev.added_models
+    purged = brain.remove_preview_models()
+    assert purged == ["gemini-3.1-flash-lite-preview"]
+    assert brain.get_model("deep-research-preview-04-2026") is not None
     brain.close()
 
 
@@ -382,7 +395,7 @@ def test_cleanup_unhealthy_items_and_write_only_secrets_vault(
     brain = KIWebsearchBrain(repo, BrainSecrets())
 
     # 1. Modelle & Tools auf Error / Quota 429 / Blocked / Missing Key setzen und bereinigen
-    m_err = brain.get_model("gemini-2.0-flash")
+    m_err = brain.get_model("gemini-3.6-flash")
     t_q429 = brain.get_tool("gemini_google_search")
     t_blocked = brain.get_tool("duckduckgo_html")
     t_missing = brain.get_tool("browserbase_fetch")
@@ -417,9 +430,9 @@ def test_cleanup_unhealthy_items_and_write_only_secrets_vault(
     )
 
     rem_models, rem_tools = brain.cleanup_unhealthy_items()
-    assert rem_models == ["gemini-2.0-flash"]
+    assert rem_models == ["gemini-3.6-flash"]
     assert rem_tools == ["gemini_google_search"]
-    assert brain.get_model("gemini-2.0-flash") is None
+    assert brain.get_model("gemini-3.6-flash") is None
     assert brain.get_tool("gemini_google_search") is None
     # Blocked-Tools und Missing-Key-Einträge MÜSSEN zur Analyse/Key-Eintragung erhalten bleiben!
     kept_blocked = brain.get_tool("duckduckgo_html")
@@ -428,9 +441,9 @@ def test_cleanup_unhealthy_items_and_write_only_secrets_vault(
 
     # Nach Cleanup darf auto_sync bereinigte Items nicht wieder aufnehmen
     sync_after_clean = brain.auto_sync()
-    assert brain.get_model("gemini-2.0-flash") is None
+    assert brain.get_model("gemini-3.6-flash") is None
     assert brain.get_tool("gemini_google_search") is None
-    assert "gemini-2.0-flash" in sync_after_clean.skipped_excluded
+    assert "gemini-3.6-flash" in sync_after_clean.skipped_excluded
     assert "gemini_google_search" in sync_after_clean.skipped_excluded
 
     # 2. Write-Only Secret eintragen + sofortigen Direkt-Test ausführen
@@ -760,5 +773,108 @@ def test_resolve_blocked_tools_applies_rules_and_unblocks(monkeypatch: pytest.Mo
     assert saved_searx is not None and saved_searx.last_status == ProbeStatus.OK
     assert "searxng_public" in brain.get_sequence(BrainTier.FAST).search_tool_sequence
     brain.close()
+
+
+def test_llm_runner_transient_503_retry_and_status_specific_cleanup() -> None:
+    from ki_brain.exceptions import BrainProviderError
+    from ki_brain.llm_runner import UnifiedLLMRunner
+
+    mock_client = MagicMock()
+    calls = {"count": 0}
+
+    def _flaky_create(**_kwargs: object) -> MagicMock:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("503 UNAVAILABLE temporary model capacity spike")
+        resp = MagicMock()
+        resp.status = "completed"
+        resp.output_text = "Stabil"
+        resp.steps = []
+        return resp
+
+    mock_client.interactions.create.side_effect = _flaky_create
+    runner = UnifiedLLMRunner(BrainSecrets(gemini_api_key="AIzaSyTest123"), genai_client=mock_client)
+    spec = AIModelSpec(
+        id="gemini-3.5-flash-lite",
+        name="Gemini 3.5 Flash-Lite",
+        provider=ModelProvider.GOOGLE_GEMINI,
+        model_id="gemini-3.5-flash-lite",
+    )
+    txt, _ = runner.run_text(spec, "Ping")
+    assert txt == "Stabil"
+    assert calls["count"] == 2
+
+    mock_client.interactions.create.side_effect = RuntimeError("404 NOT_FOUND unavailable")
+    with pytest.raises(RuntimeError):
+        runner.run_text(spec, "Ping")
+    assert mock_client.interactions.create.call_count == 3  # Kein Retry bei 404
+
+    mock_client.interactions.create.side_effect = lambda **_kw: SimpleNamespace(status="failed", errors="internal error", output_text="", steps=[])
+    with pytest.raises(BrainProviderError):
+        runner.run_text(spec, "Ping")
+
+
+def test_searxng_html_fallback_open_meteo_and_legacy_db_upgrade(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from ki_brain.db_executors import SqliteBrainExecutor
+    from ki_brain.storage import BrainRepository
+    from ki_brain.tools.extractors import query_open_meteo
+    from ki_brain.tools.searxng import build_searxng_tool, discover_verified_searxng_pool
+
+    # 1. SearXNG nutzt HTML-Fallback, wenn searx.space blockiert und Instanzen 403 für JSON liefern
+    def _html_only_http(_m: str, url: str, params: dict[str, object] | None = None, **_kw: object) -> tuple[int, str, str, bytes]:
+        if "searx.space" in url:
+            return 403, url, "text/plain", b"Forbidden"
+        if (params or {}).get("format") == "json":
+            return 403, url, "text/plain", b"JSON disabled"
+        return (
+            200,
+            url,
+            "text/html",
+            b'<article class="result"><h3><a href="https://python.org/">Python.org</a></h3><p class="content">Offizielle Seite</p></article>',
+        )
+
+    pool = discover_verified_searxng_pool(max_verify=3, max_keep=2, http_request_fn=_html_only_http)
+    assert len(pool) == 2
+
+    monkeypatch.setattr("ki_brain.tools.search_apis.safe_http_request", _html_only_http)
+    searx_tool = build_searxng_tool(pool)
+    hits = execute_search_tool(searx_tool, "Python")
+    assert len(hits) == 1 and hits[0].url == "https://python.org/"
+
+    # 2. Open-Meteo fällt bei blockierter Geocoding-API auf eingebaute Stadtkoordinaten zurück
+    def _meteo_http(_m: str, url: str, **_kw: object) -> tuple[int, str, str, bytes]:
+        if "geocoding-api.open-meteo.com" in url:
+            return 429, url, "text/plain", b"Rate limit"
+        return 200, url, "application/json", b'{"current": {"temperature_2m": 16.4, "wind_speed_10m": 12.0, "precipitation": 0.0}}'
+
+    monkeypatch.setattr("ki_brain.tools.extractors.safe_http_request", _meteo_http)
+    weather_hits = query_open_meteo("Berlin")
+    assert len(weather_hits) == 1 and "16.4" in weather_hits[0].snippet
+
+    # 3. Bestehende Alt-DB (seeded_v1='1' ohne seeded_catalog_rev) erhält searxng_public automatisch ohne Excluded-IDs zu reaktivieren
+    legacy_db = tmp_path / "legacy_v1.db"
+    ex = SqliteBrainExecutor(legacy_db)
+    ex.execute_batch(
+        [
+            ("CREATE TABLE brain_models (id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, updated_at TEXT NOT NULL)", ()),
+            ("CREATE TABLE brain_tools (id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, updated_at TEXT NOT NULL)", ()),
+            ("CREATE TABLE brain_sequences (tier TEXT PRIMARY KEY, payload_json TEXT NOT NULL, updated_at TEXT NOT NULL)", ()),
+            ("CREATE TABLE brain_benchmark_runs (run_id TEXT PRIMARY KEY, started_at TEXT NOT NULL, payload_json TEXT NOT NULL)", ()),
+            ("CREATE TABLE brain_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)", ()),
+            ("CREATE TABLE brain_secrets (env_name TEXT PRIMARY KEY, encrypted_value TEXT NOT NULL, updated_at TEXT NOT NULL)", ()),
+            ("INSERT INTO brain_meta (key, value) VALUES ('seeded_v1', '1')", ()),
+            ("INSERT INTO brain_meta (key, value) VALUES ('known_builtin_ids', '{\"models\": [\"gemini-3.5-flash-lite\"], \"tools\": [\"yahoo_search\"]}')", ()),
+            ("INSERT INTO brain_meta (key, value) VALUES ('excluded_ids', '{\"models\": [\"gemini-3.6-flash\"], \"tools\": []}')", ()),
+        ]
+    )
+    migrated = BrainRepository(ex)
+    migrated_tools = {t.id for t in migrated.list_tools()}
+    migrated_models = {m.id for m in migrated.list_models()}
+    assert "searxng_public" in migrated_tools
+    assert "gemini-4-hydrogen" in migrated_models
+    assert "gemini-3.6-flash" not in migrated_models
+    assert migrated.get_meta("seeded_catalog_rev") == "2"
+    migrated.close()
+
 
 

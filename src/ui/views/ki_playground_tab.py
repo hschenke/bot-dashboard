@@ -2,21 +2,49 @@
 
 from __future__ import annotations
 
+import datetime
+
 import streamlit as st
-from ki_brain import BrainError, BrainTier, KIWebsearchBrain
+import yaml
+from ki_brain import (
+    BrainConfigSnapshot,
+    BrainDashboardState,
+    BrainError,
+    BrainTier,
+    KIWebsearchBrain,
+)
 
 
 def _set_feedback(level: str, message: str) -> None:
     st.session_state["ki_brain_feedback"] = {"level": level, "message": message}
 
 
-def _render_snapshot_controls(brain: KIWebsearchBrain, is_admin: bool) -> None:
+def _snapshot_from_state(brain: KIWebsearchBrain, ui_state: BrainDashboardState | None) -> BrainConfigSnapshot:
+    if ui_state is None:
+        return brain.export_snapshot()
+    return BrainConfigSnapshot(
+        models=ui_state.models,
+        tools=ui_state.tools,
+        sequences={t.value: cfg for t, cfg in ui_state.sequences.items()},
+        last_benchmark=ui_state.latest_benchmark,
+        exported_at=datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
+    )
+
+
+def _render_snapshot_controls(
+    brain: KIWebsearchBrain,
+    is_admin: bool,
+    ui_state: BrainDashboardState | None = None,
+) -> None:
     st.subheader("📦 Export, Import & Standardkatalog")
+    snapshot = _snapshot_from_state(brain, ui_state)
+    snap_json = snapshot.model_dump_json(indent=2)
+    snap_yaml = yaml.safe_dump(snapshot.model_dump(mode="json"), allow_unicode=True, sort_keys=False, default_flow_style=False)
     c1, c2 = st.columns(2, vertical_alignment="bottom")
     with c1:
         st.download_button(
             "⬇️ Brain-Snapshot (JSON)",
-            data=brain.export_snapshot_json(),
+            data=snap_json,
             file_name="ki_brain_snapshot.json",
             mime="application/json",
             use_container_width=True,
@@ -24,7 +52,7 @@ def _render_snapshot_controls(brain: KIWebsearchBrain, is_admin: bool) -> None:
     with c2:
         st.download_button(
             "⬇️ Brain-Snapshot (YAML)",
-            data=brain.export_snapshot_yaml(),
+            data=snap_yaml,
             file_name="ki_brain_snapshot.yaml",
             mime="text/yaml",
             use_container_width=True,
@@ -50,7 +78,12 @@ def _render_snapshot_controls(brain: KIWebsearchBrain, is_admin: bool) -> None:
         st.rerun()
 
 
-def render_playground_tab(brain: KIWebsearchBrain, is_admin: bool) -> None:
+def render_playground_tab(
+    brain: KIWebsearchBrain,
+    is_admin: bool,
+    *,
+    ui_state: BrainDashboardState | None = None,
+) -> None:
     """Ermöglicht Live-Queries in Fast/Standard/Deep, Bots-Einbindung & Export/Import/Reset."""
     st.subheader("🧪 Brain Live-Test (Search & Ask)")
     with st.form("ki_brain_playground_form"):
@@ -125,4 +158,4 @@ def render_playground_tab(brain: KIWebsearchBrain, is_admin: bool) -> None:
     )
 
     st.divider()
-    _render_snapshot_controls(brain, is_admin)
+    _render_snapshot_controls(brain, is_admin, ui_state=ui_state)

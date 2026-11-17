@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -87,8 +88,11 @@ def resolve_blocked_tools(
     *,
     test_query: str = DEFAULT_TEST_QUERY,
     test_url: str = DEFAULT_TEST_URL,
+    on_progress: Callable[[float, str], None] | None = None,
 ) -> UnblockSummary:
     """Wendet Regeln auf `Blocked`-Tools an, aktiviert `searx.space`-Pool und testet live nach."""
+    if on_progress:
+        on_progress(0.08, "Analysiere Blocked-Tools und wende Remediation-Rules an...")
     all_tools = repo.list_tools(enabled_only=True)
     blocked = [t for t in all_tools if t.last_status == ProbeStatus.BLOCKED]
     _, excluded_tools = repo.list_excluded_ids()
@@ -109,13 +113,16 @@ def resolve_blocked_tools(
     searx_existing = repo.get_tool("searxng_public")
     need_searxng = (
         "searxng_public" not in excluded_tools
+        and (searx_existing is None or searx_existing.source != "custom")
         and (
             (searx_existing is not None and searx_existing.last_status in {ProbeStatus.BLOCKED, ProbeStatus.ERROR})
             or (has_blocked_websearch and (searx_existing is None or searx_existing.last_status != ProbeStatus.OK))
         )
     )
     if need_searxng:
-        verified_pool = discover_verified_searxng_pool(max_verify=8, max_keep=3)
+        if on_progress:
+            on_progress(0.28, "Suche und prüfe erreichbare SearXNG-Instanzen (searx.space + Fallback-Pool)...")
+        verified_pool = discover_verified_searxng_pool(max_verify=10, max_keep=4)
         if verified_pool:
             searx_tool = build_searxng_tool(verified_pool)
             repo.upsert_tool(searx_tool)
@@ -126,8 +133,14 @@ def resolve_blocked_tools(
     updated_entries = []
     unblocked_ids: list[str] = []
     still_blocked: dict[str, str] = {}
+    targets = list(reprobe_map.values())
 
-    for tool in reprobe_map.values():
+    for idx, tool in enumerate(targets, start=1):
+        if on_progress:
+            on_progress(
+                0.38 + 0.50 * (idx / max(1, len(targets))),
+                f"Teste Tool live nach ({idx}/{len(targets)}): `{tool.id}`...",
+            )
         ut, entry = bench.probe_tool(tool, test_query, test_url, None)
         if ut.last_status == ProbeStatus.BLOCKED:
             yahoo_alt = _try_yahoo_alternate_endpoint(bench, ut, test_query, test_url)
@@ -141,6 +154,8 @@ def resolve_blocked_tools(
         elif ut.last_status == ProbeStatus.BLOCKED:
             still_blocked[ut.id] = ut.last_error or "Blocked (0 Treffer)"
 
+    if on_progress:
+        on_progress(0.92, "Aktualisiere Fast-, Standard- und Deep-Sequenzen...")
     updated_seqs = repo.list_sequences()
     if unblocked_ids or activated_alts:
         seqs = optimize_tier_sequences(repo.list_models(), repo.list_tools(), updated_seqs, force_overwrite=False)
@@ -162,6 +177,9 @@ def resolve_blocked_tools(
                 }
             )
         )
+
+    if on_progress:
+        on_progress(1.0, "Blocked lösen abgeschlossen.")
 
     return UnblockSummary(
         checked_blocked=checked_ids,

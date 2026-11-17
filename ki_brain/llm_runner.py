@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from collections.abc import Callable
@@ -21,6 +22,35 @@ from ki_brain.tools.http_utils import API_HEADERS, safe_http_request
 ModelT = TypeVar("ModelT", bound=BaseModel)
 _JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
 _QUOTA_MARKERS = ("429", "quota", "resource_exhausted", "too_many_requests", "ratelimit")
+_PERMANENT_ERROR_MARKERS = (
+    "400",
+    "401",
+    "403",
+    "404",
+    "invalid_argument",
+    "permission_denied",
+    "not_found",
+    "api_key",
+    "unauthenticated",
+    "billing",
+)
+_TRANSIENT_ERROR_MARKERS = (
+    "500",
+    "502",
+    "503",
+    "504",
+    "unavailable",
+    "overloaded",
+    "internal",
+    "timeout",
+    "timed out",
+    "connection",
+    "temporarily",
+    "eof",
+    "reset by peer",
+    "leere antwort",
+    "leere json-antwort",
+)
 _OPENAI_BASE_PRESETS = {
     "GROQ_API_KEY": "https://api.groq.com/openai/v1",
     "OPENROUTER_API_KEY": "https://openrouter.ai/api/v1",
@@ -33,6 +63,25 @@ def is_quota_error(exc: Exception) -> bool:
     """Erkennt 429- oder Free-Tier-Kontingentfehler."""
     msg = str(exc).lower()
     return any(tok in msg for tok in _QUOTA_MARKERS)
+
+
+def is_transient_llm_error(exc: Exception) -> bool:
+    """Erkennt vorübergehende 5xx-/503-/Netzwerk-Spikes (ohne 429/400/404 zu wiederholen)."""
+    if is_quota_error(exc):
+        return False
+    msg = str(exc).lower()
+    if any(tok in msg for tok in _PERMANENT_ERROR_MARKERS):
+        return False
+    return any(tok in msg for tok in _TRANSIENT_ERROR_MARKERS)
+
+
+def _describe_failed_interaction(interaction: Any) -> str:
+    status = getattr(interaction, "status", None)
+    errors = getattr(interaction, "errors", None)
+    if isinstance(status, str) and status.lower() in {"failed", "cancelled", "incomplete"}:
+        err_txt = str(errors)[:160] if isinstance(errors, (list, tuple, str)) and errors else ""
+        return f"Interaction-Status '{status}'" + (f": {err_txt}" if err_txt else "")
+    return ""
 
 
 def strip_json_fences(raw_text: str) -> str:
@@ -97,18 +146,46 @@ class UnifiedLLMRunner:
         self._genai_client = genai_client
         self._rate_limiter = rate_limiter or get_global_rate_limiter()
 
-    def _get_genai_client(self, timeout_seconds: float = 40.0) -> genai.Client:
+    def _get_genai_client(self, timeout_seconds: float = 60.0) -> genai.Client:
         if self._genai_client is not None:
             return self._genai_client
         key = self._secrets.resolve_key("GEMINI_API_KEY")
         if not key:
             raise BrainProviderError("Kein gültiger GEMINI_API_KEY konfiguriert.")
-        http_opts = {"timeout": int(timeout_seconds * 1000), "retry_options": {"attempts": 1}}
+        http_opts = {"timeout": max(60_000, int(timeout_seconds * 1000)), "retry_options": {"attempts": 2}}
         try:
             self._genai_client = genai.Client(api_key=key, http_options=http_opts)
         except TypeError:
             self._genai_client = genai.Client(api_key=key)
         return self._genai_client
+
+    def _run_with_transient_retry(
+        self,
+        fn: Callable[[], Any],
+        *,
+        cancel_check: Callable[[], None] | None = None,
+        max_attempts: int = 3,
+    ) -> Any:
+        in_pytest = "PYTEST_CURRENT_TEST" in os.environ
+        last_exc: Exception | None = None
+        for attempt in range(max_attempts):
+            if attempt > 0:
+                delay = 0.0 if in_pytest else min(2.4, 0.8 * attempt)
+                if delay > 0:
+                    time.sleep(delay)
+                self._rate_limiter.acquire(cancel_check)
+            try:
+                return fn()
+            except Exception as exc:
+                last_exc = exc
+                if is_quota_error(exc):
+                    self._rate_limiter.notify_rate_limit(5.0)
+                    raise
+                if not is_transient_llm_error(exc) or attempt + 1 >= max_attempts:
+                    raise
+        if last_exc is not None:
+            raise last_exc
+        raise BrainProviderError("Unbekannter LLM-Fehler.")
 
     def run_text(
         self,
@@ -138,11 +215,18 @@ class UnifiedLLMRunner:
             kwargs["system_instruction"] = system_instruction
         if tools:
             kwargs["tools"] = tools
-        interaction = client.interactions.create(**kwargs)
-        text = extract_interaction_text(interaction)
-        if not text:
-            raise BrainProviderError(f"Leere Antwort von Modell '{model.model_id}'.")
-        return text, extract_citations_from_interaction(interaction)
+
+        def _invoke() -> tuple[str, list[BrainCitation]]:
+            interaction = client.interactions.create(**kwargs)
+            fail_reason = _describe_failed_interaction(interaction)
+            if fail_reason:
+                raise BrainProviderError(f"Modell '{model.model_id}': {fail_reason}")
+            text = extract_interaction_text(interaction)
+            if not text:
+                raise BrainProviderError(f"Leere Antwort von Modell '{model.model_id}'.")
+            return text, extract_citations_from_interaction(interaction)
+
+        return self._run_with_transient_retry(_invoke, cancel_check=cancel_check)
 
     def run_structured(
         self,
@@ -162,21 +246,28 @@ class UnifiedLLMRunner:
         self._rate_limiter.acquire()
 
         client = self._get_genai_client(timeout_seconds=timeout_seconds)
-        interaction = client.interactions.create(
-            model=model.model_id,
-            input=prompt,
-            system_instruction=system_instruction or "Liefere präzises JSON entsprechend dem Schema.",
-            response_format={
-                "type": "text",
-                "mime_type": "application/json",
-                "schema": schema_cls.model_json_schema(),
-            },
-            timeout=timeout_seconds,
-        )
-        raw_json = strip_json_fences(extract_interaction_text(interaction))
-        if not raw_json:
-            raise BrainProviderError(f"Leere JSON-Antwort von '{model.model_id}'.")
-        return schema_cls.model_validate_json(raw_json)
+
+        def _invoke() -> ModelT:
+            interaction = client.interactions.create(
+                model=model.model_id,
+                input=prompt,
+                system_instruction=system_instruction or "Liefere präzises JSON entsprechend dem Schema.",
+                response_format={
+                    "type": "text",
+                    "mime_type": "application/json",
+                    "schema": schema_cls.model_json_schema(),
+                },
+                timeout=timeout_seconds,
+            )
+            fail_reason = _describe_failed_interaction(interaction)
+            if fail_reason:
+                raise BrainProviderError(f"Modell '{model.model_id}': {fail_reason}")
+            raw_json = strip_json_fences(extract_interaction_text(interaction))
+            if not raw_json:
+                raise BrainProviderError(f"Leere JSON-Antwort von '{model.model_id}'.")
+            return schema_cls.model_validate_json(raw_json)
+
+        return self._run_with_transient_retry(_invoke)
 
     def _call_gemini_deep_agent(
         self,

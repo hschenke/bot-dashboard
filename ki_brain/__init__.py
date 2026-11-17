@@ -1,7 +1,7 @@
 """KI & Websearch Brain – Zentrales Framework für kostenfreie Modelle, Web-Tools & Tier-Sequenzen."""
 
 from ki_brain.brain import KIWebsearchBrain
-from ki_brain.discovery import DiscoverySummary
+from ki_brain.discovery import DiscoverySummary, is_preview_or_experimental_model
 from ki_brain.enums import BrainTier, ModelProvider, ProbeStatus, ToolCategory
 from ki_brain.exceptions import (
     BrainError,
@@ -24,7 +24,7 @@ from ki_brain.models import (
     TierSequenceConfig,
     ToolSpec,
 )
-from ki_brain.storage import BrainRepository, create_brain_repository
+from ki_brain.storage import BrainDashboardState, BrainRepository, create_brain_repository
 from ki_brain.unblock import UnblockSummary
 
 __all__ = [
@@ -33,6 +33,7 @@ __all__ = [
     "BenchmarkReport",
     "BrainCitation",
     "BrainConfigSnapshot",
+    "BrainDashboardState",
     "BrainError",
     "BrainFetchedPage",
     "BrainGenerationResult",
@@ -54,4 +55,5 @@ __all__ = [
     "ToolSpec",
     "UnblockSummary",
     "create_brain_repository",
+    "is_preview_or_experimental_model",
 ]

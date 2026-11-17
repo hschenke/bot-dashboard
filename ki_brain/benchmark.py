@@ -5,7 +5,8 @@ from __future__ import annotations
 import datetime
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ki_brain.enums import ProbeStatus, ToolCategory
 from ki_brain.llm_runner import UnifiedLLMRunner, is_quota_error
@@ -208,19 +209,25 @@ class BrainBenchmarkRunner:
         test_query: str = DEFAULT_TEST_QUERY,
         test_url: str = DEFAULT_TEST_URL,
         force_overwrite_sequences: bool = False,
+        on_progress: Callable[[float, str], None] | None = None,
     ) -> BenchmarkReport:
-        """Testet alle aktivierten Tools & Modelle und optimiert Fast, Standard & Deep."""
+        """Testet alle aktivierten Tools & Modelle live und optimiert Fast, Standard & Deep."""
         started = _utc_now_iso()
         models = self._repo.list_models(enabled_only=True)
         tools = self._repo.list_tools(enabled_only=True)
+        total_steps = max(1, len(models) + len(tools) + 1)
+        done = 0
 
         entries: list[BenchmarkEntry] = []
         updated_models: list[AIModelSpec] = []
         for model in models:
+            if on_progress:
+                on_progress(min(0.95, max(0.03, done / total_steps)), f"Teste KI-Modell ({done + 1}/{len(models)}): `{model.id}`...")
             um, entry = self.probe_model(model)
             self._repo.upsert_model(um)
             updated_models.append(um)
             entries.append(entry)
+            done += 1
 
         grounding_model = next(
             (m for m in updated_models if not m.is_deep_agent and m.provider.value == "google_gemini" and m.last_status == ProbeStatus.OK),
@@ -228,14 +235,21 @@ class BrainBenchmarkRunner:
         )
 
         updated_tools: list[ToolSpec] = []
+        if on_progress and tools:
+            on_progress(min(0.95, done / total_steps), f"Teste {len(tools)} Websearch- & Extraktions-Tools parallel...")
         with ThreadPoolExecutor(max_workers=6) as pool:
             futs = [pool.submit(self.probe_tool, tool, test_query, test_url, grounding_model) for tool in tools]
-            for fut in futs:
+            for fut in as_completed(futs):
                 ut, entry = fut.result()
                 self._repo.upsert_tool(ut)
                 updated_tools.append(ut)
                 entries.append(entry)
+                done += 1
+                if on_progress:
+                    on_progress(min(0.94, done / total_steps), f"Tool geprüft ({done}/{len(models) + len(tools)}): `{ut.id}` → {ut.last_status.value}")
 
+        if on_progress:
+            on_progress(0.96, "Optimiere Sequenzen für Fast, Standard & Deep...")
         all_models = self._repo.list_models()
         all_tools = self._repo.list_tools()
         sequences = optimize_tier_sequences(
@@ -255,4 +269,6 @@ class BrainBenchmarkRunner:
             healthy_models_count=sum(1 for m in updated_models if m.last_status == ProbeStatus.OK),
         )
         self._repo.save_benchmark_run(report)
+        if on_progress:
+            on_progress(1.0, f"Testlauf `{report.run_id}` fertig.")
         return report

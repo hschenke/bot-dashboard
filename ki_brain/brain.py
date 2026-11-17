@@ -194,20 +194,30 @@ class KIWebsearchBrain:
     def reset_defaults(self) -> None:
         self._repo.reset_to_defaults()
 
-    def cleanup_unhealthy_items(
+    def cleanup_unhealthy_items_with_status(
         self,
         statuses: tuple[ProbeStatus, ...] = (
             ProbeStatus.ERROR,
             ProbeStatus.QUOTA_LIMITED,
         ),
-    ) -> tuple[list[str], list[str]]:
-        """Entfernt Modelle & Tools mit `Error` oder `Quota 429` dauerhaft; `Blocked` bleibt zur Analyse erhalten."""
+    ) -> tuple[list[tuple[str, ProbeStatus]], list[tuple[str, ProbeStatus]]]:
+        """Entfernt Modelle & Tools mit `Error` oder `Quota 429` dauerhaft inkl. Status-Protokoll; `Blocked` bleibt erhalten."""
         bad = set(statuses)
-        removed_models = [m.id for m in self._repo.list_models() if m.last_status in bad and self._repo.delete_model(m.id)]
-        removed_tools = [t.id for t in self._repo.list_tools() if t.last_status in bad and self._repo.delete_tool(t.id)]
+        removed_models = [
+            (m.id, m.last_status)
+            for m in self._repo.list_models()
+            if m.last_status in bad and self._repo.delete_model(m.id)
+        ]
+        removed_tools = [
+            (t.id, t.last_status)
+            for t in self._repo.list_tools()
+            if t.last_status in bad and self._repo.delete_tool(t.id)
+        ]
         if removed_models or removed_tools:
-            self._repo.add_excluded_ids(model_ids=removed_models, tool_ids=removed_tools)
-            self._prune_ids_from_sequences(model_ids=set(removed_models), tool_ids=set(removed_tools))
+            rem_m_ids = [mid for mid, _ in removed_models]
+            rem_t_ids = [tid for tid, _ in removed_tools]
+            self._repo.add_excluded_ids(model_ids=rem_m_ids, tool_ids=rem_t_ids)
+            self._prune_ids_from_sequences(model_ids=set(rem_m_ids), tool_ids=set(rem_t_ids))
             seqs = optimize_tier_sequences(
                 self._repo.list_models(),
                 self._repo.list_tools(),
@@ -218,11 +228,44 @@ class KIWebsearchBrain:
                 self._repo.upsert_sequence(seq)
         return removed_models, removed_tools
 
+    def cleanup_unhealthy_items(
+        self,
+        statuses: tuple[ProbeStatus, ...] = (
+            ProbeStatus.ERROR,
+            ProbeStatus.QUOTA_LIMITED,
+        ),
+    ) -> tuple[list[str], list[str]]:
+        """Entfernt Modelle & Tools mit `Error` oder `Quota 429` dauerhaft; `Blocked` bleibt zur Analyse erhalten."""
+        rem_m, rem_t = self.cleanup_unhealthy_items_with_status(statuses=statuses)
+        return [mid for mid, _ in rem_m], [tid for tid, _ in rem_t]
+
+    def remove_preview_models(self) -> list[str]:
+        """Entfernt veraltete Preview-/Experimental-Modelle (außer Deep Research) dauerhaft aus Katalog & Sequenzen."""
+        from ki_brain.discovery import is_preview_or_experimental_model
+
+        removed: list[str] = []
+        for m in self._repo.list_models():
+            if not m.is_deep_agent and is_preview_or_experimental_model(m.model_id, m.name) and self._repo.delete_model(m.id):
+                removed.append(m.id)
+        if removed:
+            self._repo.add_excluded_ids(model_ids=removed)
+            self._prune_ids_from_sequences(model_ids=set(removed))
+            seqs = optimize_tier_sequences(
+                self._repo.list_models(),
+                self._repo.list_tools(),
+                self._repo.list_sequences(),
+                force_overwrite=False,
+            )
+            for seq in seqs.values():
+                self._repo.upsert_sequence(seq)
+        return removed
+
     def resolve_blocked_tools(
         self,
         *,
         test_query: str = DEFAULT_TEST_QUERY,
         test_url: str = DEFAULT_TEST_URL,
+        on_progress: Callable[[float, str], None] | None = None,
     ) -> UnblockSummary:
         """Wendet Rules, searx.space-Pool & Endpoint-Fallbacks auf `Blocked`-Tools an und testet live nach."""
         return _resolve_blocked_tools_impl(
@@ -231,6 +274,7 @@ class KIWebsearchBrain:
             self._runner,
             test_query=test_query,
             test_url=test_url,
+            on_progress=on_progress,
         )
 
     # --- Write-Only Secret-Management (wie GitHub Secrets) ---
@@ -311,13 +355,19 @@ class KIWebsearchBrain:
             self._repo.save_benchmark_run(refreshed)
         return entries
 
-    def list_secret_statuses(self) -> list[SecretStatusEntry]:
+    def list_secret_statuses(
+        self,
+        *,
+        models: list[AIModelSpec] | None = None,
+        tools: list[ToolSpec] | None = None,
+        secret_timestamps: dict[str, str] | None = None,
+    ) -> list[SecretStatusEntry]:
         """Liefert Write-Only-Metadaten aller relevanten API-Keys (NIEMALS den Klartext-Wert!)."""
-        vault_ts = self._repo.list_secret_timestamps()
-        models = self._repo.list_models()
-        tools = self._repo.list_tools()
+        vault_ts = secret_timestamps if secret_timestamps is not None else self._repo.list_secret_timestamps()
+        models_list = models if models is not None else self._repo.list_models()
+        tools_list = tools if tools is not None else self._repo.list_tools()
         all_names = list(_DEFAULT_SECRET_NAMES)
-        for item_env in [*(m.api_key_env for m in models), *(t.api_key_env for t in tools), *vault_ts.keys()]:
+        for item_env in [*(m.api_key_env for m in models_list), *(t.api_key_env for t in tools_list), *vault_ts.keys()]:
             clean = item_env.strip().upper()
             if clean and clean not in all_names:
                 all_names.append(clean)
@@ -327,8 +377,8 @@ class KIWebsearchBrain:
             in_env = self._base_secrets.has_key(name)
             source = "Brain Vault (verschlüsselt)" if in_vault else ("ENV / Streamlit Secrets" if in_env else "Nicht gesetzt")
             affected = [
-                *[f"Model: {m.id}" for m in models if m.api_key_env.strip().upper() == name],
-                *[f"Tool: {t.id}" for t in tools if t.api_key_env.strip().upper() == name],
+                *[f"Model: {m.id}" for m in models_list if m.api_key_env.strip().upper() == name],
+                *[f"Tool: {t.id}" for t in tools_list if t.api_key_env.strip().upper() == name],
             ]
             entries.append(
                 SecretStatusEntry(
@@ -341,8 +391,25 @@ class KIWebsearchBrain:
             )
         return entries
 
+    def load_ui_state(self) -> tuple[Any, list[SecretStatusEntry]]:
+        """Lädt den gesamten Dashboard-Zustand in einem DB-Batch plus abgeleitete Secret-Metadaten."""
+        state = self._repo.load_dashboard_state()
+        statuses = self.list_secret_statuses(
+            models=state.models,
+            tools=state.tools,
+            secret_timestamps=state.secret_timestamps,
+        )
+        return state, statuses
+
     # --- Auto-Discovery & Testlauf (Fast, Standard, Deep) ---
-    def auto_sync(self, manifest_url: str = "", *, verify_discovered: bool = True) -> DiscoverySummary:
+    def auto_sync(
+        self,
+        manifest_url: str = "",
+        *,
+        verify_discovered: bool = True,
+        exclude_previews: bool = True,
+        on_progress: Callable[[float, str], None] | None = None,
+    ) -> DiscoverySummary:
         return auto_sync_catalog(
             self._repo,
             self._secrets,
@@ -350,6 +417,8 @@ class KIWebsearchBrain:
             manifest_url=manifest_url,
             runner=self._runner,
             verify_discovered=verify_discovered,
+            exclude_previews=exclude_previews,
+            on_progress=on_progress,
         )
 
     def run_benchmark(
@@ -358,12 +427,14 @@ class KIWebsearchBrain:
         test_query: str = DEFAULT_TEST_QUERY,
         test_url: str = DEFAULT_TEST_URL,
         force_overwrite_sequences: bool = False,
+        on_progress: Callable[[float, str], None] | None = None,
     ) -> BenchmarkReport:
         runner = BrainBenchmarkRunner(self._repo, self._secrets, self._runner)
         return runner.run_benchmark(
             test_query=test_query,
             test_url=test_url,
             force_overwrite_sequences=force_overwrite_sequences,
+            on_progress=on_progress,
         )
 
     def get_latest_benchmark(self) -> BenchmarkReport | None:

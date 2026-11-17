@@ -3,7 +3,16 @@
 from __future__ import annotations
 
 import streamlit as st
-from ki_brain import BrainTier, KIWebsearchBrain, ProbeStatus, TierSequenceConfig
+from ki_brain import (
+    AIModelSpec,
+    BenchmarkReport,
+    BrainTier,
+    KIWebsearchBrain,
+    ProbeStatus,
+    SecretStatusEntry,
+    TierSequenceConfig,
+    ToolSpec,
+)
 
 from src.ui.formatters import format_iso_timestamp
 from src.ui.views.ki_secret_dialog import render_missing_keys_action_bar
@@ -48,9 +57,15 @@ def _render_sequence_card(seq: TierSequenceConfig) -> None:
             st.caption(f"Logik: {seq.optimization_rationale}")
 
 
-def _render_sequence_editor(brain: KIWebsearchBrain, seqs: dict[BrainTier, TierSequenceConfig]) -> None:
-    all_tool_ids = [t.id for t in brain.list_tools()]
-    all_model_ids = [m.id for m in brain.list_models()]
+def _render_sequence_editor(
+    brain: KIWebsearchBrain,
+    seqs: dict[BrainTier, TierSequenceConfig],
+    *,
+    models: list[AIModelSpec],
+    tools: list[ToolSpec],
+) -> None:
+    all_tool_ids = [t.id for t in tools]
+    all_model_ids = [m.id for m in models]
 
     with st.expander("✏️ Sequenz manuell überschreiben oder feinjustieren", expanded=False):
         tier_choice = st.selectbox(
@@ -111,29 +126,43 @@ def _render_sequence_editor(brain: KIWebsearchBrain, seqs: dict[BrainTier, TierS
             st.rerun()
 
 
-def render_sequences_tab(brain: KIWebsearchBrain, is_admin: bool) -> None:
+def render_sequences_tab(
+    brain: KIWebsearchBrain,
+    is_admin: bool,
+    *,
+    models: list[AIModelSpec] | None = None,
+    tools: list[ToolSpec] | None = None,
+    sequences: dict[BrainTier, TierSequenceConfig] | None = None,
+    latest_benchmark: BenchmarkReport | None = None,
+    secret_statuses: list[SecretStatusEntry] | None = None,
+    active_tab_label: str | None = None,
+) -> None:
     """Rendert Fast/Standard/Deep-Sequenzen, Editor & den letzten Benchmark-Report."""
-    seqs = brain.list_sequences()
+    seqs = sequences if sequences is not None else brain.list_sequences()
     cols = st.columns(3)
     for idx, tier in enumerate((BrainTier.FAST, BrainTier.STANDARD, BrainTier.DEEP)):
         with cols[idx]:
             _render_sequence_card(seqs[tier])
 
     if is_admin:
-        _render_sequence_editor(brain, seqs)
+        _render_sequence_editor(
+            brain,
+            seqs,
+            models=models if models is not None else brain.list_models(),
+            tools=tools if tools is not None else brain.list_tools(),
+        )
 
     st.divider()
     st.subheader("📊 Letzter Benchmark-Testlauf")
-    report = brain.get_latest_benchmark()
+    report = latest_benchmark if latest_benchmark is not None else brain.get_latest_benchmark()
     if report is None:
         st.caption("Noch kein Benchmark-Testlauf ausgeführt. Starte oben den Testlauf zur automatischen Optimierung.")
-        render_missing_keys_action_bar(brain, is_admin=is_admin, section_key="seq")
+        render_missing_keys_action_bar(brain, is_admin=is_admin, section_key="seq", statuses=secret_statuses, active_tab_label=active_tab_label)
         return
 
     st.caption(
         f"Lauf `{report.run_id}` · Zeit: {format_iso_timestamp(report.finished_at)} · "
-        f"Gesund: {report.healthy_tools_count} Tools / {report.healthy_models_count} Modelle · "
-        f"Query: `{report.test_query}`"
+        f"Gesund: {report.healthy_tools_count} Tools / {report.healthy_models_count} Modelle · Query: `{report.test_query}`"
     )
     rows = [
         {
@@ -148,5 +177,10 @@ def render_sequences_tab(brain: KIWebsearchBrain, is_admin: bool) -> None:
         }
         for e in sorted(report.entries, key=lambda x: (x.item_type, -x.quality_score, x.latency_ms))
     ]
-    st.dataframe(rows, use_container_width=True, hide_index=True)
-    render_missing_keys_action_bar(brain, is_admin=is_admin, section_key="seq_bench")
+    st.dataframe(
+        rows,
+        use_container_width=True,
+        hide_index=True,
+        column_config={"Score": st.column_config.NumberColumn("Score", format="%.1f", help="Qualitätsscore 0–100 (höher = besser) aus Antwortzeit, Ertrag & Modell-Tier.")},
+    )
+    render_missing_keys_action_bar(brain, is_admin=is_admin, section_key="seq_bench", statuses=secret_statuses, active_tab_label=active_tab_label)

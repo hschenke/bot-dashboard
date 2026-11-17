@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import streamlit as st
-from ki_brain import BrainError, KIWebsearchBrain, ToolCategory, ToolSpec
+from ki_brain import BrainError, KIWebsearchBrain, SecretStatusEntry, ToolCategory, ToolSpec
 
 from src.ui.views.ki_secret_dialog import render_missing_keys_action_bar
 from src.ui.views.ki_sequences_tab import format_probe_badge
@@ -38,9 +38,16 @@ def _set_feedback(level: str, message: str) -> None:
     st.session_state["ki_brain_feedback"] = {"level": level, "message": message}
 
 
-def render_tools_tab(brain: KIWebsearchBrain, is_admin: bool) -> None:
+def render_tools_tab(
+    brain: KIWebsearchBrain,
+    is_admin: bool,
+    *,
+    tools: list[ToolSpec] | None = None,
+    secret_statuses: list[SecretStatusEntry] | None = None,
+    active_tab_label: str | None = None,
+) -> None:
     """Zeigt alle Websearch- & Extraktions-Tools inkl. CRUD & HTTP-Diagnose."""
-    tools = brain.list_tools()
+    resolved = tools if tools is not None else brain.list_tools()
     rows = [
         {
             "Aktiv": "✅" if t.enabled else "⛔",
@@ -54,16 +61,29 @@ def render_tools_tab(brain: KIWebsearchBrain, is_admin: bool) -> None:
             "Key": t.api_key_env or "Keyless",
             "Diagnose": t.last_error or "–",
         }
-        for t in tools
+        for t in resolved
     ]
     st.dataframe(rows, use_container_width=True, hide_index=True)
+    st.caption(
+        "ℹ️ **SearXNG (`searxng_public`)** nutzt den öffentlichen `searx.space`-Pool inkl. HTML-Fallback "
+        "(eigene Instanz-URL unten im Editor unter `searxng_public` eintragbar). "
+        "Bei DuckDuckGo-Cloud-Sperre (`HTTP 202`): kostenfreien Key (`TAVILY_API_KEY`, `SERPER_API_KEY`, `BRAVE_SEARCH_API_KEY`) "
+        "setzen oder auf `yahoo_search` / `searxng_public` vertrauen & DDG optional deaktivieren."
+    )
 
-    tool_envs = {t.api_key_env.strip().upper() for t in tools if t.api_key_env.strip()}
-    render_missing_keys_action_bar(brain, is_admin=is_admin, env_filter=tool_envs, section_key="tools")
+    tool_envs = {t.api_key_env.strip().upper() for t in resolved if t.api_key_env.strip()}
+    render_missing_keys_action_bar(
+        brain,
+        is_admin=is_admin,
+        env_filter=tool_envs,
+        section_key="tools",
+        statuses=secret_statuses,
+        active_tab_label=active_tab_label,
+    )
 
     if is_admin:
-        _render_tool_controls(brain, tools)
-        _render_tool_form(brain, tools)
+        _render_tool_controls(brain, resolved)
+        _render_tool_form(brain, resolved)
 
 
 def _render_tool_controls(brain: KIWebsearchBrain, tools: list[ToolSpec]) -> None:
@@ -93,7 +113,7 @@ def _render_tool_form(brain: KIWebsearchBrain, tools: list[ToolSpec]) -> None:
     tool_ids = [t.id for t in tools]
     with st.expander("➕ Neues Tool manuell eintragen oder bearbeiten", expanded=False):
         mode = st.selectbox("Vorlage / Bearbeitung", options=["➕ Neues Tool", *tool_ids], key="ki_tool_edit_sel")
-        existing = brain.get_tool(mode) if mode in tool_ids else None
+        existing = next((t for t in tools if t.id == mode), None)
         cur_exec = existing.executor_type if (existing and existing.executor_type in _EXECUTOR_OPTIONS) else _EXECUTOR_OPTIONS[0]
 
         with st.form(f"ki_tool_crud_form_{mode}"):
@@ -153,7 +173,7 @@ def _render_tool_form(brain: KIWebsearchBrain, tools: list[ToolSpec]) -> None:
                     enabled=bool(t_enabled),
                     timeout_seconds=float(t_tmo),
                     max_results=int(t_max),
-                    source="custom" if existing is None else existing.source,
+                    source="custom" if (existing is None or t_url.strip() != existing.endpoint_url) else existing.source,
                     config=merged_cfg,
                 )
                 saved = brain.add_or_update_tool(spec)

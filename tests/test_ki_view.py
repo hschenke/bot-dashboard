@@ -42,6 +42,8 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
 
     headers = [h.value for h in at.header]
     assert "🧠 KI & Websearch Brain" in headers
+    captions = [c.value for c in at.caption]
+    assert not any("Research-Bot, Alert-Bot & News-Bot" in c for c in captions)
 
     metric_labels = [m.label for m in at.metric]
     assert metric_labels == ["KI-Modelle", "Websearch & Tools", "Tier-Profile", "Letzter Testlauf"]
@@ -59,11 +61,12 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
         top_btn = next(b for b in at.button if b.label == top_lbl)
         assert top_btn.proto.type == "secondary"
 
-    # Herkunft-Spalte entfernt in KI-Modelle & Websearch/Tools + Brave/Tavily/Serper Missing Keys angeboten
+    # Herkunft-Spalte entfernt in KI-Modelle & Websearch/Tools + Brave/Tavily/Serper Missing Keys + SearXNG sichtbar
     models_df = at.tabs[1].dataframe[0].value
     tools_df = at.tabs[2].dataframe[0].value
     assert "Herkunft" not in models_df.columns
     assert "Herkunft" not in tools_df.columns
+    assert "searxng_public" in list(tools_df["ID"])
     assert "🔑 Missing Key: BRAVE_SEARCH_API_KEY" in btn_labels
     assert "🔑 Missing Key: TAVILY_API_KEY" in btn_labels
     assert "🔑 Missing Key: SERPER_API_KEY" in btn_labels
@@ -329,6 +332,135 @@ def test_ki_view_unblock_button_runs_spinner_outside_columns(tmp_path: Path) -> 
     assert session_state["ki_brain_feedback"]["level"] == "success"
     assert "duckduckgo_instant" in session_state["ki_brain_feedback"]["message"]
     assert "searxng_public" in session_state["ki_brain_feedback"]["message"]
+
+
+def test_ki_view_missing_key_preserves_tools_tab_and_renders_preview_purge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ki_brain import AIModelSpec, BrainTier, ModelProvider
+    from streamlit.testing.v1 import AppTest
+
+    db_file = tmp_path / "ui_tab_lock.db"
+    monkeypatch.setenv("BRAIN_SQLITE_PATH", str(db_file))
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+
+    brain = create_dashboard_brain(AppSettings(brain_sqlite_path=str(db_file)))
+    brain.add_or_update_model(
+        AIModelSpec(
+            id="gemini-legacy-exp",
+            name="Gemini Legacy Preview",
+            provider=ModelProvider.GOOGLE_GEMINI,
+            model_id="gemini-legacy-preview",
+            tier_hint=BrainTier.STANDARD,
+        )
+    )
+    brain.close()
+
+    def _app() -> None:
+        import os
+
+        from src.config.settings import AppSettings
+        from src.domain.enums import AuthRole
+        from src.ui.views.ki_view import render_ki_view
+
+        app_settings = AppSettings(brain_sqlite_path=os.environ["BRAIN_SQLITE_PATH"])
+        render_ki_view(app_settings, role=AuthRole.ADMIN)
+
+    at = AppTest.from_function(_app).run()
+    assert not at.exception
+
+    # 1. Preview-Bereinigungsbutton in Tab 1 (🧩 KI-Modelle) entfernt veraltetes Preview-Modell
+    purge_btn = next(b for b in at.tabs[1].button if "Preview-Modelle entfernen" in b.label)
+    at = purge_btn.click().run()
+    assert not at.exception
+    assert "gemini-legacy-exp" not in list(at.tabs[1].dataframe[0].value["ID"])
+
+    # 2. Missing Key Button im Tools-Tab behält Tab-Fokus auf 🔧 Websearch & Tools beim Öffnen des Modals
+    tavily_tool_btn = next(b for b in at.tabs[2].button if b.label == "🔑 Missing Key: TAVILY_API_KEY")
+    at = tavily_tool_btn.click().run()
+    assert not at.exception
+    assert at.session_state["ki_view_tabs"] == "🔧 Websearch & Tools"
+    assert any("TAVILY_API_KEY" in t.label for t in at.text_input)
+
+
+def test_ki_view_ddg_202_unblock_feedback_and_clear_errors_overlay(tmp_path: Path) -> None:
+    from ki_brain import ProbeStatus, UnblockSummary
+    from src.ui.views.ki_task_overlay import format_unblock_feedback
+
+    # 1. Formatierung bei DuckDuckGo HTTP 202 bleibt vollständig (ohne Abschneiden mitten in '.com') + liefert Handlungsempfehlung
+    sum_202 = UnblockSummary(
+        checked_blocked=["duckduckgo_html", "duckduckgo_instant", "duckduckgo_lite"],
+        rules_applied=["duckduckgo_instant: Probe-Query-Regel 'Python' hinterlegt"],
+        unblocked_ids=[],
+        still_blocked={
+            "duckduckgo_html": "HTTP 202 (Anti-Bot-Challenge / Leerantwort auf html.duckduckgo.com)",
+            "duckduckgo_instant": "HTTP 202 (Anti-Bot-Challenge / Leerantwort auf api.duckduckgo.com)",
+            "duckduckgo_lite": "HTTP 202 (Anti-Bot-Challenge / Leerantwort auf lite.duckduckgo.com)",
+        },
+        activated_alternatives=[],
+    )
+    level, msg = format_unblock_feedback(sum_202)
+    assert level == "warning"
+    assert "html.duckduckgo.com)" in msg
+    assert "TAVILY_API_KEY" in msg and "searxng_public" in msg
+
+    # 2. Clear Errors läuft mit Foreground-Overlay außerhalb von st.columns und dokumentiert [Error] / [Quota 429]
+    repo = create_brain_repository(sqlite_path=tmp_path / "clean_ui.db")
+    brain = KIWebsearchBrain(repo)
+    gem = brain.get_model("gemini-3.6-flash")
+    meteo = brain.get_tool("open_meteo")
+    ddg = brain.get_tool("duckduckgo_html")
+    assert gem and meteo and ddg
+    brain.add_or_update_model(gem.model_copy(update={"last_status": ProbeStatus.ERROR}))
+    brain.add_or_update_tool(meteo.model_copy(update={"last_status": ProbeStatus.ERROR}))
+    brain.add_or_update_tool(ddg.model_copy(update={"last_status": ProbeStatus.BLOCKED}))
+
+    col_depth = {"current": 0}
+    spinner_depths: list[int] = []
+    session_state: dict[str, Any] = {}
+
+    class _TrackedCol:
+        def __enter__(self) -> _TrackedCol:
+            col_depth["current"] += 1
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            col_depth["current"] -= 1
+            return False
+
+    class _TrackedSpinner:
+        def __enter__(self) -> _TrackedSpinner:
+            spinner_depths.append(col_depth["current"])
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+    settings = AppSettings(brain_sqlite_path=str(tmp_path / "clean_ui.db"))
+    with (
+        patch("src.ui.views.ki_view.create_dashboard_brain", return_value=brain),
+        patch("streamlit.session_state", session_state),
+        patch("streamlit.columns", side_effect=lambda spec, **kw: [_TrackedCol() for _ in range(spec if isinstance(spec, int) else len(spec))]),
+        patch("streamlit.spinner", return_value=_TrackedSpinner()),
+        patch("streamlit.button", side_effect=lambda label, **kw: "Clear Errors" in label),
+        patch("streamlit.rerun", side_effect=_RerunCalled),
+        pytest.raises(_RerunCalled),
+    ):
+        render_ki_view(settings, role=AuthRole.ADMIN)
+
+    assert spinner_depths == [0]
+    fb_msg = session_state["ki_brain_feedback"]["message"]
+    assert "gemini-3.6-flash [Error]" in fb_msg
+    assert "open_meteo [Error]" in fb_msg
+
+    reopened = KIWebsearchBrain(create_brain_repository(sqlite_path=tmp_path / "clean_ui.db"))
+    try:
+        assert reopened.get_tool("duckduckgo_html") is not None
+        assert reopened.get_model("gemini-3.6-flash") is None
+        assert reopened.get_tool("open_meteo") is None
+    finally:
+        reopened.close()
+
 
 
 

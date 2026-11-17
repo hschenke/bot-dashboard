@@ -3,19 +3,17 @@
 from __future__ import annotations
 
 import streamlit as st
-from ki_brain import BrainError, KIWebsearchBrain
+from ki_brain import BrainError, KIWebsearchBrain, SecretStatusEntry
 
 from src.ui.formatters import format_iso_timestamp
-from src.ui.views.ki_secret_dialog import trigger_secret_dialog
+from src.ui.views.ki_secret_dialog import queue_secret_dialog_on_click
 
 
 def _set_feedback(level: str, message: str) -> None:
     st.session_state["ki_brain_feedback"] = {"level": level, "message": message}
 
 
-def _render_secret_rows(brain: KIWebsearchBrain, is_admin: bool) -> list[str]:
-    statuses = brain.list_secret_statuses()
-    clicked_env: str | None = None
+def _render_secret_rows(statuses: list[SecretStatusEntry], is_admin: bool) -> list[str]:
     for s in statuses:
         c_name, c_action, c_used, c_time = st.columns([1.6, 1.35, 2.25, 1.1], vertical_alignment="center")
         with c_name:
@@ -24,8 +22,14 @@ def _render_secret_rows(brain: KIWebsearchBrain, is_admin: bool) -> list[str]:
             if is_admin:
                 btn_lbl = "🔄 Set (••••••••)" if s.is_configured else "🔑 Missing Key"
                 btn_help = "Klicken zum Eintragen, Überschreiben & Testen"
-                if st.button(btn_lbl, key=f"ki_vault_row_btn_{s.env_name}", help=btn_help, use_container_width=True):
-                    clicked_env = s.env_name
+                st.button(
+                    btn_lbl,
+                    key=f"ki_vault_row_btn_{s.env_name}",
+                    help=btn_help,
+                    on_click=queue_secret_dialog_on_click,
+                    args=(s.env_name, None, s.model_dump()),
+                    use_container_width=True,
+                )
             else:
                 st.caption("🟢 Set (••••••••)" if s.is_configured else "🔑 Missing Key")
         with c_used:
@@ -33,15 +37,18 @@ def _render_secret_rows(brain: KIWebsearchBrain, is_admin: bool) -> list[str]:
             st.caption(f"{s.source} · {usage}")
         with c_time:
             st.caption(format_iso_timestamp(s.updated_at) if s.updated_at else "–")
-    if clicked_env:
-        trigger_secret_dialog(clicked_env)
     return [s.env_name for s in statuses]
 
 
-def render_secrets_manager_expander(brain: KIWebsearchBrain, is_admin: bool) -> None:
+def render_secrets_manager_expander(
+    brain: KIWebsearchBrain,
+    is_admin: bool,
+    *,
+    statuses: list[SecretStatusEntry] | None = None,
+) -> None:
     """Rendert den GitHub-Secrets-artigen Write-Only-Key-Tresor für Missing-Key-Elemente."""
-    statuses = brain.list_secret_statuses()
-    missing_count = sum(1 for s in statuses if not s.is_configured)
+    resolved = statuses if statuses is not None else brain.list_secret_statuses()
+    missing_count = sum(1 for s in resolved if not s.is_configured)
     badge = f" ({missing_count} Missing Key)" if missing_count else " (Alle gesetzt)"
 
     with st.expander(f"🔑 API-Keys & Missing-Key Tresor (Write-Only wie GitHub Secrets){badge}", expanded=False):
@@ -51,7 +58,7 @@ def render_secrets_manager_expander(brain: KIWebsearchBrain, is_admin: bool) -> 
             "können immer nur **komplett neu überschrieben** oder gelöscht werden. "
             "Klicke auf einen `🔑 Missing Key`, um den Key direkt einzutragen und zu testen."
         )
-        known_names = _render_secret_rows(brain, is_admin=is_admin)
+        known_names = _render_secret_rows(resolved, is_admin=is_admin)
 
         if not is_admin:
             return

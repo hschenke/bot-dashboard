@@ -7,7 +7,7 @@ from ki_brain.models import AIModelSpec, TierSequenceConfig, ToolSpec
 
 
 def build_default_models() -> list[AIModelSpec]:
-    """Liefert alle bekannten kostenfreien Modelle aus Research-Bot und Alert-Bot."""
+    """Liefert alle aktiven kostenfreien Modelle aus Research-Bot, Alert-Bot & Gemini Free-Tier."""
     return [
         AIModelSpec(
             id="gemini-3.5-flash-lite",
@@ -30,6 +30,16 @@ def build_default_models() -> list[AIModelSpec]:
             notes="Leichtgewichtiges Lite-Fallback-Modell für schnelle Anfragen.",
         ),
         AIModelSpec(
+            id="gemini-4-hydrogen",
+            name="Gemini 4 Hydrogen",
+            provider=ModelProvider.GOOGLE_GEMINI,
+            model_id="gemini-4-hydrogen",
+            tier_hint=BrainTier.STANDARD,
+            max_rpm=12,
+            origin_apps=["research-bot", "alert-bot"],
+            notes="Aktuelles Google Gemini 4 Flaggschiff mit kostenfreiem Free-Tier & Interactions API.",
+        ),
+        AIModelSpec(
             id="gemini-3.8-flash",
             name="Gemini 3.8 Flash",
             provider=ModelProvider.GOOGLE_GEMINI,
@@ -40,14 +50,14 @@ def build_default_models() -> list[AIModelSpec]:
             notes="Ausgewogenes Flash-Modell für Standard- & Deep-Synthese.",
         ),
         AIModelSpec(
-            id="gemini-4-argon",
-            name="Gemini 4 Argon",
+            id="gemini-3.6-flash",
+            name="Gemini 3.6 Flash",
             provider=ModelProvider.GOOGLE_GEMINI,
-            model_id="gemini-4-argon",
-            tier_hint=BrainTier.DEEP,
-            max_rpm=10,
-            origin_apps=["alert-bot"],
-            notes="Tiefgehendes Analyse-Modell aus Alert-Bot.",
+            model_id="gemini-3.6-flash",
+            tier_hint=BrainTier.STANDARD,
+            max_rpm=12,
+            origin_apps=["gemini-free-tier"],
+            notes="Schnelles Free-Tier Standard-Flash-Modell als robuster Fallback.",
         ),
         AIModelSpec(
             id="gemini-2.5-flash",
@@ -68,16 +78,6 @@ def build_default_models() -> list[AIModelSpec]:
             max_rpm=15,
             origin_apps=["research-bot"],
             notes="Schnelles Free-Tier Lite-Modell aus Research-Bot.",
-        ),
-        AIModelSpec(
-            id="gemini-2.0-flash",
-            name="Gemini 2.0 Flash",
-            provider=ModelProvider.GOOGLE_GEMINI,
-            model_id="gemini-2.0-flash",
-            tier_hint=BrainTier.STANDARD,
-            max_rpm=15,
-            origin_apps=["research-bot"],
-            notes="Stabiler Flash-Fallback aus Research-Bot.",
         ),
         AIModelSpec(
             id="deep-research-preview-04-2026",
@@ -109,6 +109,30 @@ def build_default_tools() -> list[ToolSpec]:
             timeout_seconds=6.0,
             max_results=6,
             description="Key-freie Websuche; besonders resilient auf Cloud-Servern (AWS/Streamlit).",
+        ),
+        ToolSpec(
+            id="searxng_public",
+            name="SearXNG Public Pool (searx.space)",
+            category=ToolCategory.WEB_SEARCH,
+            executor_type="searxng_search",
+            endpoint_url="https://searx.tiekoetter.com/search",
+            requires_api_key=False,
+            origin_apps=["searx.space"],
+            timeout_seconds=6.0,
+            max_results=6,
+            config={
+                "fallback_endpoints": [
+                    "https://search.inetol.net/search",
+                    "https://searx.ononoki.org/search",
+                    "https://search.rhscz.eu/search",
+                    "https://search.hbubli.cc/search",
+                    "https://search.utilibre.org/search",
+                    "https://priv.au/search",
+                    "https://paulgo.io/search",
+                ],
+                "probe_query": "Python",
+            },
+            description="Key-freie Metasuchmaschine über searx.space-Pool (JSON + HTML-Fallback; eigene private Instanz im Tool-Editor eintragbar).",
         ),
         ToolSpec(
             id="duckduckgo_html",
@@ -380,9 +404,9 @@ def build_default_sequences() -> dict[BrainTier, TierSequenceConfig]:
     return {
         BrainTier.FAST: TierSequenceConfig(
             tier=BrainTier.FAST,
-            search_tool_sequence=["yahoo_search", "google_news_rss", "wikipedia_api", "duckduckgo_lite"],
+            search_tool_sequence=["yahoo_search", "searxng_public", "google_news_rss", "wikipedia_api"],
             extractor_tool_sequence=["direct_http_fetch", "jina_reader"],
-            model_sequence=["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite"],
+            model_sequence=["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-4-hydrogen", "gemini-2.5-flash-lite"],
             max_search_tools=2,
             enable_page_scraping=False,
             max_pages_to_scrape=0,
@@ -395,13 +419,13 @@ def build_default_sequences() -> dict[BrainTier, TierSequenceConfig]:
             tier=BrainTier.STANDARD,
             search_tool_sequence=[
                 "yahoo_search",
-                "duckduckgo_lite",
+                "searxng_public",
                 "google_news_rss",
                 "wikipedia_api",
                 "hackernews_algolia",
             ],
             extractor_tool_sequence=["direct_http_fetch", "jina_reader"],
-            model_sequence=["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-2.5-flash", "gemini-3.1-flash-lite"],
+            model_sequence=["gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash"],
             max_search_tools=4,
             enable_page_scraping=True,
             max_pages_to_scrape=2,
@@ -414,24 +438,23 @@ def build_default_sequences() -> dict[BrainTier, TierSequenceConfig]:
             tier=BrainTier.DEEP,
             search_tool_sequence=[
                 "yahoo_search",
-                "duckduckgo_lite",
-                "duckduckgo_html",
+                "searxng_public",
                 "google_news_rss",
                 "wikipedia_api",
                 "arxiv_api",
                 "reddit_search",
                 "hackernews_algolia",
-                "duckduckgo_instant",
+                "duckduckgo_lite",
             ],
             extractor_tool_sequence=["jina_reader", "direct_http_fetch", "browserbase_fetch"],
             model_sequence=[
                 "deep-research-preview-04-2026",
-                "gemini-4-argon",
+                "gemini-4-hydrogen",
                 "gemini-3.8-flash",
-                "gemini-2.5-flash",
+                "gemini-3.6-flash",
                 "gemini-3.5-flash-lite",
             ],
-            max_search_tools=9,
+            max_search_tools=8,
             enable_page_scraping=True,
             max_pages_to_scrape=5,
             max_followup_rounds=2,

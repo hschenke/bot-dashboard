@@ -123,32 +123,54 @@ def fetch_via_browserbase(
     )
 
 
-def query_open_meteo(query: str, timeout_seconds: float = 5.0) -> list[BrainCitation]:
+_BUILTIN_CITY_COORDS: dict[str, tuple[float, float, str]] = {
+    "berlin": (52.52, 13.405, "Berlin, Deutschland"),
+    "münchen": (48.137, 11.576, "München, Deutschland"),
+    "munich": (48.137, 11.576, "München, Deutschland"),
+    "hamburg": (53.551, 9.994, "Hamburg, Deutschland"),
+    "köln": (50.938, 6.960, "Köln, Deutschland"),
+    "frankfurt": (50.111, 8.682, "Frankfurt, Deutschland"),
+}
+
+
+def query_open_meteo(query: str, timeout_seconds: float = 6.0) -> list[BrainCitation]:
     """Fragt Ortskoordinaten und Live-Wetterdaten über Open-Meteo ohne Key ab."""
     tokens = [tok.strip(" ,.?!:;") for tok in query.split() if len(tok.strip(" ,.?!:;")) >= 2]
     ignore = {"wetter", "temperatur", "heute", "aktuell", "weather", "forecast", "wie", "ist", "das", "in"}
     candidates = [t for t in tokens if t.lower() not in ignore]
     location = candidates[-1] if candidates else "Berlin"
-    st, _, _, gbody = safe_http_request(
-        "GET",
-        "https://geocoding-api.open-meteo.com/v1/search",
-        params={"name": location, "count": 1, "language": "de", "format": "json"},
-        timeout_seconds=timeout_seconds,
-        max_bytes=100_000,
-    )
-    if st != 200 or not gbody:
-        return []
-    geo = json.loads(gbody.decode("utf-8", errors="replace")).get("results") or []
-    if not geo:
-        return []
-    first = geo[0]
-    lat, lon = first["latitude"], first["longitude"]
-    place = f"{first.get('name', location)}, {first.get('country', '')}".strip(", ")
+
+    lat: float | None = None
+    lon: float | None = None
+    place = location
+    try:
+        st, _, _, gbody = safe_http_request(
+            "GET",
+            "https://geocoding-api.open-meteo.com/v1/search",
+            params={"name": location, "count": 1, "language": "de", "format": "json"},
+            timeout_seconds=max(timeout_seconds, 5.5),
+            max_bytes=100_000,
+        )
+        if st == 200 and gbody:
+            geo = json.loads(gbody.decode("utf-8", errors="replace")).get("results") or []
+            if geo:
+                first = geo[0]
+                lat, lon = float(first["latitude"]), float(first["longitude"])
+                place = f"{first.get('name', location)}, {first.get('country', '')}".strip(", ")
+    except Exception:  # noqa: S110
+        pass
+
+    if lat is None or lon is None:
+        fallback = _BUILTIN_CITY_COORDS.get(location.lower())
+        if not fallback:
+            return []
+        lat, lon, place = fallback
+
     st2, _, _, wbody = safe_http_request(
         "GET",
         "https://api.open-meteo.com/v1/forecast",
         params={"latitude": lat, "longitude": lon, "current": "temperature_2m,wind_speed_10m,precipitation", "timezone": "auto"},
-        timeout_seconds=timeout_seconds,
+        timeout_seconds=max(timeout_seconds, 5.5),
         max_bytes=100_000,
     )
     if st2 != 200 or not wbody:

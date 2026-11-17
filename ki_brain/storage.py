@@ -4,13 +4,30 @@ from __future__ import annotations
 
 import datetime
 import json
+import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 from ki_brain.catalog import build_default_models, build_default_sequences, build_default_tools
 from ki_brain.db_executors import BrainSqlExecutor, SqliteBrainExecutor, TursoBrainExecutor
 from ki_brain.enums import BrainTier
+from ki_brain.exceptions import BrainStorageError
 from ki_brain.models import AIModelSpec, BenchmarkReport, TierSequenceConfig, ToolSpec
 from ki_brain.security import validate_identifier
+
+_INITIALIZED_BACKENDS: set[str] = set()
+_INITIALIZED_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True)
+class BrainDashboardState:
+    """Gebündelter Lese-Snapshot für schnelle UI-Darstellung in einer einzigen DB-Batch-Abfrage."""
+
+    models: list[AIModelSpec]
+    tools: list[ToolSpec]
+    sequences: dict[BrainTier, TierSequenceConfig]
+    latest_benchmark: BenchmarkReport | None
+    secret_timestamps: dict[str, str]
 
 _SCHEMA_SQL: tuple[str, ...] = (
     """
@@ -66,9 +83,22 @@ class BrainRepository:
 
     def __init__(self, executor: BrainSqlExecutor, seed_defaults: bool = True) -> None:
         self._executor = executor
-        self._init_schema()
-        if seed_defaults:
-            self.ensure_seeded()
+        self._cache_key = (
+            f"turso:{executor._pipeline_url}"  # noqa: SLF001
+            if isinstance(executor, TursoBrainExecutor)
+            else ""
+        )
+        already_ready = False
+        if self._cache_key:
+            with _INITIALIZED_LOCK:
+                already_ready = self._cache_key in _INITIALIZED_BACKENDS
+        if not already_ready:
+            self._init_schema()
+            if seed_defaults:
+                self.ensure_seeded()
+            if self._cache_key:
+                with _INITIALIZED_LOCK:
+                    _INITIALIZED_BACKENDS.add(self._cache_key)
 
     @property
     def backend_name(self) -> str:
@@ -91,37 +121,87 @@ class BrainRepository:
         )
 
     def ensure_seeded(self) -> None:
-        if self.get_meta("seeded_v1") == "1":
+        meta_res = self._executor.execute(
+            "SELECT key, value FROM brain_meta WHERE key IN ('seeded_v1', 'seeded_catalog_rev', 'known_builtin_ids', 'excluded_ids')"
+        )
+        meta = {str(r["key"]): str(r["value"]) for r in meta_res.rows}
+        if meta.get("seeded_v1") == "1" and meta.get("seeded_catalog_rev") == "2":
             return
+
         now = _utc_now_iso()
         defaults_models = build_default_models()
         defaults_tools = build_default_tools()
         stmts: list[tuple[str, tuple[str, ...]]] = []
+
+        if meta.get("seeded_v1") != "1":
+            for model in defaults_models:
+                stmts.append(
+                    (
+                        "INSERT OR IGNORE INTO brain_models (id, payload_json, updated_at) VALUES (?, ?, ?)",
+                        (model.id, model.model_dump_json(), now),
+                    )
+                )
+            for tool in defaults_tools:
+                stmts.append(
+                    (
+                        "INSERT OR IGNORE INTO brain_tools (id, payload_json, updated_at) VALUES (?, ?, ?)",
+                        (tool.id, tool.model_dump_json(), now),
+                    )
+                )
+            for tier, seq in build_default_sequences().items():
+                updated_seq = seq.model_copy(update={"updated_at": seq.updated_at or now})
+                stmts.append(
+                    (
+                        "INSERT OR IGNORE INTO brain_sequences (tier, payload_json, updated_at) VALUES (?, ?, ?)",
+                        (tier.value, updated_seq.model_dump_json(), now),
+                    )
+                )
+            known_ids = {"models": [m.id for m in defaults_models], "tools": [t.id for t in defaults_tools]}
+            stmts.append(("INSERT OR REPLACE INTO brain_meta (key, value) VALUES (?, ?)", ("known_builtin_ids", json.dumps(known_ids))))
+            stmts.append(("INSERT OR REPLACE INTO brain_meta (key, value) VALUES (?, ?)", ("seeded_v1", "1")))
+            stmts.append(("INSERT OR REPLACE INTO brain_meta (key, value) VALUES (?, ?)", ("seeded_catalog_rev", "2")))
+            self._executor.execute_batch(stmts)
+            return
+
+        # Einmaliger non-destruktiver Upgrade-Sync für bestehende Datenbanken (z. B. searxng_public & Gemini 4)
+        try:
+            known = json.loads(meta.get("known_builtin_ids") or "{}")
+        except json.JSONDecodeError:
+            known = {}
+        try:
+            excl = json.loads(meta.get("excluded_ids") or "{}")
+        except json.JSONDecodeError:
+            excl = {}
+        known_m = set(known.get("models", []))
+        known_t = set(known.get("tools", []))
+        excl_m = {str(x).strip().lower() for x in excl.get("models", [])}
+        excl_t = {str(x).strip().lower() for x in excl.get("tools", [])}
+
         for model in defaults_models:
-            stmts.append(
-                (
-                    "INSERT OR IGNORE INTO brain_models (id, payload_json, updated_at) VALUES (?, ?, ?)",
-                    (model.id, model.model_dump_json(), now),
+            if model.id not in known_m and model.id not in excl_m:
+                stmts.append(
+                    (
+                        "INSERT OR IGNORE INTO brain_models (id, payload_json, updated_at) VALUES (?, ?, ?)",
+                        (model.id, model.model_dump_json(), now),
+                    )
                 )
-            )
+            known_m.add(model.id)
         for tool in defaults_tools:
-            stmts.append(
-                (
-                    "INSERT OR IGNORE INTO brain_tools (id, payload_json, updated_at) VALUES (?, ?, ?)",
-                    (tool.id, tool.model_dump_json(), now),
+            if tool.id not in known_t and tool.id not in excl_t:
+                stmts.append(
+                    (
+                        "INSERT OR IGNORE INTO brain_tools (id, payload_json, updated_at) VALUES (?, ?, ?)",
+                        (tool.id, tool.model_dump_json(), now),
+                    )
                 )
+            known_t.add(tool.id)
+        stmts.append(
+            (
+                "INSERT OR REPLACE INTO brain_meta (key, value) VALUES (?, ?)",
+                ("known_builtin_ids", json.dumps({"models": sorted(known_m), "tools": sorted(known_t)})),
             )
-        for tier, seq in build_default_sequences().items():
-            updated_seq = seq.model_copy(update={"updated_at": seq.updated_at or now})
-            stmts.append(
-                (
-                    "INSERT OR IGNORE INTO brain_sequences (tier, payload_json, updated_at) VALUES (?, ?, ?)",
-                    (tier.value, updated_seq.model_dump_json(), now),
-                )
-            )
-        known_ids = {"models": [m.id for m in defaults_models], "tools": [t.id for t in defaults_tools]}
-        stmts.append(("INSERT OR REPLACE INTO brain_meta (key, value) VALUES (?, ?)", ("known_builtin_ids", json.dumps(known_ids))))
-        stmts.append(("INSERT OR REPLACE INTO brain_meta (key, value) VALUES (?, ?)", ("seeded_v1", "1")))
+        )
+        stmts.append(("INSERT OR REPLACE INTO brain_meta (key, value) VALUES (?, ?)", ("seeded_catalog_rev", "2")))
         self._executor.execute_batch(stmts)
 
     def list_excluded_ids(self) -> tuple[set[str], set[str]]:
@@ -179,7 +259,7 @@ class BrainRepository:
                 ("DELETE FROM brain_models", ()),
                 ("DELETE FROM brain_tools", ()),
                 ("DELETE FROM brain_sequences", ()),
-                ("DELETE FROM brain_meta WHERE key IN ('seeded_v1', 'known_builtin_ids', 'excluded_ids')", ()),
+                ("DELETE FROM brain_meta WHERE key IN ('seeded_v1', 'seeded_catalog_rev', 'known_builtin_ids', 'excluded_ids')", ()),
             ]
         )
         self.ensure_seeded()
@@ -323,6 +403,45 @@ class BrainRepository:
             if val:
                 decrypted[str(row["env_name"])] = val
         return decrypted
+
+    def load_dashboard_state(self) -> BrainDashboardState:
+        """Lädt Modelle, Tools, Sequenzen, letzten Benchmark & Secret-Zeitstempel in einem Batch."""
+        stmts = [
+            ("SELECT payload_json FROM brain_models ORDER BY id ASC", ()),
+            ("SELECT payload_json FROM brain_tools ORDER BY id ASC", ()),
+            ("SELECT tier, payload_json FROM brain_sequences", ()),
+            ("SELECT payload_json FROM brain_benchmark_runs ORDER BY started_at DESC LIMIT 1", ()),
+            ("SELECT env_name, updated_at FROM brain_secrets ORDER BY env_name ASC", ()),
+        ]
+        try:
+            res_m, res_t, res_s, res_b, res_sec = self._executor.execute_batch(stmts)
+        except BrainStorageError as exc:
+            if "no such table" not in str(exc).lower():
+                raise
+            if self._cache_key:
+                with _INITIALIZED_LOCK:
+                    _INITIALIZED_BACKENDS.discard(self._cache_key)
+            self._init_schema()
+            self.ensure_seeded()
+            if self._cache_key:
+                with _INITIALIZED_LOCK:
+                    _INITIALIZED_BACKENDS.add(self._cache_key)
+            res_m, res_t, res_s, res_b, res_sec = self._executor.execute_batch(stmts)
+
+        models = [AIModelSpec.model_validate_json(str(r["payload_json"])) for r in res_m.rows]
+        tools = [ToolSpec.model_validate_json(str(r["payload_json"])) for r in res_t.rows]
+        seqs = build_default_sequences()
+        for row in res_s.rows:
+            seqs[BrainTier(str(row["tier"]))] = TierSequenceConfig.model_validate_json(str(row["payload_json"]))
+        latest = BenchmarkReport.model_validate_json(str(res_b.rows[0]["payload_json"])) if res_b.rows else None
+        sec_ts = {str(r["env_name"]): str(r["updated_at"]) for r in res_sec.rows}
+        return BrainDashboardState(
+            models=models,
+            tools=tools,
+            sequences=seqs,
+            latest_benchmark=latest,
+            secret_timestamps=sec_ts,
+        )
 
     def close(self) -> None:
         self._executor.close()

@@ -9,6 +9,8 @@ from ki_brain import (
     BrainTier,
     KIWebsearchBrain,
     ModelProvider,
+    SecretStatusEntry,
+    is_preview_or_experimental_model,
 )
 
 from src.ui.views.ki_secret_dialog import render_missing_keys_action_bar
@@ -19,9 +21,16 @@ def _set_feedback(level: str, message: str) -> None:
     st.session_state["ki_brain_feedback"] = {"level": level, "message": message}
 
 
-def render_models_tab(brain: KIWebsearchBrain, is_admin: bool) -> None:
+def render_models_tab(
+    brain: KIWebsearchBrain,
+    is_admin: bool,
+    *,
+    models: list[AIModelSpec] | None = None,
+    secret_statuses: list[SecretStatusEntry] | None = None,
+    active_tab_label: str | None = None,
+) -> None:
     """Zeigt alle registrierten KI-Modelle und erlaubt dynamisches CRUD."""
-    models = brain.list_models()
+    resolved = models if models is not None else brain.list_models()
     st.caption(
         "Zentrale Modell-Liste aus Research-Bot, Alert-Bot, Gemini API Discovery & OpenAI-kompatiblen Free-Endpunkten."
     )
@@ -38,23 +47,55 @@ def render_models_tab(brain: KIWebsearchBrain, is_admin: bool) -> None:
             "Key-Env": m.api_key_env or "–",
             "Diagnose": m.last_error or "–",
         }
-        for m in models
+        for m in resolved
     ]
-    st.dataframe(rows, use_container_width=True, hide_index=True)
+    st.dataframe(
+        rows,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Score": st.column_config.NumberColumn(
+                "Score",
+                format="%.1f",
+                help=(
+                    "Qualitätsscore 0–100 (höher = besser): 45 % Latenz-Speed + 55 % Tier-Stärke "
+                    "(Fast 76 / Standard 84 / Deep 92) + 6 JSON-Bonus. Fixwerte: Untested=55, "
+                    "Quota 429=12, Error/Blocked=5, Missing Key=0."
+                ),
+            )
+        },
+    )
 
-    model_envs = {m.api_key_env.strip().upper() for m in models if m.api_key_env.strip()}
-    render_missing_keys_action_bar(brain, is_admin=is_admin, env_filter=model_envs, section_key="models")
+    model_envs = {m.api_key_env.strip().upper() for m in resolved if m.api_key_env.strip()}
+    render_missing_keys_action_bar(
+        brain,
+        is_admin=is_admin,
+        env_filter=model_envs,
+        section_key="models",
+        statuses=secret_statuses,
+        active_tab_label=active_tab_label,
+    )
 
     if not is_admin:
         return
 
+    preview_models = [m for m in resolved if not m.is_deep_agent and is_preview_or_experimental_model(m.model_id, m.name)]
+    if preview_models and st.button(
+        f"🧹 Veraltete Preview-Modelle entfernen ({len(preview_models)})",
+        key="ki_purge_previews_btn",
+        help="Entfernt vorhandene `-preview`/`-exp` Modelle dauerhaft (Deep Research Agent bleibt erhalten).",
+    ):
+        removed = brain.remove_preview_models()
+        _set_feedback("success" if removed else "info", f"Preview-Bereinigung: {len(removed)} Modell(e) entfernt ({', '.join(removed) or '–'}).")
+        st.rerun()
+
     st.subheader("⚙️ Modell aktivieren, bearbeiten oder entfernen")
-    model_ids = [m.id for m in models]
+    model_ids = [m.id for m in resolved]
     if model_ids:
         sel_col, toggle_col, del_col = st.columns([2, 1, 1], vertical_alignment="bottom")
         with sel_col:
             selected_id = st.selectbox("Modell wählen", options=model_ids, key="ki_model_quick_sel")
-        selected_obj = next(m for m in models if m.id == selected_id)
+        selected_obj = next(m for m in resolved if m.id == selected_id)
         with toggle_col:
             toggle_label = "⛔ Deaktivieren" if selected_obj.enabled else "✅ Aktivieren"
             do_toggle = st.button(toggle_label, key="ki_model_toggle_btn", use_container_width=True)
@@ -73,7 +114,7 @@ def render_models_tab(brain: KIWebsearchBrain, is_admin: bool) -> None:
     with st.expander("➕ Neues Modell / KI manuell eintragen oder bearbeiten", expanded=False):
         edit_options = ["➕ Neues Modell hinzufügen", *model_ids]
         target_mode = st.selectbox("Vorlage / Bearbeitung", options=edit_options, key="ki_model_edit_target")
-        existing = brain.get_model(target_mode) if target_mode in model_ids else None
+        existing = next((m for m in resolved if m.id == target_mode), None)
 
         with st.form(f"ki_model_crud_form_{target_mode}"):
             c1, c2 = st.columns(2)
