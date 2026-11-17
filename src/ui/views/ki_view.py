@@ -82,13 +82,13 @@ def _handle_top_actions(
     if run_clean:
         try:
             def _clean_task(cb: Callable[[float, str], None]) -> tuple[str, str]:
-                cb(0.35, "Bereinige Einträge mit Status Error oder Quota 429 (Blocked bleibt erhalten)...")
+                cb(0.35, "Bereinige Einträge mit Status Error, Quota 429 oder HTTP 202 (übrige Blocked bleiben erhalten)...")
                 res = format_cleanup_message(brain)
                 cb(1.0, "Bereinigung abgeschlossen.")
                 return res
-            _flash(*run_with_task_overlay("🧹 Clear Errors", "Prüfe Modelle & Tools auf Status Error / Quota 429...", _clean_task))
+            _flash(*run_with_task_overlay("🧹 Clean Errors", "Prüfe Modelle & Tools auf Status Error, Quota 429 oder HTTP 202...", _clean_task))
         except BrainError as exc:
-            _flash("error", f"Clear Errors fehlgeschlagen: {exc}")
+            _flash("error", f"Clean Errors fehlgeschlagen: {exc}")
         st.rerun()
     if run_unblock:
         try:
@@ -131,7 +131,7 @@ def render_ki_view(settings: AppSettings, role: AuthRole = AuthRole.ADMIN) -> No
         with b2:
             run_bench = st.button("🚀 Testlauf & Optimizing", key="ki_top_btn_bench", disabled=not is_admin, use_container_width=True, help="Testet alle aktivierten Modelle & Tools live und optimiert Fast, Standard & Deep.")
         with b3:
-            run_clean = st.button("🧹 Clear Errors", key="ki_top_btn_clean", disabled=not is_admin, use_container_width=True, help="Entfernt Modelle/Tools mit Status Error oder Quota 429 dauerhaft. Blocked-Tools bleiben erhalten.")
+            run_clean = st.button("🧹 Clean Errors", key="ki_top_btn_clean", disabled=not is_admin, use_container_width=True, help="Entfernt Modelle/Tools mit Status Error, Quota 429 oder HTTP 202 dauerhaft. Sonstige Blocked-Tools bleiben erhalten.")
         with b4:
             run_unblock = st.button("🔓 Blocked lösen", key="ki_top_btn_unblock", disabled=not is_admin, use_container_width=True, help="Wendet Rules an, prüft searx.space-Instanzen & testet Blocked-Tools live.")
         exclude_previews = st.checkbox(

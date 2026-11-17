@@ -50,11 +50,10 @@ def render_tools_tab(
     resolved = tools if tools is not None else brain.list_tools()
     rows = [
         {
-            "Aktiv": "✅" if t.enabled else "⛔",
             "Name": t.name,
             "ID": t.id,
             "Kategorie": t.category.value,
-            "Status": format_probe_badge(t.last_status),
+            "Status": format_probe_badge(t.last_status, enabled=t.enabled),
             "Latenz (ms)": t.last_latency_ms,
             "Quality": t.quality_score,
             "Reliability": t.reliability_score,

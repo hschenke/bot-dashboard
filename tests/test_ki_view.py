@@ -51,21 +51,23 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
     btn_labels = [b.label for b in at.button]
     assert "🔎 Search for New" in btn_labels
     assert "🚀 Testlauf & Optimizing" in btn_labels
-    assert "🧹 Clear Errors" in btn_labels
+    assert "🧹 Clean Errors" in btn_labels
     assert "🔓 Blocked lösen" in btn_labels
     assert "🔒 Secret sicher speichern / komplett ersetzen" in btn_labels
 
-    top_order = ["🔎 Search for New", "🚀 Testlauf & Optimizing", "🧹 Clear Errors", "🔓 Blocked lösen"]
+    top_order = ["🔎 Search for New", "🚀 Testlauf & Optimizing", "🧹 Clean Errors", "🔓 Blocked lösen"]
     assert [btn_labels.index(lbl) for lbl in top_order] == sorted(btn_labels.index(lbl) for lbl in top_order)
     for top_lbl in top_order:
         top_btn = next(b for b in at.button if b.label == top_lbl)
         assert top_btn.proto.type == "secondary"
 
-    # Herkunft-Spalte entfernt in KI-Modelle & Websearch/Tools + Brave/Tavily/Serper Missing Keys + SearXNG sichtbar
+    # Herkunft- & Aktiv-Spalte entfernt in KI-Modelle & Websearch/Tools + Brave/Tavily/Serper Missing Keys + SearXNG sichtbar
     models_df = at.tabs[1].dataframe[0].value
     tools_df = at.tabs[2].dataframe[0].value
     assert "Herkunft" not in models_df.columns
     assert "Herkunft" not in tools_df.columns
+    assert "Aktiv" not in models_df.columns
+    assert "Aktiv" not in tools_df.columns
     assert "searxng_public" in list(tools_df["ID"])
     assert "🔑 Missing Key: BRAVE_SEARCH_API_KEY" in btn_labels
     assert "🔑 Missing Key: TAVILY_API_KEY" in btn_labels
@@ -385,7 +387,11 @@ def test_ki_view_missing_key_preserves_tools_tab_and_renders_preview_purge(
 
 def test_ki_view_ddg_202_unblock_feedback_and_clear_errors_overlay(tmp_path: Path) -> None:
     from ki_brain import ProbeStatus, UnblockSummary
+    from src.ui.views.ki_sequences_tab import format_probe_badge
     from src.ui.views.ki_task_overlay import format_unblock_feedback
+
+    assert format_probe_badge(ProbeStatus.OK, enabled=False) == "⛔ Disabled"
+    assert format_probe_badge(ProbeStatus.OK, enabled=True) == "🟢 OK"
 
     # 1. Formatierung bei DuckDuckGo HTTP 202 bleibt vollständig (ohne Abschneiden mitten in '.com') + liefert Handlungsempfehlung
     sum_202 = UnblockSummary(
@@ -404,16 +410,22 @@ def test_ki_view_ddg_202_unblock_feedback_and_clear_errors_overlay(tmp_path: Pat
     assert "html.duckduckgo.com)" in msg
     assert "TAVILY_API_KEY" in msg and "searxng_public" in msg
 
-    # 2. Clear Errors läuft mit Foreground-Overlay außerhalb von st.columns und dokumentiert [Error] / [Quota 429]
+    # 2. Clean Errors läuft mit Foreground-Overlay außerhalb von st.columns und entfernt Error, 429 & HTTP 202
     repo = create_brain_repository(sqlite_path=tmp_path / "clean_ui.db")
     brain = KIWebsearchBrain(repo)
     gem = brain.get_model("gemini-3.6-flash")
     meteo = brain.get_tool("open_meteo")
+    ddg_202 = brain.get_tool("duckduckgo_lite")
     ddg = brain.get_tool("duckduckgo_html")
-    assert gem and meteo and ddg
+    assert gem and meteo and ddg_202 and ddg
     brain.add_or_update_model(gem.model_copy(update={"last_status": ProbeStatus.ERROR}))
     brain.add_or_update_tool(meteo.model_copy(update={"last_status": ProbeStatus.ERROR}))
-    brain.add_or_update_tool(ddg.model_copy(update={"last_status": ProbeStatus.BLOCKED}))
+    brain.add_or_update_tool(
+        ddg_202.model_copy(
+            update={"last_status": ProbeStatus.BLOCKED, "last_error": "HTTP 202 (Anti-Bot-Challenge / Leerantwort auf lite.duckduckgo.com)"}
+        )
+    )
+    brain.add_or_update_tool(ddg.model_copy(update={"last_status": ProbeStatus.BLOCKED, "last_error": "0 Treffer (kein 202)"}))
 
     col_depth = {"current": 0}
     spinner_depths: list[int] = []
@@ -442,7 +454,7 @@ def test_ki_view_ddg_202_unblock_feedback_and_clear_errors_overlay(tmp_path: Pat
         patch("streamlit.session_state", session_state),
         patch("streamlit.columns", side_effect=lambda spec, **kw: [_TrackedCol() for _ in range(spec if isinstance(spec, int) else len(spec))]),
         patch("streamlit.spinner", return_value=_TrackedSpinner()),
-        patch("streamlit.button", side_effect=lambda label, **kw: "Clear Errors" in label),
+        patch("streamlit.button", side_effect=lambda label, **kw: "Clean Errors" in label),
         patch("streamlit.rerun", side_effect=_RerunCalled),
         pytest.raises(_RerunCalled),
     ):
@@ -450,12 +462,15 @@ def test_ki_view_ddg_202_unblock_feedback_and_clear_errors_overlay(tmp_path: Pat
 
     assert spinner_depths == [0]
     fb_msg = session_state["ki_brain_feedback"]["message"]
+    assert "Clean Errors:" in fb_msg
     assert "gemini-3.6-flash [Error]" in fb_msg
     assert "open_meteo [Error]" in fb_msg
+    assert "duckduckgo_lite [HTTP 202]" in fb_msg
 
     reopened = KIWebsearchBrain(create_brain_repository(sqlite_path=tmp_path / "clean_ui.db"))
     try:
         assert reopened.get_tool("duckduckgo_html") is not None
+        assert reopened.get_tool("duckduckgo_lite") is None
         assert reopened.get_model("gemini-3.6-flash") is None
         assert reopened.get_tool("open_meteo") is None
     finally:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeVar
@@ -56,6 +57,13 @@ _DEFAULT_SECRET_NAMES: tuple[str, ...] = (
     "SERPER_API_KEY",
     "BROWSERBASE_API_KEY",
 )
+_HTTP_202_RE = re.compile(r"(?:(?:http|status)\s*202\b|\b202\s*\(anti-bot)", re.IGNORECASE)
+
+
+def _should_clean_item(status: ProbeStatus, last_error: str, bad: set[ProbeStatus], include_http_202: bool) -> bool:
+    if status in bad:
+        return True
+    return include_http_202 and status == ProbeStatus.BLOCKED and bool(_HTTP_202_RE.search(last_error or ""))
 
 
 class KIWebsearchBrain:
@@ -200,18 +208,20 @@ class KIWebsearchBrain:
             ProbeStatus.ERROR,
             ProbeStatus.QUOTA_LIMITED,
         ),
+        *,
+        include_http_202: bool = True,
     ) -> tuple[list[tuple[str, ProbeStatus]], list[tuple[str, ProbeStatus]]]:
-        """Entfernt Modelle & Tools mit `Error` oder `Quota 429` dauerhaft inkl. Status-Protokoll; `Blocked` bleibt erhalten."""
+        """Entfernt Modelle & Tools mit `Error`, `Quota 429` oder `HTTP 202` dauerhaft; übrige `Blocked` bleiben erhalten."""
         bad = set(statuses)
         removed_models = [
             (m.id, m.last_status)
             for m in self._repo.list_models()
-            if m.last_status in bad and self._repo.delete_model(m.id)
+            if _should_clean_item(m.last_status, m.last_error, bad, include_http_202) and self._repo.delete_model(m.id)
         ]
         removed_tools = [
             (t.id, t.last_status)
             for t in self._repo.list_tools()
-            if t.last_status in bad and self._repo.delete_tool(t.id)
+            if _should_clean_item(t.last_status, t.last_error, bad, include_http_202) and self._repo.delete_tool(t.id)
         ]
         if removed_models or removed_tools:
             rem_m_ids = [mid for mid, _ in removed_models]
@@ -234,9 +244,11 @@ class KIWebsearchBrain:
             ProbeStatus.ERROR,
             ProbeStatus.QUOTA_LIMITED,
         ),
+        *,
+        include_http_202: bool = True,
     ) -> tuple[list[str], list[str]]:
-        """Entfernt Modelle & Tools mit `Error` oder `Quota 429` dauerhaft; `Blocked` bleibt zur Analyse erhalten."""
-        rem_m, rem_t = self.cleanup_unhealthy_items_with_status(statuses=statuses)
+        """Entfernt Modelle & Tools mit `Error`, `Quota 429` oder `HTTP 202` dauerhaft; übrige `Blocked` bleiben erhalten."""
+        rem_m, rem_t = self.cleanup_unhealthy_items_with_status(statuses=statuses, include_http_202=include_http_202)
         return [mid for mid, _ in rem_m], [tid for tid, _ in rem_t]
 
     def remove_preview_models(self) -> list[str]:

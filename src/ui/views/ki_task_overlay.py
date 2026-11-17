@@ -105,14 +105,21 @@ def format_unblock_feedback(summary: UnblockSummary) -> tuple[str, str]:
 
 
 def format_cleanup_message(brain: KIWebsearchBrain) -> tuple[str, str]:
-    """Führt `Clear Errors` aus und dokumentiert exakt, ob `Error` oder `Quota 429` vorlag."""
+    """Führt `Clean Errors` aus und dokumentiert exakt, ob `Error`, `Quota 429` oder `HTTP 202` vorlag."""
     rem_m, rem_t = brain.cleanup_unhealthy_items_with_status()
     if not rem_m and not rem_t:
-        return "info", "Keine Error- oder Quota-429-Elemente zum Entfernen gefunden (Blocked-Tools bleiben erhalten)."
-    lbl = lambda sv: "Quota 429" if sv == ProbeStatus.QUOTA_LIMITED else "Error"  # noqa: E731
-    m_txt = ", ".join(f"{mid} [{lbl(sv)}]" for mid, sv in rem_m) or "–"
-    t_txt = ", ".join(f"{tid} [{lbl(sv)}]" for tid, sv in rem_t) or "–"
+        return "info", "Keine Error-, Quota-429- oder HTTP-202-Elemente zum Entfernen gefunden (sonstige Blocked-Tools bleiben erhalten)."
+
+    def _lbl(status: ProbeStatus) -> str:
+        if status == ProbeStatus.QUOTA_LIMITED:
+            return "Quota 429"
+        if status == ProbeStatus.BLOCKED:
+            return "HTTP 202"
+        return "Error"
+
+    m_txt = ", ".join(f"{mid} [{_lbl(sv)}]" for mid, sv in rem_m) or "–"
+    t_txt = ", ".join(f"{tid} [{_lbl(sv)}]" for tid, sv in rem_t) or "–"
     return (
         "success",
-        f"Clear Errors: {len(rem_m)} Modelle ({m_txt}) & {len(rem_t)} Tools ({t_txt}) mit Status Error/429 entfernt (Blocked erhalten).",
+        f"Clean Errors: {len(rem_m)} Modelle ({m_txt}) & {len(rem_t)} Tools ({t_txt}) mit Status Error/429/202 entfernt (übrige Blocked erhalten).",
     )

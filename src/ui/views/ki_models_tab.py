@@ -36,12 +36,11 @@ def render_models_tab(
     )
     rows = [
         {
-            "Aktiv": "✅" if m.enabled else "⛔",
             "Name": m.name,
             "ID": m.id,
             "Provider": m.provider.value,
             "Tier": m.tier_hint.value.capitalize(),
-            "Status": format_probe_badge(m.last_status),
+            "Status": format_probe_badge(m.last_status, enabled=m.enabled),
             "Latenz (ms)": m.last_latency_ms,
             "Score": m.quality_score,
             "Key-Env": m.api_key_env or "–",

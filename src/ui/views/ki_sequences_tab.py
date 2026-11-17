@@ -33,8 +33,10 @@ _TIER_TITLES: dict[BrainTier, tuple[str, str]] = {
 }
 
 
-def format_probe_badge(status: ProbeStatus) -> str:
-    """Liefert kurzes englisches Status-Badge für Benchmark-Einträge."""
+def format_probe_badge(status: ProbeStatus, *, enabled: bool = True) -> str:
+    """Liefert kurzes englisches Status-Badge für Modelle, Tools & Benchmark-Einträge."""
+    if not enabled:
+        return "⛔ Disabled"
     return _STATUS_BADGES.get(status, f"⚪ {status.value}")
 
 

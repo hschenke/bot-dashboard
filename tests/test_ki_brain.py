@@ -394,16 +394,22 @@ def test_cleanup_unhealthy_items_and_write_only_secrets_vault(
     repo = create_brain_repository(sqlite_path=db_file)
     brain = KIWebsearchBrain(repo, BrainSecrets())
 
-    # 1. Modelle & Tools auf Error / Quota 429 / Blocked / Missing Key setzen und bereinigen
+    # 1. Modelle & Tools auf Error / Quota 429 / HTTP 202 / sonstige Blocked / Missing Key setzen und bereinigen
     m_err = brain.get_model("gemini-3.6-flash")
     t_q429 = brain.get_tool("gemini_google_search")
+    t_202 = brain.get_tool("duckduckgo_lite")
     t_blocked = brain.get_tool("duckduckgo_html")
     t_missing = brain.get_tool("browserbase_fetch")
-    assert m_err is not None and t_q429 is not None and t_blocked is not None and t_missing is not None
+    assert m_err is not None and t_q429 is not None and t_202 is not None and t_blocked is not None and t_missing is not None
 
     brain.add_or_update_model(m_err.model_copy(update={"last_status": ProbeStatus.ERROR}))
     brain.add_or_update_tool(t_q429.model_copy(update={"last_status": ProbeStatus.QUOTA_LIMITED}))
-    brain.add_or_update_tool(t_blocked.model_copy(update={"last_status": ProbeStatus.BLOCKED}))
+    brain.add_or_update_tool(
+        t_202.model_copy(
+            update={"last_status": ProbeStatus.BLOCKED, "last_error": "HTTP 202 (Anti-Bot-Challenge / Leerantwort auf lite.duckduckgo.com)"}
+        )
+    )
+    brain.add_or_update_tool(t_blocked.model_copy(update={"last_status": ProbeStatus.BLOCKED, "last_error": "0 Treffer (kein 202)"}))
     brain.add_or_update_tool(t_missing.model_copy(update={"last_status": ProbeStatus.AUTH_MISSING}))
 
     repo.save_benchmark_run(
@@ -431,10 +437,11 @@ def test_cleanup_unhealthy_items_and_write_only_secrets_vault(
 
     rem_models, rem_tools = brain.cleanup_unhealthy_items()
     assert rem_models == ["gemini-3.6-flash"]
-    assert rem_tools == ["gemini_google_search"]
+    assert set(rem_tools) == {"duckduckgo_lite", "gemini_google_search"}
     assert brain.get_model("gemini-3.6-flash") is None
+    assert brain.get_tool("duckduckgo_lite") is None
     assert brain.get_tool("gemini_google_search") is None
-    # Blocked-Tools und Missing-Key-Einträge MÜSSEN zur Analyse/Key-Eintragung erhalten bleiben!
+    # Sonstige Blocked-Tools (ohne HTTP 202) und Missing-Key-Einträge bleiben erhalten!
     kept_blocked = brain.get_tool("duckduckgo_html")
     assert kept_blocked is not None and kept_blocked.last_status == ProbeStatus.BLOCKED
     assert brain.get_tool("browserbase_fetch") is not None
@@ -442,8 +449,10 @@ def test_cleanup_unhealthy_items_and_write_only_secrets_vault(
     # Nach Cleanup darf auto_sync bereinigte Items nicht wieder aufnehmen
     sync_after_clean = brain.auto_sync()
     assert brain.get_model("gemini-3.6-flash") is None
+    assert brain.get_tool("duckduckgo_lite") is None
     assert brain.get_tool("gemini_google_search") is None
     assert "gemini-3.6-flash" in sync_after_clean.skipped_excluded
+    assert "duckduckgo_lite" in sync_after_clean.skipped_excluded
     assert "gemini_google_search" in sync_after_clean.skipped_excluded
 
     # 2. Write-Only Secret eintragen + sofortigen Direkt-Test ausführen
