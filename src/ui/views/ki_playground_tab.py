@@ -14,6 +14,8 @@ from ki_brain import (
     KIWebsearchBrain,
 )
 
+from src.ui.views.ki_task_overlay import invalidate_ki_ui_cache
+
 
 def _set_feedback(level: str, message: str) -> None:
     st.session_state["ki_brain_feedback"] = {"level": level, "message": message}
@@ -64,6 +66,7 @@ def _render_snapshot_controls(
         if st.button("📥 Snapshot importieren", key="ki_import_json_btn"):
             try:
                 brain.import_snapshot_json(raw_import)
+                invalidate_ki_ui_cache()
                 _set_feedback("success", "Brain-Snapshot erfolgreich importiert.")
             except (BrainError, ValueError) as exc:
                 _set_feedback("error", f"Import fehlgeschlagen: {exc}")
@@ -74,6 +77,7 @@ def _render_snapshot_controls(
         help="Setzt Modelle, Tools, ausgeschlossene Einträge und Tier-Sequenzen auf den Werkskatalog aus Research-Bot & Alert-Bot zurück. Gespeicherte API-Keys im Tresor und Benchmark-Logs bleiben erhalten.",
     ):
         brain.reset_defaults()
+        invalidate_ki_ui_cache()
         _set_feedback("success", "Standardmodelle, Tools & Startsequenzen wiederhergestellt.")
         st.rerun()
 

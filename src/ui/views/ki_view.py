@@ -18,6 +18,8 @@ from src.ui.views.ki_sequences_tab import render_sequences_tab
 from src.ui.views.ki_task_overlay import (
     format_cleanup_message,
     format_unblock_feedback,
+    invalidate_ki_ui_cache,
+    load_cached_ui_state,
     render_instant_overlay_bridge,
     run_with_task_overlay,
 )
@@ -31,8 +33,9 @@ KI_TAB_LABELS: tuple[str, ...] = (KI_TAB_SEQ, KI_TAB_MODELS, KI_TAB_TOOLS, KI_TA
 
 
 def _open_ki_tabs() -> tuple[object, ...]:
+    """Rendert Tabs mit stabiler ID ohne `on_change="rerun"` (0 ms Client-Wechsel, Tab bleibt erhalten)."""
     try:
-        return tuple(st.tabs(list(KI_TAB_LABELS), key="ki_view_tabs", on_change="rerun"))
+        return tuple(st.tabs(list(KI_TAB_LABELS), key="ki_view_tabs"))
     except TypeError:
         return tuple(st.tabs(list(KI_TAB_LABELS)))
 
@@ -56,28 +59,30 @@ def _handle_top_actions(
     if run_bench:
         try:
             report = run_with_task_overlay(
-                "🚀 Testlauf & Optimizing",
+                "🚀 Benchmark & Optimize",
                 "Teste aktive Tools & KI-Modelle live und optimiere Fast / Standard / Deep...",
                 lambda cb: brain.run_benchmark(on_progress=cb),
             )
             fast_top = " → ".join(report.sequences[BrainTier.FAST.value].search_tool_sequence[:3])
-            _flash("success", f"Testlauf & Optimizing `{report.run_id}` abgeschlossen: {report.healthy_tools_count} Tools & {report.healthy_models_count} Modelle OK. Fast-Top: `{fast_top or '–'}`")
+            _flash("success", f"Benchmark & Optimize `{report.run_id}` abgeschlossen: {report.healthy_tools_count} Tools & {report.healthy_models_count} Modelle OK. Fast-Top: `{fast_top or '–'}`")
         except BrainError as exc:
-            _flash("error", f"Testlauf & Optimizing fehlgeschlagen: {exc}")
+            _flash("error", f"Benchmark & Optimize fehlgeschlagen: {exc}")
+        invalidate_ki_ui_cache()
         st.rerun()
     if run_sync:
         try:
             s = run_with_task_overlay(
-                "🔎 Search for New",
+                "🔎 Discover",
                 "Suche neue Gemini-/Groq-/OpenRouter-Modelle & searx.space-Instanzen...",
                 lambda cb: brain.auto_sync(verify_discovered=True, exclude_previews=exclude_previews, on_progress=cb),
             )
             skipped = len(s.skipped_excluded) + len(s.skipped_unhealthy)
             notes = [n for n in (f"{skipped} defekte/ausgeschlossene" if skipped else "", f"{len(s.skipped_previews)} Preview-Modelle" if s.skipped_previews else "") if n]
             note_txt = f" ({', '.join(notes)} übersprungen)" if notes else ""
-            _flash("success" if not s.warnings else "warning", f"Search for New fertig ({', '.join(s.checked_sources)}): +{len(s.added_models)} Modelle, +{len(s.added_tools)} Tools{note_txt}.")
+            _flash("success" if not s.warnings else "warning", f"Discover fertig ({', '.join(s.checked_sources)}): +{len(s.added_models)} Modelle, +{len(s.added_tools)} Tools{note_txt}.")
         except BrainError as exc:
-            _flash("error", f"Search for New fehlgeschlagen: {exc}")
+            _flash("error", f"Discover fehlgeschlagen: {exc}")
+        invalidate_ki_ui_cache()
         st.rerun()
     if run_clean:
         try:
@@ -86,20 +91,22 @@ def _handle_top_actions(
                 res = format_cleanup_message(brain)
                 cb(1.0, "Bereinigung abgeschlossen.")
                 return res
-            _flash(*run_with_task_overlay("🧹 Clean Errors", "Prüfe Modelle & Tools auf Status Error, Quota 429 oder HTTP 202...", _clean_task))
+            _flash(*run_with_task_overlay("🧹 Prune Failing", "Prüfe Modelle & Tools auf Status Error, Quota 429 oder HTTP 202...", _clean_task))
         except BrainError as exc:
-            _flash("error", f"Clean Errors fehlgeschlagen: {exc}")
+            _flash("error", f"Prune Failing fehlgeschlagen: {exc}")
+        invalidate_ki_ui_cache()
         st.rerun()
     if run_unblock:
         try:
             summary = run_with_task_overlay(
-                "🔓 Blocked lösen",
+                "🔓 Unblock Tools",
                 "Wende Rules an, prüfe searx.space-Instanzen & teste Blocked-Tools live...",
                 lambda cb: brain.resolve_blocked_tools(on_progress=cb),
             )
             _flash(*format_unblock_feedback(summary))
         except BrainError as exc:
-            _flash("error", f"Blocked lösen fehlgeschlagen: {exc}")
+            _flash("error", f"Unblock Tools fehlgeschlagen: {exc}")
+        invalidate_ki_ui_cache()
         st.rerun()
 
 
@@ -111,7 +118,7 @@ def render_ki_view(settings: AppSettings, role: AuthRole = AuthRole.ADMIN) -> No
     is_admin = role == AuthRole.ADMIN
     brain = create_dashboard_brain(settings)
     try:
-        ui_state, secret_statuses = brain.load_ui_state()
+        ui_state, secret_statuses = load_cached_ui_state(brain)
         models, tools, seqs, latest_bench = ui_state.models, ui_state.tools, ui_state.sequences, ui_state.latest_benchmark
         with st.container(key="ki_kpi_row"):
             k1, k2, k3, k4 = st.columns(4)
@@ -127,15 +134,15 @@ def render_ki_view(settings: AppSettings, role: AuthRole = AuthRole.ADMIN) -> No
 
         b1, b2, b3, b4 = st.columns(4, vertical_alignment="center")
         with b1:
-            run_sync = st.button("🔎 Search for New", key="ki_top_btn_sync", disabled=not is_admin, use_container_width=True, help="Sucht neue kostenfreie Modelle (Gemini, Groq, OpenRouter) & searx.space-Instanzen.")
+            run_sync = st.button("🔎 Discover", key="ki_top_btn_sync", disabled=not is_admin, use_container_width=True, help="Sucht neue kostenfreie Modelle (Gemini, Groq, OpenRouter) & searx.space-Instanzen.")
         with b2:
-            run_bench = st.button("🚀 Testlauf & Optimizing", key="ki_top_btn_bench", disabled=not is_admin, use_container_width=True, help="Testet alle aktivierten Modelle & Tools live und optimiert Fast, Standard & Deep.")
+            run_bench = st.button("🚀 Benchmark & Optimize", key="ki_top_btn_bench", disabled=not is_admin, use_container_width=True, help="Testet alle aktivierten Modelle & Tools live und optimiert Fast, Standard & Deep.")
         with b3:
-            run_clean = st.button("🧹 Clean Errors", key="ki_top_btn_clean", disabled=not is_admin, use_container_width=True, help="Entfernt Modelle/Tools mit Status Error, Quota 429 oder HTTP 202 dauerhaft. Sonstige Blocked-Tools bleiben erhalten.")
+            run_clean = st.button("🧹 Prune Failing", key="ki_top_btn_clean", disabled=not is_admin, use_container_width=True, help="Entfernt Modelle/Tools mit Status Error, Quota 429 oder HTTP 202 dauerhaft. Sonstige Blocked-Tools bleiben erhalten.")
         with b4:
-            run_unblock = st.button("🔓 Blocked lösen", key="ki_top_btn_unblock", disabled=not is_admin, use_container_width=True, help="Wendet Rules an, prüft searx.space-Instanzen & testet Blocked-Tools live.")
+            run_unblock = st.button("🔓 Unblock Tools", key="ki_top_btn_unblock", disabled=not is_admin, use_container_width=True, help="Wendet Rules an, prüft searx.space-Instanzen & testet Blocked-Tools live.")
         exclude_previews = st.checkbox(
-            "Preview- & Experimental-Modelle bei 'Search for New' ausschließen",
+            "Preview- & Experimental-Modelle bei 'Discover' ausschließen",
             value=True, key="ki_exclude_previews", disabled=not is_admin,
             help="Ignoriert ältere `-preview`/`-exp` Gemini-Modelle (Deep Research Agent bleibt erhalten).",
         )

@@ -7,6 +7,7 @@ from ki_brain import BrainError, KIWebsearchBrain, SecretStatusEntry
 
 from src.ui.formatters import format_iso_timestamp
 from src.ui.views.ki_secret_dialog import queue_secret_dialog_on_click
+from src.ui.views.ki_task_overlay import invalidate_ki_ui_cache
 
 
 def _set_feedback(level: str, message: str) -> None:
@@ -94,6 +95,7 @@ def render_secrets_manager_expander(
         if save_clicked:
             try:
                 brain.set_secret(target_env, new_val)
+                invalidate_ki_ui_cache()
                 _set_feedback("success", f"Secret `{target_env}` verschlüsselt gespeichert (Write-Only). Missing-Key-Einträge wurden freigeschaltet.")
             except BrainError as exc:
                 _set_feedback("error", f"Secret konnte nicht gespeichert werden: {exc}")
@@ -102,6 +104,7 @@ def render_secrets_manager_expander(
         if del_clicked:
             try:
                 removed = brain.delete_secret(target_env)
+                invalidate_ki_ui_cache()
                 msg = f"Secret `{target_env}` aus dem Brain-Vault entfernt." if removed else f"Kein Vault-Eintrag für `{target_env}` vorhanden."
                 _set_feedback("info", msg)
             except BrainError as exc:

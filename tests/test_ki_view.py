@@ -49,13 +49,17 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
     assert metric_labels == ["KI-Modelle", "Websearch & Tools", "Tier-Profile", "Letzter Testlauf"]
 
     btn_labels = [b.label for b in at.button]
-    assert "🔎 Search for New" in btn_labels
-    assert "🚀 Testlauf & Optimizing" in btn_labels
-    assert "🧹 Clean Errors" in btn_labels
-    assert "🔓 Blocked lösen" in btn_labels
+    assert "🔎 Discover" in btn_labels
+    assert "🚀 Benchmark & Optimize" in btn_labels
+    assert "🧹 Prune Failing" in btn_labels
+    assert "🔓 Unblock Tools" in btn_labels
+    assert "🧹 Clean Previews (0)" in btn_labels
     assert "🔒 Secret sicher speichern / komplett ersetzen" in btn_labels
 
-    top_order = ["🔎 Search for New", "🚀 Testlauf & Optimizing", "🧹 Clean Errors", "🔓 Blocked lösen"]
+    clean_prev_btn = next(b for b in at.tabs[1].button if "Clean Previews" in b.label)
+    assert clean_prev_btn.disabled is True
+
+    top_order = ["🔎 Discover", "🚀 Benchmark & Optimize", "🧹 Prune Failing", "🔓 Unblock Tools"]
     assert [btn_labels.index(lbl) for lbl in top_order] == sorted(btn_labels.index(lbl) for lbl in top_order)
     for top_lbl in top_order:
         top_btn = next(b for b in at.button if b.label == top_lbl)
@@ -74,12 +78,17 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
     assert "🔑 Missing Key: SERPER_API_KEY" in btn_labels
     assert "🔑 Missing Key: REDDIT_CLIENT_ID" not in btn_labels
 
+    # Tabs nutzen stabile client-seitige IDs ohne on_change='rerun' (kein Server-Reload beim Tab-Wechsel)
+    ki_tc = at.get("tab_container")[0]
+    assert ki_tc.proto.tab_container.id == ""
+    assert "ki_view_tabs" in ki_tc.proto.id
+
     # Bild 2: Manuelles Modell-/Tool-Formular standardmäßig eingeklappt (expanded=False)
     model_exp = next(e for e in at.tabs[1].expander if "Neues Modell" in e.label)
     tool_exp = next(e for e in at.tabs[2].expander if "Neues Tool" in e.label)
     assert model_exp.proto.expanded is False
     assert tool_exp.proto.expanded is False
-    assert any(t.label == "Testlauf-Query Rule (optional)" for t in at.tabs[2].text_input)
+    assert any(t.label == "Probe Query Rule (optional)" for t in at.tabs[2].text_input)
     assert any(t.label == "JSON Snippet-Feld (optional)" for t in at.tabs[2].text_input)
 
     # Bild 3: Export, Import & Standardkatalog liegt im Live-Test-Tab (tabs[3]), nicht im Tools-Tab (tabs[2])
@@ -146,7 +155,7 @@ def test_ki_view_benchmark_button_runs_spinner_outside_columns(tmp_path: Path) -
         patch("streamlit.session_state", session_state),
         patch("streamlit.columns", side_effect=lambda spec, **kw: [_TrackedCol() for _ in range(spec if isinstance(spec, int) else len(spec))]),
         patch("streamlit.spinner", return_value=_TrackedSpinner()),
-        patch("streamlit.button", side_effect=lambda label, **kw: "Testlauf & Optimizing" in label),
+        patch("streamlit.button", side_effect=lambda label, **kw: "Benchmark & Optimize" in label),
         patch("streamlit.rerun", side_effect=_RerunCalled),
         pytest.raises(_RerunCalled),
     ):
@@ -323,7 +332,7 @@ def test_ki_view_unblock_button_runs_spinner_outside_columns(tmp_path: Path) -> 
         patch("streamlit.session_state", session_state),
         patch("streamlit.columns", side_effect=lambda spec, **kw: [_TrackedCol() for _ in range(spec if isinstance(spec, int) else len(spec))]),
         patch("streamlit.spinner", return_value=_TrackedSpinner()),
-        patch("streamlit.button", side_effect=lambda label, **kw: "Blocked lösen" in label),
+        patch("streamlit.button", side_effect=lambda label, **kw: "Unblock Tools" in label),
         patch("streamlit.rerun", side_effect=_RerunCalled),
         pytest.raises(_RerunCalled),
     ):
@@ -339,8 +348,11 @@ def test_ki_view_unblock_button_runs_spinner_outside_columns(tmp_path: Path) -> 
 def test_ki_view_missing_key_preserves_tools_tab_and_renders_preview_purge(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ki_brain import AIModelSpec, BrainTier, ModelProvider
+    from ki_brain import AIModelSpec, BrainTier, ModelProvider, is_preview_or_experimental_model
     from streamlit.testing.v1 import AppTest
+
+    assert is_preview_or_experimental_model("custom-pro", "Gemini Pro Preview 03-25") is True
+    assert is_preview_or_experimental_model("deep-research-pro-preview-12-2025", "Deep Research") is False
 
     db_file = tmp_path / "ui_tab_lock.db"
     monkeypatch.setenv("BRAIN_SQLITE_PATH", str(db_file))
@@ -370,22 +382,29 @@ def test_ki_view_missing_key_preserves_tools_tab_and_renders_preview_purge(
 
     at = AppTest.from_function(_app).run()
     assert not at.exception
+    tab_id_before = at.get("tab_container")[0].proto.id
 
-    # 1. Preview-Bereinigungsbutton in Tab 1 (🧩 KI-Modelle) entfernt veraltetes Preview-Modell
-    purge_btn = next(b for b in at.tabs[1].button if "Preview-Modelle entfernen" in b.label)
+    # 1. Clean Previews (1) in Tab 1 (🧩 KI-Modelle) entfernt Preview-Modell & bleibt als Clean Previews (0) sichtbar
+    purge_btn = next(b for b in at.tabs[1].button if b.label == "🧹 Clean Previews (1)")
+    assert purge_btn.disabled is False
     at = purge_btn.click().run()
     assert not at.exception
     assert "gemini-legacy-exp" not in list(at.tabs[1].dataframe[0].value["ID"])
+    clean_zero_btn = next(b for b in at.tabs[1].button if b.label == "🧹 Clean Previews (0)")
+    assert clean_zero_btn.disabled is True
 
-    # 2. Missing Key Button im Tools-Tab behält Tab-Fokus auf 🔧 Websearch & Tools beim Öffnen des Modals
+    # 2. Missing Key Button im Tools-Tab öffnet Modal sofort und lässt Tab-Block-ID stabil (Client behält Tab)
     tavily_tool_btn = next(b for b in at.tabs[2].button if b.label == "🔑 Missing Key: TAVILY_API_KEY")
     at = tavily_tool_btn.click().run()
     assert not at.exception
-    assert at.session_state["ki_view_tabs"] == "🔧 Websearch & Tools"
+    tab_container_after = at.get("tab_container")[0]
+    assert tab_container_after.proto.id == tab_id_before
+    assert tab_container_after.proto.tab_container.id == ""
+    assert at.session_state["ki_active_dialog_env"] == "TAVILY_API_KEY"
     assert any("TAVILY_API_KEY" in t.label for t in at.text_input)
 
 
-def test_ki_view_ddg_202_unblock_feedback_and_clear_errors_overlay(tmp_path: Path) -> None:
+def test_ki_view_ddg_202_unblock_feedback_and_prune_failing_overlay(tmp_path: Path) -> None:
     from ki_brain import ProbeStatus, UnblockSummary
     from src.ui.views.ki_sequences_tab import format_probe_badge
     from src.ui.views.ki_task_overlay import format_unblock_feedback
@@ -410,7 +429,7 @@ def test_ki_view_ddg_202_unblock_feedback_and_clear_errors_overlay(tmp_path: Pat
     assert "html.duckduckgo.com)" in msg
     assert "TAVILY_API_KEY" in msg and "searxng_public" in msg
 
-    # 2. Clean Errors läuft mit Foreground-Overlay außerhalb von st.columns und entfernt Error, 429 & HTTP 202
+    # 2. Prune Failing läuft mit Foreground-Overlay außerhalb von st.columns und entfernt Error, 429 & HTTP 202
     repo = create_brain_repository(sqlite_path=tmp_path / "clean_ui.db")
     brain = KIWebsearchBrain(repo)
     gem = brain.get_model("gemini-3.6-flash")
@@ -454,7 +473,7 @@ def test_ki_view_ddg_202_unblock_feedback_and_clear_errors_overlay(tmp_path: Pat
         patch("streamlit.session_state", session_state),
         patch("streamlit.columns", side_effect=lambda spec, **kw: [_TrackedCol() for _ in range(spec if isinstance(spec, int) else len(spec))]),
         patch("streamlit.spinner", return_value=_TrackedSpinner()),
-        patch("streamlit.button", side_effect=lambda label, **kw: "Clean Errors" in label),
+        patch("streamlit.button", side_effect=lambda label, **kw: "Prune Failing" in label),
         patch("streamlit.rerun", side_effect=_RerunCalled),
         pytest.raises(_RerunCalled),
     ):
@@ -462,7 +481,7 @@ def test_ki_view_ddg_202_unblock_feedback_and_clear_errors_overlay(tmp_path: Pat
 
     assert spinner_depths == [0]
     fb_msg = session_state["ki_brain_feedback"]["message"]
-    assert "Clean Errors:" in fb_msg
+    assert "Prune Failing:" in fb_msg
     assert "gemini-3.6-flash [Error]" in fb_msg
     assert "open_meteo [Error]" in fb_msg
     assert "duckduckgo_lite [HTTP 202]" in fb_msg
@@ -475,6 +494,27 @@ def test_ki_view_ddg_202_unblock_feedback_and_clear_errors_overlay(tmp_path: Pat
         assert reopened.get_tool("open_meteo") is None
     finally:
         reopened.close()
+
+
+def test_ki_ui_cache_prevents_redundant_loads_and_invalidates_on_write(tmp_path: Path) -> None:
+    from src.ui.views.ki_task_overlay import invalidate_ki_ui_cache, load_cached_ui_state
+
+    repo = create_brain_repository(sqlite_path=tmp_path / "cache_ui.db")
+    brain = KIWebsearchBrain(repo)
+    orig_load = brain.load_ui_state
+    mock_load = MagicMock(side_effect=orig_load)
+    brain.load_ui_state = mock_load  # type: ignore[method-assign]
+
+    session_state: dict[str, Any] = {}
+    with patch("streamlit.session_state", session_state):
+        load_cached_ui_state(brain)
+        load_cached_ui_state(brain)
+        assert mock_load.call_count == 1
+
+        invalidate_ki_ui_cache()
+        load_cached_ui_state(brain)
+        assert mock_load.call_count == 2
+    brain.close()
 
 
 

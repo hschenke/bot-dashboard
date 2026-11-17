@@ -1,4 +1,4 @@
-"""Automatische Diagnose-, Rule- und Fallback-Engine für `Blocked`-Tools (`🔓 Blocked lösen`)."""
+"""Automatische Diagnose-, Rule- und Fallback-Engine für `Blocked`-Tools (`🔓 Unblock Tools`)."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def resolve_probe_query(tool: ToolSpec, fallback_query: str = DEFAULT_TEST_QUERY
 
 @dataclass(frozen=True)
 class UnblockSummary:
-    """Ergebnis eines automatischen `Blocked lösen`-Durchlaufs."""
+    """Ergebnis eines automatischen `Unblock Tools`-Durchlaufs."""
 
     checked_blocked: list[str] = field(default_factory=list)
     rules_applied: list[str] = field(default_factory=list)
@@ -179,7 +179,7 @@ def resolve_blocked_tools(
         )
 
     if on_progress:
-        on_progress(1.0, "Blocked lösen abgeschlossen.")
+        on_progress(1.0, "Unblock Tools abgeschlossen.")
 
     return UnblockSummary(
         checked_blocked=checked_ids,

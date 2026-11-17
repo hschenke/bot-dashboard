@@ -78,7 +78,11 @@ def render_db_view(snapshots: list[AppFleetSnapshot]) -> None:
     if not snapshots:
         return
 
-    tabs = st.tabs([f"{s.spec.icon} {s.spec.title} DB" for s in snapshots])
+    tab_labels = [f"{s.spec.icon} {s.spec.title} DB" for s in snapshots]
+    try:
+        tabs = st.tabs(tab_labels, key="db_view_tabs")
+    except TypeError:
+        tabs = st.tabs(tab_labels)
     for idx, snap in enumerate(snapshots):
         with tabs[idx]:
             _render_single_bot_db_tab(snap)

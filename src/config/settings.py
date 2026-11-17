@@ -47,17 +47,23 @@ def _lookup_in_mapping(mapping: Any, key: str) -> str | None:
     return None
 
 
-def _read_local_secrets_toml(key: str) -> str | None:
-    """Liest Schlüssel direkt aus .streamlit/secrets.toml (für CLI, Worker & Tests)."""
+def _load_local_secrets_mapping() -> dict[str, Any]:
+    """Liest `.streamlit/secrets.toml` genau einmal als Mapping ein (Performance)."""
     target = PROJECT_ROOT / ".streamlit" / "secrets.toml"
     if not target.is_file():
-        return None
+        return {}
     try:
-        data = tomllib.loads(target.read_text(encoding="utf-8"))
-        return _lookup_in_mapping(data, key)
+        parsed = tomllib.loads(target.read_text(encoding="utf-8"))
+        return parsed if isinstance(parsed, dict) else {}
     except (OSError, tomllib.TOMLDecodeError) as exc:
         logger.debug("Fehler beim Lesen von %s: %s", target, exc)
-        return None
+        return {}
+
+
+def _read_local_secrets_toml(key: str, local_secrets: dict[str, Any] | None = None) -> str | None:
+    """Liest Schlüssel aus vorberechnetem Secrets-Mapping oder direkt aus .streamlit/secrets.toml."""
+    data = local_secrets if local_secrets is not None else _load_local_secrets_mapping()
+    return _lookup_in_mapping(data, key) if data else None
 
 
 def _read_streamlit_secret(key: str) -> str | None:
@@ -72,12 +78,21 @@ def _read_streamlit_secret(key: str) -> str | None:
     return None
 
 
-def get_secret_or_env(key: str, default: str = "") -> str:
+def get_secret_or_env(
+    key: str,
+    default: str = "",
+    *,
+    local_secrets: dict[str, Any] | None = None,
+) -> str:
     """Ermittelt Konfigurationswert priorisiert aus ENV, `st.secrets` & `secrets.toml`."""
     env_val = os.getenv(key)
     if env_val is not None and env_val.strip():
         return env_val.strip()
-    return _read_streamlit_secret(key) or _read_local_secrets_toml(key) or default
+    return (
+        _read_streamlit_secret(key)
+        or _read_local_secrets_toml(key, local_secrets=local_secrets)
+        or default
+    )
 
 
 def _load_yaml_defaults(yaml_path: Path | None = None) -> dict[str, Any]:
@@ -104,8 +119,8 @@ def _is_placeholder(val: str) -> bool:
     )
 
 
-def _clean_secret(key: str) -> str:
-    raw = get_secret_or_env(key)
+def _clean_secret(key: str, local_secrets: dict[str, Any] | None = None) -> str:
+    raw = get_secret_or_env(key, local_secrets=local_secrets)
     return "" if _is_placeholder(raw) else raw.strip()
 
 
@@ -171,11 +186,19 @@ class AppSettings:
         raise KeyError(f"Unbekannte App-ID: {app_id}")
 
 
-def _build_app_spec(app_id: AppId, prefix: str, yaml_apps: dict[str, Any]) -> ManagedAppSpec:
+def _build_app_spec(
+    app_id: AppId,
+    prefix: str,
+    yaml_apps: dict[str, Any],
+    *,
+    local_secrets: dict[str, Any] | None = None,
+) -> ManagedAppSpec:
     """Erstellt `ManagedAppSpec` aus ENV/Secrets mit YAML-Metadaten als Fallback."""
     cfg = yaml_apps.get(app_id.value, {}) if isinstance(yaml_apps.get(app_id.value), dict) else {}
-    turso_url = get_secret_or_env(f"{prefix}_TURSO_URL", str(cfg.get("turso_url", "")))
-    turso_key = get_secret_or_env(f"{prefix}_TURSO_KEY")
+    turso_url = get_secret_or_env(
+        f"{prefix}_TURSO_URL", str(cfg.get("turso_url", "")), local_secrets=local_secrets
+    )
+    turso_key = get_secret_or_env(f"{prefix}_TURSO_KEY", local_secrets=local_secrets)
     sec_wf = cfg.get("secondary_workflows", [])
     secondary = (
         tuple(str(w).strip() for w in sec_wf if str(w).strip())
@@ -194,16 +217,24 @@ def _build_app_spec(app_id: AppId, prefix: str, yaml_apps: dict[str, Any]) -> Ma
         title=str(cfg.get("title", app_id.value)),
         icon=str(cfg.get("icon", "📦")),
         description=str(cfg.get("description", "")),
-        streamlit_url=get_secret_or_env(f"{prefix}_URL", str(cfg.get("streamlit_url", ""))).strip(),
-        github_repo=get_secret_or_env(f"{prefix}_REPO", str(cfg.get("github_repo", ""))).strip(),
+        streamlit_url=get_secret_or_env(
+            f"{prefix}_URL", str(cfg.get("streamlit_url", "")), local_secrets=local_secrets
+        ).strip(),
+        github_repo=get_secret_or_env(
+            f"{prefix}_REPO", str(cfg.get("github_repo", "")), local_secrets=local_secrets
+        ).strip(),
         primary_workflow=get_secret_or_env(
-            f"{prefix}_WORKFLOW", str(cfg.get("primary_workflow", ""))
+            f"{prefix}_WORKFLOW",
+            str(cfg.get("primary_workflow", "")),
+            local_secrets=local_secrets,
         ).strip(),
         secondary_workflows=secondary,
         turso_url="" if _is_placeholder(turso_url) else turso_url.strip(),
         turso_auth_token="" if _is_placeholder(turso_key) else turso_key.strip(),
         local_sqlite_path=get_secret_or_env(
-            f"{prefix}_SQLITE_PATH", str(cfg.get("local_sqlite_path", ""))
+            f"{prefix}_SQLITE_PATH",
+            str(cfg.get("local_sqlite_path", "")),
+            local_secrets=local_secrets,
         ).strip(),
         expected_tables=tables,
     )
@@ -216,33 +247,43 @@ def load_app_settings(
     """Lädt und validiert die Dashboard-Konfiguration ausschließlich aus ENV/Secrets/YAML."""
     data = _load_yaml_defaults(yaml_path)
     apps = data.get("apps", {}) if isinstance(data.get("apps"), dict) else {}
+    local_secrets = _load_local_secrets_mapping()
 
     return AppSettings(
-        gemini_api_key=_clean_secret("GEMINI_API_KEY"),
-        browserbase_api_key=_clean_secret("BROWSERBASE_API_KEY"),
-        browserbase_project_id=get_secret_or_env("BROWSERBASE_PROJECT_ID"),
-        brave_search_api_key=_clean_secret("BRAVE_SEARCH_API_KEY") or _clean_secret("BRAVE_API_KEY"),
-        tavily_api_key=_clean_secret("TAVILY_API_KEY"),
-        serper_api_key=_clean_secret("SERPER_API_KEY"),
-        reddit_client_id=_clean_secret("REDDIT_CLIENT_ID"),
-        reddit_client_secret=_clean_secret("REDDIT_CLIENT_SECRET"),
-        groq_api_key=_clean_secret("GROQ_API_KEY"),
-        openrouter_api_key=_clean_secret("OPENROUTER_API_KEY"),
-        cerebras_api_key=_clean_secret("CEREBRAS_API_KEY"),
-        mistral_api_key=_clean_secret("MISTRAL_API_KEY"),
-        github_token=_clean_secret("GITHUB_TOKEN"),
-        turso_url=get_secret_or_env("TURSO_URL"),
-        turso_auth_token=get_secret_or_env("TURSO_KEY"),
-        sqlite_path=get_secret_or_env("SQLITE_PATH", DEFAULT_SQLITE_REL_PATH),
-        brain_turso_url=get_secret_or_env("BRAIN_TURSO_URL"),
-        brain_turso_auth_token=get_secret_or_env("BRAIN_TURSO_KEY"),
-        brain_sqlite_path=get_secret_or_env("BRAIN_SQLITE_PATH", DEFAULT_BRAIN_SQLITE_REL_PATH),
-        app_password=get_secret_or_env("APP_PASSWORD"),
-        streamlit_app_url=get_secret_or_env("STREAMLIT_APP_URL"),
+        gemini_api_key=_clean_secret("GEMINI_API_KEY", local_secrets),
+        browserbase_api_key=_clean_secret("BROWSERBASE_API_KEY", local_secrets),
+        browserbase_project_id=get_secret_or_env(
+            "BROWSERBASE_PROJECT_ID", local_secrets=local_secrets
+        ),
+        brave_search_api_key=(
+            _clean_secret("BRAVE_SEARCH_API_KEY", local_secrets)
+            or _clean_secret("BRAVE_API_KEY", local_secrets)
+        ),
+        tavily_api_key=_clean_secret("TAVILY_API_KEY", local_secrets),
+        serper_api_key=_clean_secret("SERPER_API_KEY", local_secrets),
+        reddit_client_id=_clean_secret("REDDIT_CLIENT_ID", local_secrets),
+        reddit_client_secret=_clean_secret("REDDIT_CLIENT_SECRET", local_secrets),
+        groq_api_key=_clean_secret("GROQ_API_KEY", local_secrets),
+        openrouter_api_key=_clean_secret("OPENROUTER_API_KEY", local_secrets),
+        cerebras_api_key=_clean_secret("CEREBRAS_API_KEY", local_secrets),
+        mistral_api_key=_clean_secret("MISTRAL_API_KEY", local_secrets),
+        github_token=_clean_secret("GITHUB_TOKEN", local_secrets),
+        turso_url=get_secret_or_env("TURSO_URL", local_secrets=local_secrets),
+        turso_auth_token=get_secret_or_env("TURSO_KEY", local_secrets=local_secrets),
+        sqlite_path=get_secret_or_env(
+            "SQLITE_PATH", DEFAULT_SQLITE_REL_PATH, local_secrets=local_secrets
+        ),
+        brain_turso_url=get_secret_or_env("BRAIN_TURSO_URL", local_secrets=local_secrets),
+        brain_turso_auth_token=get_secret_or_env("BRAIN_TURSO_KEY", local_secrets=local_secrets),
+        brain_sqlite_path=get_secret_or_env(
+            "BRAIN_SQLITE_PATH", DEFAULT_BRAIN_SQLITE_REL_PATH, local_secrets=local_secrets
+        ),
+        app_password=get_secret_or_env("APP_PASSWORD", local_secrets=local_secrets),
+        streamlit_app_url=get_secret_or_env("STREAMLIT_APP_URL", local_secrets=local_secrets),
         default_language=str(data.get("default_language", "de")),
         managed_apps=(
-            _build_app_spec(AppId.NEWS_BOT, "NEWS_BOT", apps),
-            _build_app_spec(AppId.RESEARCH_BOT, "RESEARCH_BOT", apps),
-            _build_app_spec(AppId.ALERT_BOT, "ALERT_BOT", apps),
+            _build_app_spec(AppId.NEWS_BOT, "NEWS_BOT", apps, local_secrets=local_secrets),
+            _build_app_spec(AppId.RESEARCH_BOT, "RESEARCH_BOT", apps, local_secrets=local_secrets),
+            _build_app_spec(AppId.ALERT_BOT, "ALERT_BOT", apps, local_secrets=local_secrets),
         ),
     )

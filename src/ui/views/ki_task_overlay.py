@@ -3,13 +3,53 @@
 from __future__ import annotations
 
 import contextlib
+import time
 from collections.abc import Callable
 from typing import TypeVar
 
 import streamlit as st
-from ki_brain import KIWebsearchBrain, ProbeStatus, UnblockSummary
+from ki_brain import (
+    BrainDashboardState,
+    KIWebsearchBrain,
+    ProbeStatus,
+    SecretStatusEntry,
+    UnblockSummary,
+)
 
 _T = TypeVar("_T")
+_KI_UI_CACHE_KEY = "_ki_ui_state_cache"
+_KI_UI_CACHE_TTL_SECONDS = 20.0
+
+
+def invalidate_ki_ui_cache() -> None:
+    """Verwirft den kurzlebigen UI-State-Cache nach Schreibaktionen oder Seitenwechsel."""
+    st.session_state.pop(_KI_UI_CACHE_KEY, None)
+
+
+def load_cached_ui_state(
+    brain: KIWebsearchBrain,
+) -> tuple[BrainDashboardState, list[SecretStatusEntry]]:
+    """Lädt den gebündelten KI-View-State kurzzeitig aus `session_state`, um Dialog-/Widget-Reruns ohne DB-Latenz zu bedienen."""
+    now = time.monotonic()
+    backend = brain.backend_name
+    cached = st.session_state.get(_KI_UI_CACHE_KEY)
+    if (
+        isinstance(cached, dict)
+        and cached.get("backend") == backend
+        and (now - float(cached.get("ts", 0.0))) < _KI_UI_CACHE_TTL_SECONDS
+        and cached.get("ui_state") is not None
+        and cached.get("secret_statuses") is not None
+    ):
+        return cached["ui_state"], cached["secret_statuses"]
+    ui_state, secret_statuses = brain.load_ui_state()
+    st.session_state[_KI_UI_CACHE_KEY] = {
+        "backend": backend,
+        "ts": now,
+        "ui_state": ui_state,
+        "secret_statuses": secret_statuses,
+    }
+    return ui_state, secret_statuses
+
 
 INSTANT_OVERLAY_HTML = """
 <div id="ki-brain-instant-backdrop">
@@ -73,10 +113,10 @@ def run_with_task_overlay(
 
 
 def format_unblock_feedback(summary: UnblockSummary) -> tuple[str, str]:
-    """Formatiert das Ergebnis von `Blocked lösen` inkl. konkreter Hilfe bei DuckDuckGo HTTP 202."""
+    """Formatiert das Ergebnis von `Unblock Tools` inkl. konkreter Hilfe bei DuckDuckGo HTTP 202."""
     if not summary.checked_blocked and not summary.activated_alternatives:
         return "info", "Keine Blocked-Tools gefunden — alle Such-Tools sind bereits einsatzbereit oder per API-Key aktivierbar."
-    parts = [f"Blocked lösen: {len(summary.unblocked_ids)}/{len(summary.checked_blocked)} entsperrt"]
+    parts = [f"Unblock Tools: {len(summary.unblocked_ids)}/{len(summary.checked_blocked)} entsperrt"]
     if summary.unblocked_ids:
         parts.append(f"OK: {', '.join(summary.unblocked_ids)}")
     if summary.activated_alternatives:
@@ -105,10 +145,10 @@ def format_unblock_feedback(summary: UnblockSummary) -> tuple[str, str]:
 
 
 def format_cleanup_message(brain: KIWebsearchBrain) -> tuple[str, str]:
-    """Führt `Clean Errors` aus und dokumentiert exakt, ob `Error`, `Quota 429` oder `HTTP 202` vorlag."""
+    """Führt `Prune Failing` aus und dokumentiert exakt, ob `Error`, `Quota 429` oder `HTTP 202` vorlag."""
     rem_m, rem_t = brain.cleanup_unhealthy_items_with_status()
     if not rem_m and not rem_t:
-        return "info", "Keine Error-, Quota-429- oder HTTP-202-Elemente zum Entfernen gefunden (sonstige Blocked-Tools bleiben erhalten)."
+        return "info", "Prune Failing: Keine Error-, Quota-429- oder HTTP-202-Elemente zum Entfernen gefunden (sonstige Blocked-Tools bleiben erhalten)."
 
     def _lbl(status: ProbeStatus) -> str:
         if status == ProbeStatus.QUOTA_LIMITED:
@@ -121,5 +161,5 @@ def format_cleanup_message(brain: KIWebsearchBrain) -> tuple[str, str]:
     t_txt = ", ".join(f"{tid} [{_lbl(sv)}]" for tid, sv in rem_t) or "–"
     return (
         "success",
-        f"Clean Errors: {len(rem_m)} Modelle ({m_txt}) & {len(rem_t)} Tools ({t_txt}) mit Status Error/429/202 entfernt (übrige Blocked erhalten).",
+        f"Prune Failing: {len(rem_m)} Modelle ({m_txt}) & {len(rem_t)} Tools ({t_txt}) mit Status Error/429/202 entfernt (übrige Blocked erhalten).",
     )

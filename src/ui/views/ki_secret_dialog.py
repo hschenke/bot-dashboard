@@ -9,10 +9,10 @@ from ki_brain import BenchmarkEntry, BrainError, KIWebsearchBrain, ProbeStatus, 
 
 from src.ai.brain_bridge import create_dashboard_brain
 from src.config.settings import AppSettings
+from src.ui.views.ki_task_overlay import invalidate_ki_ui_cache
 
 _DIALOG_STATE_KEY = "ki_active_dialog_env"
 _DIALOG_META_KEY = "ki_active_dialog_meta"
-_TABS_STATE_KEY = "ki_view_tabs"
 
 _STATUS_SHORT: dict[ProbeStatus, str] = {
     ProbeStatus.OK: "🟢 OK",
@@ -35,28 +35,15 @@ def _clear_active_dialog() -> None:
 
 def queue_secret_dialog_on_click(
     env_name: str,
-    tab_label: str | None = None,
+    _tab_label: str | None = None,
     meta_dict: dict[str, Any] | None = None,
 ) -> None:
-    """Button-Callback (`on_click`): Öffnet das Modal ohne Extra-Rerun und hält den aktiven Tab fest."""
+    """Button-Callback (`on_click`): Öffnet das Modal ohne Extra-Rerun (React hält aktiven Tab)."""
     st.session_state[_DIALOG_STATE_KEY] = env_name.strip().upper()
     if meta_dict is not None:
         st.session_state[_DIALOG_META_KEY] = meta_dict
     else:
         st.session_state.pop(_DIALOG_META_KEY, None)
-    if tab_label:
-        st.session_state[_TABS_STATE_KEY] = tab_label
-
-
-def trigger_secret_dialog(
-    env_name: str,
-    *,
-    tab_label: str | None = None,
-    meta: SecretStatusEntry | None = None,
-) -> None:
-    """Merkt das gewählte Secret für das Write-Only-Modal und triggert ein Rerun."""
-    queue_secret_dialog_on_click(env_name, tab_label=tab_label, meta_dict=meta.model_dump() if meta else None)
-    st.rerun()
 
 
 def _resolve_dialog_status(clean_env: str, settings: AppSettings) -> SecretStatusEntry | None:
@@ -141,6 +128,7 @@ def open_secret_dialog(env_name: str, settings: AppSettings) -> None:
                     level, msg = _format_probe_summary(clean_env, entries)
                 else:
                     level, msg = "success", f"Secret `{clean_env}` verschlüsselt gespeichert (Write-Only)."
+            invalidate_ki_ui_cache()
             _set_feedback(level, msg)
             _clear_active_dialog()
             st.rerun()
@@ -153,6 +141,7 @@ def open_secret_dialog(env_name: str, settings: AppSettings) -> None:
         if st.button("🗑️ Aus Vault löschen", key=f"ki_dlg_del_btn_{clean_env}", use_container_width=True):
             with create_dashboard_brain(settings) as dlg_brain:
                 dlg_brain.delete_secret(clean_env)
+            invalidate_ki_ui_cache()
             _clear_active_dialog()
             _set_feedback("info", f"Secret `{clean_env}` aus dem Brain-Vault entfernt.")
             st.rerun()

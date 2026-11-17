@@ -16,6 +16,7 @@ from ki_brain import (
 
 from src.ui.formatters import format_iso_timestamp
 from src.ui.views.ki_secret_dialog import render_missing_keys_action_bar
+from src.ui.views.ki_task_overlay import invalidate_ki_ui_cache
 
 _STATUS_BADGES: dict[ProbeStatus, str] = {
     ProbeStatus.OK: "🟢 OK",
@@ -124,6 +125,7 @@ def _render_sequence_editor(
                 }
             )
             brain.update_sequence(updated)
+            invalidate_ki_ui_cache()
             _set_feedback("success", f"Sequenz für Stufe '{tier_choice.value.capitalize()}' gespeichert.")
             st.rerun()
 

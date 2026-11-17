@@ -3,19 +3,23 @@
 from __future__ import annotations
 
 import logging
+import threading
 import uuid
 from datetime import UTC, datetime
 
 from src.config.constants import MAX_CHECK_LOG_HISTORY
 from src.config.settings import PROJECT_ROOT, AppSettings
+from src.domain.exceptions import StorageError
 from src.domain.models import AppFleetSnapshot, FleetCheckLog
 from src.security.sanitization import resolve_safe_sqlite_path
-from src.storage.executor import SqlExecutor
+from src.storage.executor import SqlExecutor, StatementResult
 from src.storage.schema import DDL_STATEMENTS
 from src.storage.sqlite_executor import SqliteExecutor
 from src.storage.turso_executor import TursoExecutor
 
 logger = logging.getLogger(__name__)
+_INITIALIZED_BACKENDS: set[str] = set()
+_INIT_LOCK = threading.Lock()
 
 
 def utc_now_iso() -> str:
@@ -28,7 +32,20 @@ class SqlDashboardRepository:
 
     def __init__(self, executor: SqlExecutor) -> None:
         self._executor = executor
-        self.init_schema()
+        self._cache_key = (
+            f"turso:{executor._pipeline_url}"  # noqa: SLF001
+            if isinstance(executor, TursoExecutor)
+            else ""
+        )
+        already_ready = False
+        if self._cache_key:
+            with _INIT_LOCK:
+                already_ready = self._cache_key in _INITIALIZED_BACKENDS
+        if not already_ready:
+            self.init_schema()
+            if self._cache_key:
+                with _INIT_LOCK:
+                    _INITIALIZED_BACKENDS.add(self._cache_key)
 
     @property
     def backend_name(self) -> str:
@@ -36,6 +53,23 @@ class SqlDashboardRepository:
 
     def init_schema(self) -> None:
         self._executor.execute_batch([(ddl, ()) for ddl in DDL_STATEMENTS])
+
+    def _run_with_schema_recovery(
+        self, sql: str, params: tuple[object, ...]
+    ) -> StatementResult:
+        try:
+            return self._executor.execute(sql, params)
+        except StorageError as exc:
+            if "no such table" not in str(exc).lower():
+                raise
+            if self._cache_key:
+                with _INIT_LOCK:
+                    _INITIALIZED_BACKENDS.discard(self._cache_key)
+            self.init_schema()
+            if self._cache_key:
+                with _INIT_LOCK:
+                    _INITIALIZED_BACKENDS.add(self._cache_key)
+            return self._executor.execute(sql, params)
 
     def record_snapshot(self, snapshot: AppFleetSnapshot) -> FleetCheckLog:
         """Speichert einen neuen Prüflauf für eine überwachte App."""
@@ -55,7 +89,7 @@ class SqlDashboardRepository:
             )[:400],
             created_at=snapshot.checked_at or utc_now_iso(),
         )
-        self._executor.execute(
+        self._run_with_schema_recovery(
             """
             INSERT INTO fleet_check_logs (
                 id, app_id, overall_status, url_status, url_latency_ms,
@@ -85,7 +119,7 @@ class SqlDashboardRepository:
         """Lädt die jüngsten Prüfprotokolle optional gefiltert nach `app_id`."""
         safe_limit = max(1, min(200, int(limit)))
         if app_id:
-            res = self._executor.execute(
+            res = self._run_with_schema_recovery(
                 """
                 SELECT * FROM fleet_check_logs
                 WHERE app_id = ?
@@ -95,7 +129,7 @@ class SqlDashboardRepository:
                 (app_id.strip(), safe_limit),
             )
         else:
-            res = self._executor.execute(
+            res = self._run_with_schema_recovery(
                 """
                 SELECT * FROM fleet_check_logs
                 ORDER BY created_at DESC

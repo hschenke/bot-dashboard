@@ -7,6 +7,7 @@ from ki_brain import BrainError, KIWebsearchBrain, SecretStatusEntry, ToolCatego
 
 from src.ui.views.ki_secret_dialog import render_missing_keys_action_bar
 from src.ui.views.ki_sequences_tab import format_probe_badge
+from src.ui.views.ki_task_overlay import invalidate_ki_ui_cache
 
 _EXECUTOR_OPTIONS: tuple[str, ...] = (
     "custom_json_api",
@@ -100,10 +101,12 @@ def _render_tool_controls(brain: KIWebsearchBrain, tools: list[ToolSpec]) -> Non
         do_del = st.button("🗑️ Entfernen", key="ki_tool_del_btn", use_container_width=True)
     if do_tog:
         brain.set_tool_enabled(sel_id, not cur.enabled)
+        invalidate_ki_ui_cache()
         _set_feedback("success", f"Tool '{sel_id}' aktualisiert.")
         st.rerun()
     if do_del:
         brain.remove_tool(sel_id)
+        invalidate_ki_ui_cache()
         _set_feedback("success", f"Tool '{sel_id}' entfernt.")
         st.rerun()
 
@@ -139,7 +142,7 @@ def _render_tool_form(brain: KIWebsearchBrain, tools: list[ToolSpec]) -> None:
             with c6:
                 snippet_field = st.text_input("JSON Snippet-Feld (optional)", value=str(cfg.get("snippet_field", "snippet")), placeholder="snippet / description")
             with c7:
-                probe_query = st.text_input("Testlauf-Query Rule (optional)", value=str(cfg.get("probe_query", "")), placeholder="z. B. Python oder Berlin")
+                probe_query = st.text_input("Probe Query Rule (optional)", value=str(cfg.get("probe_query", "")), placeholder="z. B. Python oder Berlin")
             t_desc = st.text_input("Beschreibung", value=existing.description if existing else "")
             t_enabled = st.checkbox("Aktiviert", value=existing.enabled if existing else True)
             submitted = st.form_submit_button("💾 Tool speichern", use_container_width=True)
@@ -176,6 +179,7 @@ def _render_tool_form(brain: KIWebsearchBrain, tools: list[ToolSpec]) -> None:
                     config=merged_cfg,
                 )
                 saved = brain.add_or_update_tool(spec)
+                invalidate_ki_ui_cache()
                 _set_feedback("success", f"Tool '{saved.id}' gespeichert.")
                 st.rerun()
             except (BrainError, ValueError) as exc:

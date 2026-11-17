@@ -15,6 +15,7 @@ from ki_brain import (
 
 from src.ui.views.ki_secret_dialog import render_missing_keys_action_bar
 from src.ui.views.ki_sequences_tab import format_probe_badge
+from src.ui.views.ki_task_overlay import invalidate_ki_ui_cache
 
 
 def _set_feedback(level: str, message: str) -> None:
@@ -79,13 +80,19 @@ def render_models_tab(
         return
 
     preview_models = [m for m in resolved if not m.is_deep_agent and is_preview_or_experimental_model(m.model_id, m.name)]
-    if preview_models and st.button(
-        f"🧹 Veraltete Preview-Modelle entfernen ({len(preview_models)})",
+    if st.button(
+        f"🧹 Clean Previews ({len(preview_models)})",
         key="ki_purge_previews_btn",
-        help="Entfernt vorhandene `-preview`/`-exp` Modelle dauerhaft (Deep Research Agent bleibt erhalten).",
+        disabled=not preview_models,
+        help=(
+            f"Entfernt {len(preview_models)} Preview-/Experimental-Modell(e) dauerhaft (Deep Research Agent bleibt erhalten)."
+            if preview_models
+            else "Aktuell keine Preview-/Experimental-Modelle in der Tabelle vorhanden (Deep Research Agent bleibt erhalten)."
+        ),
     ):
         removed = brain.remove_preview_models()
-        _set_feedback("success" if removed else "info", f"Preview-Bereinigung: {len(removed)} Modell(e) entfernt ({', '.join(removed) or '–'}).")
+        invalidate_ki_ui_cache()
+        _set_feedback("success" if removed else "info", f"Clean Previews: {len(removed)} Modell(e) entfernt ({', '.join(removed) or '–'}).")
         st.rerun()
 
     st.subheader("⚙️ Modell aktivieren, bearbeiten oder entfernen")
@@ -103,10 +110,12 @@ def render_models_tab(
 
         if do_toggle:
             brain.set_model_enabled(selected_id, not selected_obj.enabled)
+            invalidate_ki_ui_cache()
             _set_feedback("success", f"Modell '{selected_id}' aktualisiert.")
             st.rerun()
         if do_delete:
             brain.remove_model(selected_id)
+            invalidate_ki_ui_cache()
             _set_feedback("success", f"Modell '{selected_id}' aus dem Katalog entfernt.")
             st.rerun()
 
@@ -167,6 +176,7 @@ def render_models_tab(
                     notes=m_notes.strip(),
                 )
                 saved = brain.add_or_update_model(spec)
+                invalidate_ki_ui_cache()
                 _set_feedback("success", f"Modell '{saved.id}' gespeichert.")
                 st.rerun()
             except (BrainError, ValueError) as exc:

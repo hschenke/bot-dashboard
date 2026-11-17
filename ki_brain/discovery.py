@@ -49,7 +49,7 @@ _GEMINI_TEXT_SERIES_RE = re.compile(
     r"^(?:gemini-(?:2\.5|3(?:\.[0-9]+)?|4(?:\.[0-9]+)?|5(?:\.[0-9]+)?|[3-9]-)|gemma-(?:3|4)|deep-research|learnlm)",
     re.IGNORECASE,
 )
-_PREVIEW_MARKERS = ("-preview", "_preview", "preview-", "-exp", "experimental", "-alpha")
+_PREVIEW_MARKERS = ("preview", "-exp", "_exp", "experimental", "-alpha")
 _VERSION_RE = re.compile(r"(?:gemini|gemma)-(\d+)(?:\.(\d+))?")
 _DATED_CLONE_RE = re.compile(r"-(?:00[1-9]|202\d|\d{2}-\d{2,4})$")
 

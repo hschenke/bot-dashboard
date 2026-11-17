@@ -325,3 +325,39 @@ def test_bot_database_inspector_reads_alert_research_and_news_schemas() -> None:
     assert summary_news.status == HealthStatus.ONLINE
     assert summary_news.total_rows == 1
     news_exec.close()
+
+
+def test_sql_dashboard_repository_caches_turso_schema_and_recovers_missing_table() -> None:
+    from src.domain.exceptions import StorageError
+    from src.storage.executor import StatementResult
+    from src.storage.repository import _INITIALIZED_BACKENDS, SqlDashboardRepository
+    from src.storage.turso_executor import TursoExecutor
+
+    fake_url = "https://cache-unit-test.turso.io/v2/pipeline"
+    _INITIALIZED_BACKENDS.discard(f"turso:{fake_url}")
+
+    exec1 = MagicMock(spec=TursoExecutor)
+    exec1._pipeline_url = fake_url
+    exec1.execute_batch.return_value = []
+    repo1 = SqlDashboardRepository(exec1)
+    assert exec1.execute_batch.call_count == 1
+
+    # Zweite Instanz nutzt denselben Endpunkt -> kein redundantes CREATE TABLE mehr
+    exec2 = MagicMock(spec=TursoExecutor)
+    exec2._pipeline_url = fake_url
+    exec2.execute_batch.return_value = []
+    repo2 = SqlDashboardRepository(exec2)
+    assert exec2.execute_batch.call_count == 0
+
+    # Self-Healing bei "no such table" -> führt DDL nach und wiederholt Query automatisch
+    exec2.execute.side_effect = [
+        StorageError("Turso SQL-Fehler: no such table: fleet_check_logs"),
+        StatementResult(rows=[], affected_rows=0),
+    ]
+    assert repo2.list_recent_logs(limit=10) == []
+    assert exec2.execute_batch.call_count == 1
+    assert exec2.execute.call_count == 2
+
+    repo1.close()
+    repo2.close()
+    _INITIALIZED_BACKENDS.discard(f"turso:{fake_url}")
