@@ -1048,3 +1048,228 @@ def test_secret_rotation_resets_quota_429_and_reports_vault_override(tmp_path: P
     assert brain.get_tool("browserbase_fetch").last_status == ProbeStatus.AUTH_MISSING  # type: ignore[union-attr]
     brain.close()
 
+
+def test_yahoo_session_cookies_dual_dom_fallback_and_ssrf_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    import requests
+    from ki_brain.tools import yahoo_client
+    from ki_brain.tools.http_utils import consume_probe_trace, safe_http_request, start_probe_trace
+    from ki_brain.tools.search_web import search_yahoo
+
+    with yahoo_client._YBV_LOCK:  # noqa: SLF001
+        yahoo_client._YBV_CACHE.clear()  # noqa: SLF001
+
+    de_html = (
+        b'<div class="algo"><h3 class="title">'
+        b'<a aria-label="Clean DE Title" href="https://r.search.yahoo.com/RU=https%3a%2f%2fpython.org%2f/RK=2">'
+        b"<span>https://python.org \xe2\x80\xba docs</span>Clean DE Title</a></h3>"
+        b'<div class="compText"><p>DE Snippet</p></div></div>'
+    )
+    us_html = (
+        b'<div class="algo"><a href="https://example.org/us-hit">'
+        b"<div>https://example.org</div>"
+        b'<h3 class="title"><span>US Layout Title</span></h3></a>'
+        b'<p class="fc-falcon">US Snippet</p></div>'
+    )
+
+    seen_cookie_jars: list[dict[str, str]] = []
+
+    class _FakeResp:
+        def __init__(self, status: int, headers: dict[str, str], body: bytes = b"") -> None:
+            self.status_code = status
+            self.headers = headers
+            self._body = body
+
+        def iter_content(self, chunk_size: int = 8192) -> list[bytes]:
+            return [self._body] if self._body else []
+
+        def __enter__(self) -> _FakeResp:
+            return self
+
+        def __exit__(self, *_a: object) -> bool:
+            return False
+
+    def _fake_session_request(self: requests.Session, method: str, url: str, **_kw: object) -> _FakeResp:
+        seen_cookie_jars.append(dict(self.cookies.get_dict()))
+        if "de.search.yahoo.com/search" in url and self.cookies.get("YBV") != "v0.2-verified":
+            self.cookies.set("YBV", "v0.1-challenge", domain="de.search.yahoo.com", path="/")
+            return _FakeResp(307, {"Location": "/_bv/v.gif?orig=%2Fsearch%3Fp%3DPython&_bvc=1"})
+        if "de.search.yahoo.com/_bv/v.gif" in url:
+            assert self.cookies.get("YBV") == "v0.1-challenge"
+            self.cookies.set("YBV", "v0.2-verified", domain="de.search.yahoo.com", path="/")
+            return _FakeResp(307, {"Location": "/search?p=Python"})
+        if "de.search.yahoo.com/search" in url and self.cookies.get("YBV") == "v0.2-verified":
+            return _FakeResp(200, {"Content-Type": "text/html"}, de_html)
+        return _FakeResp(404, {})
+
+    monkeypatch.setattr("ki_brain.tools.http_utils.validate_safe_external_url", lambda u, dns_resolver=None: u)
+    monkeypatch.setattr(requests.Session, "request", _fake_session_request)
+
+    collected: dict[str, str] = {}
+    st, final_url, _, body = safe_http_request(
+        "GET",
+        "https://de.search.yahoo.com/search",
+        params={"p": "Python"},
+        cookies={"sB": "v=1"},
+        collected_cookies=collected,
+    )
+    assert st == 200
+    assert final_url == "https://de.search.yahoo.com/search?p=Python"
+    assert collected["YBV"] == "v0.2-verified"
+    assert seen_cookie_jars[0].get("sB") == "v=1"
+    assert seen_cookie_jars[1].get("YBV") == "v0.1-challenge"
+    assert seen_cookie_jars[2].get("YBV") == "v0.2-verified"
+    de_hits = yahoo_client.parse_yahoo_html(body)
+    assert len(de_hits) == 1 and de_hits[0].title == "Clean DE Title" and de_hits[0].url == "https://python.org/"
+
+    # US layout (`a:has(h3)`) + fallback rotation when DE edge returns HTTP 500
+    called_eps: list[str] = []
+
+    def _fake_yahoo_fallback(_m: str, ep: str, **_kw: object) -> tuple[int, str, str, bytes]:
+        called_eps.append(ep)
+        if "de.search.yahoo.com" in ep:
+            return 500, ep, "text/html", b""
+        return 200, ep, "text/html", us_html
+
+    monkeypatch.setattr("ki_brain.tools.search_web.safe_http_request", _fake_yahoo_fallback)
+    hits_fb = search_yahoo("Python AI")
+    assert called_eps == ["https://de.search.yahoo.com/search", "https://search.yahoo.com/search"]
+    assert len(hits_fb) == 1 and hits_fb[0].title == "US Layout Title" and hits_fb[0].url == "https://example.org/us-hit"
+
+    # Rate limit 429 stops immediately without probing fallbacks
+    called_429: list[str] = []
+
+    def _fake_yahoo_429(_m: str, ep: str, **_kw: object) -> tuple[int, str, str, bytes]:
+        called_429.append(ep)
+        return 429, ep, "text/plain", b"Too Many Requests"
+
+    monkeypatch.setattr("ki_brain.tools.search_web.safe_http_request", _fake_yahoo_429)
+    start_probe_trace()
+    assert search_yahoo("Python AI") == []
+    consume_probe_trace()
+    assert called_429 == ["https://de.search.yahoo.com/search"]
+
+    # SSRF error is never swallowed by Yahoo fallback loop
+    monkeypatch.setattr(
+        "ki_brain.tools.search_web.safe_http_request",
+        lambda *_a, **_kw: (_ for _ in ()).throw(BrainSSRFError("SSRF blocked redirect")),
+    )
+    with pytest.raises(BrainSSRFError):
+        search_yahoo("Python AI")
+
+
+def test_cost_aware_model_pricing_and_tier_sequencing() -> None:
+    from ki_brain import compute_cost_score, estimate_blended_cost_per_1m
+    from ki_brain.optimizer import compute_model_quality, optimize_tier_sequences
+
+    free_gemma = AIModelSpec(
+        id="gemma-3-27b-it",
+        name="Gemma 3 27B",
+        model_id="gemma-3-27b-it",
+        tier_hint=BrainTier.STANDARD,
+        last_status=ProbeStatus.OK,
+        last_latency_ms=480,
+    )
+    tiny_8b = AIModelSpec(
+        id="groq/llama-3.1-8b-instant",
+        name="Groq Llama 3.1 8B",
+        provider=ModelProvider.OPENAI_COMPATIBLE,
+        model_id="llama-3.1-8b-instant",
+        tier_hint=BrainTier.FAST,
+        api_key_env="GROQ_API_KEY",
+        base_url="https://api.groq.com/openai/v1",
+        last_status=ProbeStatus.OK,
+        last_latency_ms=350,
+    )
+    flash_25_lite = AIModelSpec(
+        id="gemini-2.5-flash-lite",
+        name="Gemini 2.5 Flash-Lite",
+        model_id="gemini-2.5-flash-lite",
+        tier_hint=BrainTier.FAST,
+        last_status=ProbeStatus.OK,
+        last_latency_ms=420,
+    )
+    llama_70b = AIModelSpec(
+        id="groq/llama-3.3-70b-versatile",
+        name="Groq Llama 3.3 70B",
+        provider=ModelProvider.OPENAI_COMPATIBLE,
+        model_id="llama-3.3-70b-versatile",
+        tier_hint=BrainTier.STANDARD,
+        api_key_env="GROQ_API_KEY",
+        base_url="https://api.groq.com/openai/v1",
+        last_status=ProbeStatus.OK,
+        last_latency_ms=450,
+    )
+    flash_25 = AIModelSpec(
+        id="gemini-2.5-flash",
+        name="Gemini 2.5 Flash",
+        model_id="gemini-2.5-flash",
+        tier_hint=BrainTier.STANDARD,
+        last_status=ProbeStatus.OK,
+        last_latency_ms=480,
+    )
+    flash_38 = AIModelSpec(
+        id="gemini-3.8-flash",
+        name="Gemini 3.8 Flash",
+        model_id="gemini-3.8-flash",
+        tier_hint=BrainTier.STANDARD,
+        last_status=ProbeStatus.OK,
+        last_latency_ms=480,
+    )
+    hydrogen_4 = AIModelSpec(
+        id="gemini-4-hydrogen",
+        name="Gemini 4 Hydrogen",
+        model_id="gemini-4-hydrogen",
+        tier_hint=BrainTier.STANDARD,
+        last_status=ProbeStatus.OK,
+        last_latency_ms=480,
+    )
+    argon_4 = AIModelSpec(
+        id="gemini-4-argon",
+        name="Gemini 4 Argon",
+        model_id="gemini-4-argon",
+        tier_hint=BrainTier.DEEP,
+        last_status=ProbeStatus.OK,
+        last_latency_ms=480,
+    )
+    broken_free = AIModelSpec(
+        id="or/broken/model-free",
+        name="Broken Free",
+        provider=ModelProvider.OPENAI_COMPATIBLE,
+        model_id="broken/model:free",
+        tier_hint=BrainTier.STANDARD,
+        last_status=ProbeStatus.QUOTA_LIMITED,
+        last_latency_ms=150,
+    )
+
+    assert estimate_blended_cost_per_1m(free_gemma) == 0.0
+    assert compute_cost_score(free_gemma) == 100.0
+    assert estimate_blended_cost_per_1m(flash_25_lite) == 0.18
+    assert estimate_blended_cost_per_1m(flash_25) == 0.85
+    assert estimate_blended_cost_per_1m(hydrogen_4) == 3.0
+    assert estimate_blended_cost_per_1m(argon_4) == 4.0
+
+    raw_fleet = [argon_4, hydrogen_4, flash_38, flash_25, flash_25_lite, llama_70b, tiny_8b, broken_free]
+    scored_fleet = [
+        m.model_copy(update={"quality_score": compute_model_quality(m, m.last_status, m.last_latency_ms)})
+        for m in raw_fleet
+    ]
+
+    seqs = optimize_tier_sequences(scored_fleet, [], {})
+    fast_seq = seqs[BrainTier.FAST].model_sequence
+    std_seq = seqs[BrainTier.STANDARD].model_sequence
+    deep_seq = seqs[BrainTier.DEEP].model_sequence
+
+    assert fast_seq[0] == "gemini-2.5-flash-lite"
+    assert fast_seq.index("gemini-2.5-flash-lite") < fast_seq.index("gemini-4-hydrogen")
+
+    # Standard: günstige & starke Standard-Modelle (70B / Flash) vor teurem Hydrogen & schwachem 8B
+    assert std_seq[0] in {"groq/llama-3.3-70b-versatile", "gemini-2.5-flash"}
+    assert std_seq.index("gemini-2.5-flash") < std_seq.index("gemini-4-hydrogen")
+    assert std_seq.index("gemini-3.8-flash") < std_seq.index("gemini-4-hydrogen")
+    assert std_seq.index("gemini-3.8-flash") < std_seq.index("groq/llama-3.1-8b-instant")
+
+    # Deep: starke Modelle vor 8B; geblockte / 429-Modelle bleiben ausgeschlossen
+    assert deep_seq.index("gemini-4-argon") < deep_seq.index("groq/llama-3.1-8b-instant")
+    assert "or/broken/model-free" not in std_seq
+
+

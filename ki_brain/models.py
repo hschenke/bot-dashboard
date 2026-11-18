@@ -120,6 +120,8 @@ class AIModelSpec(BaseModel):
     source: str = Field(default="builtin", max_length=32)
     origin_apps: list[str] = Field(default_factory=list)
     notes: str = Field(default="", max_length=400)
+    input_cost_per_1m: float | None = Field(default=None, ge=0.0, le=1000.0)
+    output_cost_per_1m: float | None = Field(default=None, ge=0.0, le=1000.0)
     last_status: ProbeStatus = ProbeStatus.UNTESTED
     last_latency_ms: int = Field(default=0, ge=0)
     quality_score: float = Field(default=0.0, ge=0.0, le=100.0)

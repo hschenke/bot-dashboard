@@ -20,11 +20,11 @@ from ki_brain.security import (
 
 logger = logging.getLogger(__name__)
 
-MAX_REDIRECT_HOPS = 4
+MAX_REDIRECT_HOPS = 5
 BROWSER_HEADERS: dict[str, str] = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -123,12 +123,14 @@ def safe_http_request(
     data: dict[str, Any] | None = None,
     json_body: dict[str, Any] | None = None,
     headers: dict[str, str] | None = None,
+    cookies: dict[str, str] | None = None,
+    collected_cookies: dict[str, str] | None = None,
     auth: Any = None,
     timeout_seconds: float = 5.0,
     max_bytes: int = 1_500_000,
     dns_resolver: DnsResolver | None = None,
 ) -> tuple[int, str, str, bytes]:
-    """Führt HTTP GET/POST inkl. SSRF-Redirect-Prüfung, Probe-Trace und Speicherlimit aus."""
+    """Führt HTTP GET/POST inkl. SSRF-Redirect-Prüfung, Session-Cookies und Probe-Trace aus."""
     validate_fn = (
         (lambda u: validate_safe_external_url(u, dns_resolver=dns_resolver))
         if dns_resolver is not None
@@ -139,32 +141,42 @@ def safe_http_request(
     req_method = method.upper()
     req_headers = dict(headers or API_HEADERS)
 
-    for _ in range(MAX_REDIRECT_HOPS + 1):
-        with requests.request(
-            method=req_method,
-            url=current_url,
-            params=params if req_method == "GET" else None,
-            data=data,
-            json=json_body,
-            headers=req_headers,
-            auth=auth,
-            timeout=timeout_tuple,
-            allow_redirects=False,
-            stream=True,
-        ) as resp:
-            if resp.status_code in {301, 302, 303, 307, 308}:
-                location = str(resp.headers.get("Location") or "").strip()
-                if not location:
-                    raise BrainProviderError("HTTP-Redirect ohne Zieladresse erhalten.")
-                current_url = validate_fn(urljoin(current_url, location))
-                params = None
-                req_method = "GET"
-                data = None
-                json_body = None
-                continue
-            body = read_bounded_response(resp, max_bytes=max_bytes)
-            ctype = str(resp.headers.get("Content-Type") or "").lower()
-            record_http_probe(current_url, resp.status_code, len(body))
-            return resp.status_code, current_url, ctype, body
+    with requests.Session() as session:
+        init_host = urlparse(current_url).hostname or ""
+        if cookies and init_host:
+            for k, v in cookies.items():
+                session.cookies.set(str(k), str(v), domain=init_host, path="/")
+
+        for _ in range(MAX_REDIRECT_HOPS + 1):
+            with session.request(
+                method=req_method,
+                url=current_url,
+                params=params if req_method == "GET" else None,
+                data=data,
+                json=json_body,
+                headers=req_headers,
+                auth=auth,
+                timeout=timeout_tuple,
+                allow_redirects=False,
+                stream=True,
+            ) as resp:
+                if resp.status_code in {301, 302, 303, 307, 308}:
+                    location = str(resp.headers.get("Location") or "").strip()
+                    if not location:
+                        raise BrainProviderError("HTTP-Redirect ohne Zieladresse erhalten.")
+                    current_url = validate_fn(urljoin(current_url, location))
+                    params = None
+                    req_method = "GET"
+                    data = None
+                    json_body = None
+                    continue
+                body = read_bounded_response(resp, max_bytes=max_bytes)
+                ctype = str(resp.headers.get("Content-Type") or "").lower()
+                if collected_cookies is not None:
+                    for cookie in session.cookies:
+                        if cookie.name and cookie.value is not None:
+                            collected_cookies[cookie.name] = cookie.value
+                record_http_probe(current_url, resp.status_code, len(body))
+                return resp.status_code, current_url, ctype, body
 
     raise BrainProviderError(f"Zu viele Redirects (> {MAX_REDIRECT_HOPS}) für '{url}'.")

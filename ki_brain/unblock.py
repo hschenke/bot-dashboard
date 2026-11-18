@@ -71,14 +71,23 @@ def _try_yahoo_alternate_endpoint(
 ) -> tuple[ToolSpec, Any] | None:
     if tool.executor_type.strip().lower() != "yahoo_search":
         return None
-    alt_url = (
-        "https://search.yahoo.com/search"
-        if "de.search.yahoo.com" in tool.endpoint_url
-        else "https://de.search.yahoo.com/search"
-    )
-    alt_tool = tool.model_copy(update={"endpoint_url": alt_url})
-    ut_alt, entry_alt = bench.probe_tool(alt_tool, test_query, test_url, None)
-    return (ut_alt, entry_alt) if ut_alt.last_status == ProbeStatus.OK else None
+    candidates = [
+        ep
+        for ep in (
+            "https://search.yahoo.com/search",
+            "https://ch.search.yahoo.com/search",
+            "https://at.search.yahoo.com/search",
+            "https://uk.search.yahoo.com/search",
+            "https://de.search.yahoo.com/search",
+        )
+        if ep != tool.endpoint_url
+    ]
+    for alt_url in candidates[:3]:
+        alt_tool = tool.model_copy(update={"endpoint_url": alt_url})
+        ut_alt, entry_alt = bench.probe_tool(alt_tool, test_query, test_url, None)
+        if ut_alt.last_status == ProbeStatus.OK:
+            return ut_alt, entry_alt
+    return None
 
 
 def resolve_blocked_tools(

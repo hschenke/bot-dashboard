@@ -10,6 +10,7 @@ from ki_brain import (
     KIWebsearchBrain,
     ModelProvider,
     SecretStatusEntry,
+    estimate_blended_cost_per_1m,
     is_preview_or_experimental_model,
 )
 
@@ -86,12 +87,21 @@ def render_models_tab(
     resolved = models if models is not None else brain.list_models()
     st.caption("Zentrale Modell-Liste aus Research-Bot, Alert-Bot, Gemini API Discovery & OpenAI-kompatiblen Free-Endpunkten.")
     rows = [
-        {"Name": m.name, "ID": m.id, "Provider": m.provider.value, "Tier": m.tier_hint.value.capitalize(), "Status": format_probe_badge(m.last_status, enabled=m.enabled), "Latenz (ms)": m.last_latency_ms, "Score": m.quality_score, "Key-Env": m.api_key_env or "–", "Diagnose": m.last_error or "–"}
+        {
+            "Name": m.name, "Provider": m.provider.value, "Tier": m.tier_hint.value.capitalize(),
+            "Status": format_probe_badge(m.last_status, enabled=m.enabled), "Latenz (ms)": m.last_latency_ms,
+            "Score": m.quality_score, "Kosten (~$/1M)": estimate_blended_cost_per_1m(m), "Diagnose": m.last_error or "–",
+        }
         for m in resolved
     ]
     st.dataframe(
         rows, use_container_width=True, hide_index=True,
-        column_config={"Score": st.column_config.NumberColumn("Score", format="%.1f", help="Qualitätsscore 0–100 (höher = besser): 45 % Latenz + 55 % Tier-Stärke (Fast 76 / Standard 84 / Deep 92) + 6 JSON-Bonus. Fixwerte: Untested=55, Quota 429=12, Error/Blocked=5, Missing Key=0.")},
+        column_config={
+            "Tier": st.column_config.TextColumn("Tier", width="small"),
+            "Latenz (ms)": st.column_config.NumberColumn("Latenz", format="%d ms", width="small", help="Antwortzeit des letzten Live-Tests in Millisekunden."),
+            "Score": st.column_config.NumberColumn("Score", format="%.1f", width="small", help="Qualitätsscore 0–100 (höher = besser): 45 % Latenz + 55 % Tier-Stärke (Fast 76 / Standard 84 / Deep 92) + 6 JSON-Bonus + Kapazitätsausgleich. Fixwerte: Untested=55, Quota 429=12, Error/Blocked=5, Missing Key=0."),
+            "Kosten (~$/1M)": st.column_config.NumberColumn("Kosten (~$/1M)", format="$%.2f", width="small", help="Geschätzte Mischkosten je 1 Mio. Tokens (USD, 75 % Input + 25 % Output; $0.00 = Free/Gemma). Günstige & gleichzeitig starke Modelle stehen beim Sequencing zuerst."),
+        },
     )
 
     model_envs = {m.api_key_env.strip().upper() for m in resolved if m.api_key_env.strip()}
@@ -109,8 +119,7 @@ def render_models_tab(
             selected_id = st.selectbox("Modell wählen", options=model_ids, key="ki_model_quick_sel")
         selected_obj = next(m for m in resolved if m.id == selected_id)
         with toggle_col:
-            toggle_label = "⛔ Deaktivieren" if selected_obj.enabled else "✅ Aktivieren"
-            do_toggle = st.button(toggle_label, key="ki_model_toggle_btn", use_container_width=True)
+            do_toggle = st.button("⛔ Deaktivieren" if selected_obj.enabled else "✅ Aktivieren", key="ki_model_toggle_btn", use_container_width=True)
         with del_col:
             do_delete = st.button("🗑️ Entfernen", key="ki_model_delete_btn", use_container_width=True)
 
@@ -135,20 +144,10 @@ def render_models_tab(
             with c1:
                 m_id = st.text_input("Modell-ID (eindeutig)", value=existing.id if existing else "", placeholder="z. B. groq-llama-3.3-70b")
                 m_name = st.text_input("Anzeigename", value=existing.name if existing else "", placeholder="z. B. Groq Llama 3.3 70B")
-                m_provider = st.selectbox(
-                    "Provider",
-                    options=list(ModelProvider),
-                    index=list(ModelProvider).index(existing.provider) if existing else 0,
-                    format_func=lambda p: p.value,
-                )
+                m_provider = st.selectbox("Provider", options=list(ModelProvider), index=list(ModelProvider).index(existing.provider) if existing else 0, format_func=lambda p: p.value)
                 m_model_id = st.text_input("API Model-Slug", value=existing.model_id if existing else "", placeholder="llama-3.3-70b-versatile")
             with c2:
-                m_tier = st.selectbox(
-                    "Ziel-Stufe (Tier Hint)",
-                    options=[BrainTier.FAST, BrainTier.STANDARD, BrainTier.DEEP],
-                    index=[BrainTier.FAST, BrainTier.STANDARD, BrainTier.DEEP].index(existing.tier_hint) if existing else 0,
-                    format_func=lambda t: t.value.capitalize(),
-                )
+                m_tier = st.selectbox("Ziel-Stufe (Tier Hint)", options=[BrainTier.FAST, BrainTier.STANDARD, BrainTier.DEEP], index=[BrainTier.FAST, BrainTier.STANDARD, BrainTier.DEEP].index(existing.tier_hint) if existing else 0, format_func=lambda t: t.value.capitalize())
                 m_key_env = st.text_input("API-Key Env-Variable", value=existing.api_key_env if existing else "GEMINI_API_KEY")
                 m_base_url = st.text_input("Base-URL (für OpenAI-Compat)", value=existing.base_url if existing else "", placeholder="https://api.groq.com/openai/v1")
                 m_rpm = st.number_input("Max RPM", min_value=1, max_value=240, value=existing.max_rpm if existing else 15)
@@ -163,23 +162,17 @@ def render_models_tab(
         if submitted:
             try:
                 spec = AIModelSpec(
-                    id=m_id.strip().lower(),
-                    name=m_name.strip() or m_id.strip(),
-                    provider=m_provider,
-                    model_id=m_model_id.strip() or m_id.strip(),
-                    tier_hint=m_tier,
-                    requires_api_key=bool(m_key_env.strip()),
-                    api_key_env=m_key_env.strip(),
-                    base_url=m_base_url.strip(),
+                    id=m_id.strip().lower(), name=m_name.strip() or m_id.strip(), provider=m_provider,
+                    model_id=m_model_id.strip() or m_id.strip(), tier_hint=m_tier,
+                    requires_api_key=bool(m_key_env.strip()), api_key_env=m_key_env.strip(), base_url=m_base_url.strip(),
                     supports_structured_output=bool(m_struct),
                     supports_google_search=(m_provider == ModelProvider.GOOGLE_GEMINI),
                     supports_url_context=(m_provider == ModelProvider.GOOGLE_GEMINI),
-                    is_deep_agent=(m_provider == ModelProvider.GEMINI_DEEP_AGENT),
-                    max_rpm=int(m_rpm),
-                    enabled=bool(m_enabled),
-                    source="custom" if existing is None else existing.source,
-                    origin_apps=existing.origin_apps if existing else ["manual"],
-                    notes=m_notes.strip(),
+                    is_deep_agent=(m_provider == ModelProvider.GEMINI_DEEP_AGENT), max_rpm=int(m_rpm),
+                    enabled=bool(m_enabled), source="custom" if existing is None else existing.source,
+                    origin_apps=existing.origin_apps if existing else ["manual"], notes=m_notes.strip(),
+                    input_cost_per_1m=existing.input_cost_per_1m if existing else None,
+                    output_cost_per_1m=existing.output_cost_per_1m if existing else None,
                 )
                 saved = brain.add_or_update_model(spec)
                 invalidate_ki_ui_cache()

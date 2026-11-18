@@ -12,6 +12,7 @@ from bs4 import BeautifulSoup
 from ki_brain.models import BrainCitation
 from ki_brain.security import sanitize_display_url
 from ki_brain.tools.http_utils import BROWSER_HEADERS, extract_redirect_target, safe_http_request
+from ki_brain.tools.yahoo_client import execute_yahoo_search
 
 
 def search_yahoo(
@@ -19,40 +20,18 @@ def search_yahoo(
     endpoint_url: str = "https://de.search.yahoo.com/search",
     max_results: int = 6,
     timeout_seconds: float = 6.0,
+    *,
+    language: str = "de",
 ) -> list[BrainCitation]:
-    """Key-freie Yahoo-Websuche (resilient auf Cloud-Servern)."""
-    clean_q = " ".join(query.split())[:200]
-    if not clean_q:
-        return []
-    status, _, _, body = safe_http_request(
-        "GET",
-        endpoint_url or "https://de.search.yahoo.com/search",
-        params={"p": clean_q},
-        headers=BROWSER_HEADERS,
+    """Key-freie Yahoo-Websuche mit Session-/YBV-Cookies, Dual-DOM-Parser & Endpunkt-Fallback."""
+    return execute_yahoo_search(
+        query,
+        endpoint_url=endpoint_url,
+        max_results=max_results,
         timeout_seconds=timeout_seconds,
-        max_bytes=500_000,
+        language=language,
+        http_request_fn=safe_http_request,
     )
-    if status != 200 or not body:
-        return []
-    soup = BeautifulSoup(body.decode("utf-8", errors="replace"), "html.parser")
-    results: list[BrainCitation] = []
-    seen: set[str] = set()
-    for node in soup.select("div.algo"):
-        anchor = node.select_one("h3 a")
-        if not anchor:
-            continue
-        target = extract_redirect_target(str(anchor.get("href") or ""))
-        if not target or target in seen:
-            continue
-        seen.add(target)
-        comp = node.select_one(".compText, .compText p, .fc-falcon")
-        snippet = comp.get_text(" ", strip=True)[:320] if comp else ""
-        title = anchor.get_text(" ", strip=True)[:180]
-        if title:
-            results.append(BrainCitation(url=target, title=title, snippet=snippet, source_tool="yahoo_search"))
-        if len(results) >= max_results:
-            break
-    return results
 
 
 def search_duckduckgo_html(

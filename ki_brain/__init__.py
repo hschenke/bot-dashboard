@@ -24,6 +24,7 @@ from ki_brain.models import (
     TierSequenceConfig,
     ToolSpec,
 )
+from ki_brain.pricing import compute_cost_score, estimate_blended_cost_per_1m
 from ki_brain.storage import BrainDashboardState, BrainRepository, create_brain_repository
 from ki_brain.unblock import UnblockSummary
 
@@ -54,6 +55,8 @@ __all__ = [
     "ToolCategory",
     "ToolSpec",
     "UnblockSummary",
+    "compute_cost_score",
     "create_brain_repository",
+    "estimate_blended_cost_per_1m",
     "is_preview_or_experimental_model",
 ]

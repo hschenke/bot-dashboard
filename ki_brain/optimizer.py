@@ -7,6 +7,11 @@ from collections.abc import Iterable
 
 from ki_brain.enums import BrainTier, ProbeStatus, ToolCategory
 from ki_brain.models import AIModelSpec, TierSequenceConfig, ToolSpec
+from ki_brain.pricing import (
+    compute_capability_adjustment,
+    compute_cost_score,
+    is_small_capacity_model,
+)
 from ki_brain.tools.registry import is_extractor_capable, is_search_capable
 
 DEFAULT_TEST_QUERY = "Python AI"
@@ -37,7 +42,7 @@ def compute_tool_quality(status: ProbeStatus, latency_ms: int, result_count: int
 
 
 def compute_model_quality(model: AIModelSpec, status: ProbeStatus, latency_ms: int) -> float:
-    """Berechnet den Modell-Qualitätsscore (0..100) nach Health, Speed & Tier-Fähigkeit."""
+    """Berechnet den Modell-Qualitätsscore (0..100) nach Health, Speed, Tier-Stärke & Kapazität."""
     if status == ProbeStatus.AUTH_MISSING:
         return 0.0
     if status in {ProbeStatus.BLOCKED, ProbeStatus.ERROR}:
@@ -49,7 +54,8 @@ def compute_model_quality(model: AIModelSpec, status: ProbeStatus, latency_ms: i
     speed = compute_speed_score(latency_ms, max_ms=8000)
     tier_bonus = 92.0 if model.tier_hint == BrainTier.DEEP else (84.0 if model.tier_hint == BrainTier.STANDARD else 76.0)
     struct_bonus = 6.0 if model.supports_structured_output else 0.0
-    return round(min(100.0, 0.45 * speed + 0.55 * tier_bonus + struct_bonus), 1)
+    cap_adj = compute_capability_adjustment(model)
+    return round(max(15.0, min(100.0, 0.45 * speed + 0.55 * tier_bonus + struct_bonus + cap_adj)), 1)
 
 
 def _is_usable_status(status: ProbeStatus) -> bool:
@@ -106,19 +112,25 @@ def _rank_models_for_tier(models: list[AIModelSpec], tier: BrainTier) -> list[AI
     def _score(m: AIModelSpec) -> tuple[int, float]:
         status_rank = 2 if m.last_status == ProbeStatus.OK else 1
         speed = compute_speed_score(m.last_latency_ms or 1500, max_ms=8000)
-        qual = m.quality_score or 55.0
+        qual = m.quality_score if m.quality_score > 0 else (55.0 + compute_capability_adjustment(m))
+        cost_eff = compute_cost_score(m)
+        small_pen = is_small_capacity_model(m)
+
         if tier == BrainTier.FAST:
             if m.is_deep_agent:
                 return 0, -10.0
-            hint = 15.0 if m.tier_hint == BrainTier.FAST else (5.0 if m.tier_hint == BrainTier.STANDARD else 0.0)
-            return status_rank, 0.65 * speed + 0.25 * qual + hint
+            hint = 10.0 if m.tier_hint == BrainTier.FAST else (4.0 if m.tier_hint == BrainTier.STANDARD else 0.0)
+            pen = -8.0 if small_pen else 0.0
+            return status_rank, 0.35 * speed + 0.35 * qual + 0.30 * cost_eff + hint + pen
         if tier == BrainTier.STANDARD:
             if m.is_deep_agent:
                 return 0, 0.0
-            hint = 12.0 if m.tier_hint == BrainTier.STANDARD else (8.0 if m.tier_hint == BrainTier.FAST else 5.0)
-            return status_rank, 0.45 * qual + 0.40 * speed + hint
-        hint = 18.0 if (m.is_deep_agent or m.tier_hint == BrainTier.DEEP) else (10.0 if m.tier_hint == BrainTier.STANDARD else 2.0)
-        return status_rank, 0.70 * qual + 0.15 * speed + hint
+            hint = 14.0 if m.tier_hint == BrainTier.STANDARD else (4.0 if m.tier_hint == BrainTier.FAST else 2.0)
+            pen = -12.0 if small_pen else 0.0
+            return status_rank, 0.40 * qual + 0.25 * speed + 0.35 * cost_eff + hint + pen
+        hint = 16.0 if (m.is_deep_agent or m.tier_hint == BrainTier.DEEP) else (10.0 if m.tier_hint == BrainTier.STANDARD else 0.0)
+        pen = -14.0 if small_pen else 0.0
+        return status_rank, 0.60 * qual + 0.25 * cost_eff + 0.15 * speed + hint + pen
 
     ranked = sorted(usable, key=_score, reverse=True)
     if tier != BrainTier.DEEP:
@@ -135,7 +147,7 @@ def _format_rationale(tier: BrainTier, search_ids: list[str], model_ids: list[st
     top_s = " → ".join(search_ids[:4]) or "–"
     top_m = " → ".join(model_ids[:3]) or "Heuristik"
     skip_note = f" | Übersprungen: {', '.join(skipped[:4])}" if skipped else ""
-    return f"[{tier.value.upper()}] Suche: {top_s} | Modelle: {top_m}{skip_note}"[:1150]
+    return f"[{tier.value.upper()}] Suche: {top_s} | Modelle (Preis+Qualität): {top_m}{skip_note}"[:1150]
 
 
 def optimize_tier_sequences(

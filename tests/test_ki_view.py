@@ -70,13 +70,18 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
         top_btn = next(b for b in at.button if b.label == top_lbl)
         assert top_btn.proto.type == "secondary"
 
-    # Herkunft- & Aktiv-Spalte entfernt in KI-Modelle & Websearch/Tools + Brave/Tavily/Serper Missing Keys nur im Websearch-Tab
+    # Herkunft-, Aktiv-, ID- & Key-Env-Spalten entfernt in KI-Modelle + Kosten- & Latenz-Spalte aktiv (ID in Websearch/Tools weiterhin aktiv)
     models_df = at.tabs[1].dataframe[0].value
     tools_df = at.tabs[2].dataframe[0].value
     assert "Herkunft" not in models_df.columns
     assert "Herkunft" not in tools_df.columns
     assert "Aktiv" not in models_df.columns
     assert "Aktiv" not in tools_df.columns
+    assert "ID" not in models_df.columns
+    assert "Key-Env" not in models_df.columns
+    assert "Latenz (ms)" in models_df.columns
+    assert "Kosten (~$/1M)" in models_df.columns
+    assert all(float(val) >= 0.0 for val in models_df["Kosten (~$/1M)"])
     assert "searxng_public" in list(tools_df["ID"])
     tools_btn_labels = [b.label for b in at.tabs[2].button]
     assert "🔑 Missing Key: BRAVE_SEARCH_API_KEY" in tools_btn_labels
@@ -425,11 +430,17 @@ def test_ki_view_missing_key_preserves_tools_tab_and_renders_preview_purge(
     assert purge_btn.disabled is False
     at = purge_btn.click().run()
     assert not at.exception
-    remaining_ids = list(at.tabs[1].dataframe[0].value["ID"])
-    assert "gemini-legacy-exp" not in remaining_ids
-    assert "deep-research-max-preview-04-2026" not in remaining_ids
-    assert "deep-research-pro-preview-12-2025" not in remaining_ids
-    assert "deep-research-preview-04-2026" in remaining_ids
+    models_df_after = at.tabs[1].dataframe[0].value
+    assert "ID" not in models_df_after.columns
+    assert "Key-Env" not in models_df_after.columns
+    remaining_names = list(models_df_after["Name"])
+    assert "Gemini Legacy Preview" not in remaining_names
+    assert "Deep Research Max Preview (Apr-21-2026)" not in remaining_names
+    assert "Deep Research Pro Preview (Dec-12-2025) [Rerouted]" not in remaining_names
+    assert "Gemini Deep Research Agent" in remaining_names
+    model_sel = next(s for s in at.tabs[1].selectbox if s.key == "ki_model_quick_sel")
+    assert "gemini-legacy-exp" not in model_sel.options
+    assert "deep-research-preview-04-2026" in model_sel.options
     clean_zero_btn = next(b for b in at.tabs[1].button if b.label == "🧹 Clean Previews (0)")
     assert clean_zero_btn.disabled is True
 

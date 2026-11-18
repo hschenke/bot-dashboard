@@ -76,7 +76,9 @@ def execute_search_tool(
     if etype == "searxng_search":
         return search_searxng(tool, query, language=language, max_results=max_res)
     if etype == "yahoo_search":
-        return search_yahoo(query, endpoint_url=tool.endpoint_url, max_results=max_res, timeout_seconds=tmo)
+        return search_yahoo(
+            query, endpoint_url=tool.endpoint_url, max_results=max_res, timeout_seconds=tmo, language=language
+        )
     if etype == "duckduckgo_html":
         return search_duckduckgo_html(query, endpoint_url=tool.endpoint_url, max_results=max_res, timeout_seconds=tmo)
     if etype == "duckduckgo_lite":

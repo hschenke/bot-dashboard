@@ -243,6 +243,13 @@ def _discover_groq_models(api_key: str) -> list[AIModelSpec]:
     return specs[:24]
 
 
+def _parse_openrouter_per_1m(raw_val: object) -> float:
+    try:
+        return round(max(0.0, float(raw_val or 0.0) * 1_000_000.0), 4)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _discover_openrouter_free_models(api_key: str) -> list[AIModelSpec]:
     status, _, _, body = safe_http_request(
         "GET",
@@ -276,6 +283,8 @@ def _discover_openrouter_free_models(api_key: str) -> list[AIModelSpec]:
                 source="auto_discovered",
                 origin_apps=["openrouter-discovery"],
                 notes="Automatisch erkanntes `:free`-Modell über OpenRouter.",
+                input_cost_per_1m=_parse_openrouter_per_1m(pricing.get("prompt")),
+                output_cost_per_1m=_parse_openrouter_per_1m(pricing.get("completion")),
             )
         )
         if len(specs) >= 24:
