@@ -16,7 +16,9 @@ from src.ui.views.ki_secret_dialog import render_active_secret_dialog
 from src.ui.views.ki_secrets_section import render_secrets_manager_expander
 from src.ui.views.ki_sequences_tab import render_sequences_tab
 from src.ui.views.ki_task_overlay import (
+    filter_retryable_excluded_models,
     format_cleanup_message,
+    format_discover_feedback,
     format_unblock_feedback,
     invalidate_ki_ui_cache,
     load_cached_ui_state,
@@ -54,7 +56,14 @@ def _render_feedback_banner() -> None:
 
 
 def _handle_top_actions(
-    brain: KIWebsearchBrain, *, run_sync: bool, run_bench: bool, run_clean: bool, run_unblock: bool, exclude_previews: bool
+    brain: KIWebsearchBrain,
+    *,
+    run_sync: bool,
+    run_bench: bool,
+    run_clean: bool,
+    run_unblock: bool,
+    exclude_previews: bool,
+    retry_excluded: bool = False,
 ) -> None:
     if run_bench:
         try:
@@ -73,13 +82,15 @@ def _handle_top_actions(
         try:
             s = run_with_task_overlay(
                 "🔎 Discover",
-                "Suche neue Gemini-/Groq-/OpenRouter-Modelle & searx.space-Instanzen...",
-                lambda cb: brain.auto_sync(verify_discovered=True, exclude_previews=exclude_previews, on_progress=cb),
+                "Prüfe Quota-Recovery sowie neue Gemini-/Groq-/OpenRouter-Modelle & searx.space...",
+                lambda cb: brain.auto_sync(
+                    verify_discovered=True,
+                    exclude_previews=exclude_previews,
+                    retry_excluded=retry_excluded,
+                    on_progress=cb,
+                ),
             )
-            skipped = len(s.skipped_excluded) + len(s.skipped_unhealthy)
-            notes = [n for n in (f"{skipped} defekte/ausgeschlossene" if skipped else "", f"{len(s.skipped_previews)} Preview-Modelle" if s.skipped_previews else "") if n]
-            note_txt = f" ({', '.join(notes)} übersprungen)" if notes else ""
-            _flash("success" if not s.warnings else "warning", f"Discover fertig ({', '.join(s.checked_sources)}): +{len(s.added_models)} Modelle, +{len(s.added_tools)} Tools{note_txt}.")
+            _flash(*format_discover_feedback(s))
         except BrainError as exc:
             _flash("error", f"Discover fehlgeschlagen: {exc}")
         invalidate_ki_ui_cache()
@@ -134,23 +145,35 @@ def render_ki_view(settings: AppSettings, role: AuthRole = AuthRole.ADMIN) -> No
 
         b1, b2, b3, b4 = st.columns(4, vertical_alignment="center")
         with b1:
-            run_sync = st.button("🔎 Discover", key="ki_top_btn_sync", disabled=not is_admin, use_container_width=True, help="Sucht neue kostenfreie Modelle (Gemini, Groq, OpenRouter) & searx.space-Instanzen.")
+            run_sync = st.button("🔎 Discover", key="ki_top_btn_sync", disabled=not is_admin, use_container_width=True, help="Prüft Quota-429-Recovery und sucht neue Modelle (Gemini, Groq, OpenRouter) & searx.space-Instanzen.")
         with b2:
             run_bench = st.button("🚀 Benchmark & Optimize", key="ki_top_btn_bench", disabled=not is_admin, use_container_width=True, help="Testet alle aktivierten Modelle & Tools live und optimiert Fast, Standard & Deep.")
         with b3:
             run_clean = st.button("🧹 Prune Failing", key="ki_top_btn_clean", disabled=not is_admin, use_container_width=True, help="Entfernt Modelle/Tools mit Status Error, Quota 429 oder HTTP 202 dauerhaft. Sonstige Blocked-Tools bleiben erhalten.")
         with b4:
             run_unblock = st.button("🔓 Unblock Tools", key="ki_top_btn_unblock", disabled=not is_admin, use_container_width=True, help="Wendet Rules an, prüft searx.space-Instanzen & testet Blocked-Tools live.")
-        exclude_previews = st.checkbox(
-            "Preview- & Experimental-Modelle bei 'Discover' ausschließen",
-            value=True, key="ki_exclude_previews", disabled=not is_admin,
-            help="Ignoriert ältere `-preview`/`-exp` Gemini-Modelle (Deep Research Agent bleibt erhalten).",
-        )
+
+        c_prev, c_retry = st.columns(2)
+        with c_prev:
+            exclude_previews = st.checkbox(
+                "Preview- & Experimental-Modelle bei 'Discover' ausschließen",
+                value=True, key="ki_exclude_previews", disabled=not is_admin,
+                help="Ignoriert Preview-/Experimental-Modelle inkl. Deep-Research-Previews (kanonischer Deep Research Agent bleibt erhalten).",
+            )
+        with c_retry:
+            retry_targets = filter_retryable_excluded_models(
+                ui_state.excluded_model_ids, ui_state.excluded_model_reasons, exclude_previews=exclude_previews
+            )
+            retry_excluded = st.checkbox(
+                f"Ausgeschlossene Modelle bei 'Discover' erneut prüfen ({len(retry_targets)})",
+                value=False, key="ki_retry_excluded", disabled=(not is_admin or not retry_targets),
+                help="Prüft zuvor ausgeschlossene/Quota-429-Modelle beim Discover erneut (z. B. nach Bezahlkonto-Upgrade).",
+            )
         if is_admin:
             render_instant_overlay_bridge()
 
         # Overlay, Spinner & Alerts strikt außerhalb schmaler Spalten rendern
-        _handle_top_actions(brain, run_sync=run_sync, run_bench=run_bench, run_clean=run_clean, run_unblock=run_unblock, exclude_previews=exclude_previews)
+        _handle_top_actions(brain, run_sync=run_sync, run_bench=run_bench, run_clean=run_clean, run_unblock=run_unblock, exclude_previews=exclude_previews, retry_excluded=retry_excluded)
         _render_feedback_banner()
         render_secrets_manager_expander(brain, is_admin=is_admin, statuses=secret_statuses)
         st.caption(f"Speicher-Backend: `{brain.backend_name}`" + ("" if is_admin else " · Modus: Read-Only"))
@@ -159,7 +182,11 @@ def render_ki_view(settings: AppSettings, role: AuthRole = AuthRole.ADMIN) -> No
         with tab_seq:
             render_sequences_tab(brain, is_admin=is_admin, models=models, tools=tools, sequences=seqs)
         with tab_mod:
-            render_models_tab(brain, is_admin=is_admin, models=models, secret_statuses=secret_statuses, active_tab_label=KI_TAB_MODELS)
+            render_models_tab(
+                brain, is_admin=is_admin, models=models, secret_statuses=secret_statuses,
+                active_tab_label=KI_TAB_MODELS, excluded_model_ids=ui_state.excluded_model_ids,
+                excluded_model_reasons=ui_state.excluded_model_reasons, exclude_previews=exclude_previews,
+            )
         with tab_tool:
             render_tools_tab(brain, is_admin=is_admin, tools=tools, secret_statuses=secret_statuses, active_tab_label=KI_TAB_TOOLS)
         with tab_play:

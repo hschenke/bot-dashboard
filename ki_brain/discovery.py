@@ -14,9 +14,10 @@ from google import genai
 
 from ki_brain.benchmark import BrainBenchmarkRunner
 from ki_brain.catalog import build_default_models, build_default_tools
-from ki_brain.enums import BrainTier, ModelProvider, ProbeStatus
+from ki_brain.enums import BrainTier, ModelProvider, ProbeStatus, ToolCategory
 from ki_brain.llm_runner import UnifiedLLMRunner
 from ki_brain.models import AIModelSpec, BrainSecrets, ToolSpec
+from ki_brain.optimizer import optimize_tier_sequences
 from ki_brain.security import validate_identifier
 from ki_brain.storage import BrainRepository
 from ki_brain.tools.http_utils import API_HEADERS, safe_http_request
@@ -41,25 +42,39 @@ _GEMINI_SKIP_PARTS = (
     "computer-use",
     "customtools",
     "thinking-exp",
-    "gemini-4-argon",
-    "gemini-4-carbon",
-    "-ultra",
 )
 _GEMINI_TEXT_SERIES_RE = re.compile(
     r"^(?:gemini-(?:2\.5|3(?:\.[0-9]+)?|4(?:\.[0-9]+)?|5(?:\.[0-9]+)?|[3-9]-)|gemma-(?:3|4)|deep-research|learnlm)",
     re.IGNORECASE,
 )
-_PREVIEW_MARKERS = ("preview", "-exp", "_exp", "experimental", "-alpha")
+_CANONICAL_DEEP_RESEARCH_ID = "deep-research-preview-04-2026"
+_PREVIEW_MARKERS = (
+    "preview",
+    "-exp",
+    "_exp",
+    "(exp)",
+    "experimental",
+    "-alpha",
+    "-beta",
+    "(beta)",
+    "[rerouted]",
+    "rerouted",
+    "deprecated",
+)
 _VERSION_RE = re.compile(r"(?:gemini|gemma)-(\d+)(?:\.(\d+))?")
 _DATED_CLONE_RE = re.compile(r"-(?:00[1-9]|202\d|\d{2}-\d{2,4})$")
 
 
 def is_preview_or_experimental_model(model_id: str, display_name: str = "") -> bool:
-    """Erkennt Preview-/Experimental-Modelle (ausgenommen autonomer Deep Research Agent)."""
-    low = f"{model_id} {display_name}".lower()
-    if "deep-research" in low:
+    """Erkennt Preview-/Experimental-Modelle (ausgenommen kanonischer Deep Research Agent)."""
+    clean_id = (model_id or "").strip().lower()
+    name_low = (display_name or "").strip().lower()
+    if clean_id == _CANONICAL_DEEP_RESEARCH_ID and not any(
+        bad in name_low for bad in ("rerouted", "deprecated")
+    ):
         return False
-    return any(tok in low for tok in _PREVIEW_MARKERS) or model_id.lower().endswith("-exp")
+    low = f"{clean_id} {name_low}"
+    return any(tok in low for tok in _PREVIEW_MARKERS) or clean_id.endswith("-exp")
 
 
 def _rank_gemini_candidate(spec: AIModelSpec) -> tuple[int, int, int, int, int, str]:
@@ -79,11 +94,14 @@ class DiscoverySummary:
 
     added_models: list[str] = field(default_factory=list)
     added_tools: list[str] = field(default_factory=list)
+    recovered_models: list[str] = field(default_factory=list)
+    rechecked_models: int = 0
     checked_sources: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     skipped_excluded: list[str] = field(default_factory=list)
     skipped_unhealthy: list[str] = field(default_factory=list)
     skipped_previews: list[str] = field(default_factory=list)
+    existing_previews_count: int = 0
 
 
 def _guess_gemini_tier(model_id: str) -> tuple[BrainTier, bool]:
@@ -92,7 +110,7 @@ def _guess_gemini_tier(model_id: str) -> tuple[BrainTier, bool]:
         return BrainTier.DEEP, True
     if "lite" in low:
         return BrainTier.FAST, False
-    if "hydrogen" in low or "argon" in low or "pro" in low:
+    if any(tok in low for tok in ("hydrogen", "argon", "carbon", "pro", "ultra")):
         return BrainTier.STANDARD if "hydrogen" in low else BrainTier.DEEP, False
     return BrainTier.STANDARD, False
 
@@ -102,6 +120,8 @@ def _sync_new_builtins(
     secrets: BrainSecrets,
     excluded_models: set[str],
     excluded_tools: set[str],
+    *,
+    retry_model_ids: set[str] | None = None,
 ) -> tuple[list[str], list[str], list[str]]:
     raw_meta = repo.get_meta("known_builtin_ids", "{}")
     try:
@@ -112,12 +132,14 @@ def _sync_new_builtins(
     known_tools = set(known.get("tools", []))
     existing_models = {m.id for m in repo.list_models()}
     existing_tools = {t.id for t in repo.list_tools()}
+    retry_set = retry_model_ids or set()
 
     added_m: list[str] = []
     skipped: list[str] = []
     for m in build_default_models():
         if m.id in excluded_models:
-            skipped.append(m.id)
+            if m.id not in retry_set:
+                skipped.append(m.id)
         elif m.id not in known_models and m.id not in existing_models:
             repo.upsert_model(m)
             added_m.append(m.id)
@@ -181,7 +203,7 @@ def _discover_gemini_models(client: genai.Client, *, exclude_previews: bool = Tr
             )
         )
     discovered.sort(key=_rank_gemini_candidate, reverse=True)
-    return discovered[:24], skipped_previews
+    return discovered[:32], skipped_previews
 
 
 def _discover_groq_models(api_key: str) -> list[AIModelSpec]:
@@ -316,6 +338,119 @@ def _probe_candidate_models(
     return results
 
 
+def _recheck_unhealthy_existing(
+    repo: BrainRepository,
+    secrets: BrainSecrets,
+    bench: BrainBenchmarkRunner,
+    *,
+    exclude_previews: bool,
+    on_progress: ProgressCallback | None = None,
+) -> tuple[list[str], int, bool]:
+    targets = [
+        m
+        for m in repo.list_models(enabled_only=True)
+        if m.last_status in {ProbeStatus.QUOTA_LIMITED, ProbeStatus.ERROR}
+        and (not m.requires_api_key or secrets.has_key(m.api_key_env))
+        and not (exclude_previews and is_preview_or_experimental_model(m.model_id, m.name))
+    ]
+    recovered: list[str] = []
+    quota_recovered = False
+    for idx, model in enumerate(targets, start=1):
+        if on_progress:
+            on_progress(
+                0.08 + 0.12 * (idx / len(targets)),
+                f"Prüfe bisher limitiertes Modell ({idx}/{len(targets)}): `{model.id}`...",
+            )
+        was_quota = model.last_status == ProbeStatus.QUOTA_LIMITED
+        probed, entry = bench.probe_model(model)
+        repo.upsert_model(probed)
+        if entry.status == ProbeStatus.OK:
+            recovered.append(probed.id)
+            if was_quota:
+                quota_recovered = True
+
+    ai_tools = [
+        t
+        for t in repo.list_tools(enabled_only=True)
+        if t.category == ToolCategory.AI_GROUNDING
+        and t.last_status in {ProbeStatus.QUOTA_LIMITED, ProbeStatus.ERROR}
+        and (not t.requires_api_key or secrets.has_key(t.api_key_env))
+    ]
+    if ai_tools:
+        healthy_models = repo.list_models(enabled_only=True)
+        grounding_model = next(
+            (
+                m
+                for m in healthy_models
+                if not m.is_deep_agent
+                and m.provider == ModelProvider.GOOGLE_GEMINI
+                and m.last_status == ProbeStatus.OK
+            ),
+            None,
+        )
+        if grounding_model is not None:
+            for tool in ai_tools:
+                was_quota = tool.last_status == ProbeStatus.QUOTA_LIMITED
+                probed_t, entry_t = bench.probe_tool(tool, grounding_model=grounding_model)
+                repo.upsert_tool(probed_t)
+                if was_quota and entry_t.status == ProbeStatus.OK:
+                    quota_recovered = True
+    return recovered, len(targets), quota_recovered
+
+
+def _resolve_retry_model_ids(
+    excluded_models: set[str],
+    excluded_reasons: dict[str, str],
+    *,
+    retry_excluded: bool,
+    quota_recovered: bool,
+) -> set[str]:
+    if retry_excluded:
+        return set(excluded_models)
+    if quota_recovered:
+        return {
+            mid
+            for mid in excluded_models
+            if excluded_reasons.get(mid, "legacy") in {"quota_limited", "legacy"}
+        }
+    return set()
+
+
+def _persist_discovered_candidates(
+    repo: BrainRepository,
+    candidates: list[AIModelSpec],
+    bench: BrainBenchmarkRunner,
+    *,
+    verify_discovered: bool,
+    on_progress: ProgressCallback | None = None,
+) -> tuple[list[str], list[str]]:
+    if not candidates:
+        return [], []
+    added: list[str] = []
+    unhealthy: list[str] = []
+    unhealthy_reasons: dict[str, str] = {}
+    if not verify_discovered:
+        for spec in candidates:
+            repo.upsert_model(spec)
+            repo.remove_excluded_id(model_id=spec.id)
+            added.append(spec.id)
+        return added, unhealthy
+
+    for probed, status in _probe_candidate_models(candidates, bench, on_progress=on_progress):
+        if status in {ProbeStatus.ERROR, ProbeStatus.QUOTA_LIMITED}:
+            unhealthy.append(probed.id)
+            unhealthy_reasons[probed.id] = (
+                "quota_limited" if status == ProbeStatus.QUOTA_LIMITED else "error"
+            )
+            continue
+        repo.upsert_model(probed)
+        repo.remove_excluded_id(model_id=probed.id)
+        added.append(probed.id)
+    if unhealthy:
+        repo.add_excluded_ids(model_ids=unhealthy, model_reasons=unhealthy_reasons)
+    return added, unhealthy
+
+
 def auto_sync_catalog(
     repo: BrainRepository,
     secrets: BrainSecrets,
@@ -325,18 +460,38 @@ def auto_sync_catalog(
     runner: UnifiedLLMRunner | None = None,
     verify_discovered: bool = True,
     exclude_previews: bool = True,
+    retry_excluded: bool = False,
     on_progress: ProgressCallback | None = None,
 ) -> DiscoverySummary:
-    """Erkennt neue Builtins, searx.space, Gemini-, Groq-, OpenRouter-Free-Modelle und schließt defekte/Preview-IDs aus."""
+    """Erkennt neue/reaktivierte Modelle & Tools, prüft Quota-Recovery und schließt defekte/Preview-IDs aus."""
     from ki_brain.tools.searxng import build_searxng_tool, discover_verified_searxng_pool
 
+    probe_runner = runner or UnifiedLLMRunner(secrets, genai_client=genai_client)
+    bench = BrainBenchmarkRunner(repo, secrets, probe_runner)
+
+    recovered_models: list[str] = []
+    rechecked_models = 0
+    quota_recovered = False
+    if verify_discovered:
+        recovered_models, rechecked_models, quota_recovered = _recheck_unhealthy_existing(
+            repo, secrets, bench, exclude_previews=exclude_previews, on_progress=on_progress
+        )
+
     if on_progress:
-        on_progress(0.08, "Gleiche Standardkatalog-Erweiterungen (Builtins) ab...")
+        on_progress(0.22, "Gleiche Standardkatalog-Erweiterungen (Builtins) ab...")
     excluded_models, excluded_tools = repo.list_excluded_ids()
-    added_models, added_tools, skipped_excluded = _sync_new_builtins(repo, secrets, excluded_models, excluded_tools)
+    excluded_m_reasons, _ = repo.list_excluded_reasons()
+    retry_ids = _resolve_retry_model_ids(
+        excluded_models,
+        excluded_m_reasons,
+        retry_excluded=retry_excluded,
+        quota_recovered=quota_recovered,
+    )
+    added_models, added_tools, skipped_excluded = _sync_new_builtins(
+        repo, secrets, excluded_models, excluded_tools, retry_model_ids=retry_ids
+    )
     sources = ["builtins"]
     warnings: list[str] = []
-    skipped_unhealthy: list[str] = []
     skipped_previews: list[str] = []
 
     if "searxng_public" not in excluded_tools:
@@ -344,7 +499,7 @@ def auto_sync_catalog(
         existing_searx = repo.get_tool("searxng_public")
         if existing_searx is None or (existing_searx.last_status != ProbeStatus.OK and existing_searx.source != "custom"):
             if on_progress:
-                on_progress(0.20, "Prüfe öffentliche SearXNG-Instanzen (searx.space + Fallback-Pool)...")
+                on_progress(0.28, "Prüfe öffentliche SearXNG-Instanzen (searx.space + Fallback-Pool)...")
             try:
                 verified_pool = discover_verified_searxng_pool(max_verify=10, max_keep=4, http_request_fn=safe_http_request)
                 if verified_pool:
@@ -367,11 +522,11 @@ def auto_sync_catalog(
             if spec.id in existing_ids or spec.id in seen_candidates:
                 continue
             seen_candidates.add(spec.id)
-            if spec.id in excluded_models:
-                skipped_excluded.append(spec.id)
-                continue
             if exclude_previews and is_preview_or_experimental_model(spec.model_id, spec.name):
                 skipped_previews.append(spec.id)
+                continue
+            if spec.id in excluded_models and spec.id not in retry_ids:
+                skipped_excluded.append(spec.id)
                 continue
             candidates.append(spec)
             collected_here += 1
@@ -382,24 +537,34 @@ def auto_sync_catalog(
     if genai_client is not None or gem_key:
         sources.append("gemini-models")
         if on_progress:
-            on_progress(0.32, "Frage aktuelle Gemini-Modelle über `models.list()` ab...")
+            on_progress(0.36, "Frage aktuelle Gemini-Modelle über `models.list()` ab...")
         try:
             client = genai_client or genai.Client(api_key=gem_key)
             gem_found, gem_previews = _discover_gemini_models(client, exclude_previews=exclude_previews)
             for pid in gem_previews:
                 if pid not in existing_ids and pid not in skipped_previews:
                     skipped_previews.append(pid)
-            _collect(gem_found, limit=12)
+            _collect(gem_found, limit=20)
         except Exception as exc:
             warnings.append(f"Gemini Auto-Discovery: {exc}")
+
+    if retry_ids:
+        retry_builtins = [
+            m
+            for m in build_default_models()
+            if m.id in retry_ids
+            and m.id not in existing_ids
+            and (not verify_discovered or not m.requires_api_key or genai_client is not None or secrets.has_key(m.api_key_env))
+        ]
+        _collect(retry_builtins, limit=0)
 
     groq_key = secrets.resolve_key("GROQ_API_KEY")
     if groq_key:
         sources.append("groq-models")
         if on_progress:
-            on_progress(0.42, "Frage kostenfreie Groq-Modelle ab...")
+            on_progress(0.44, "Frage kostenfreie Groq-Modelle ab...")
         try:
-            _collect(_discover_groq_models(groq_key), limit=6)
+            _collect(_discover_groq_models(groq_key), limit=8)
         except Exception as exc:
             warnings.append(f"Groq Auto-Discovery: {exc}")
 
@@ -409,7 +574,7 @@ def auto_sync_catalog(
         if on_progress:
             on_progress(0.50, "Frage OpenRouter `:free`-Modelle ab...")
         try:
-            _collect(_discover_openrouter_free_models(or_key), limit=6)
+            _collect(_discover_openrouter_free_models(or_key), limit=8)
         except Exception as exc:
             warnings.append(f"OpenRouter Auto-Discovery: {exc}")
 
@@ -424,33 +589,36 @@ def auto_sync_catalog(
         except Exception as exc:
             warnings.append(f"Manifest-Sync: {exc}")
 
-    if verify_discovered and candidates:
-        probe_runner = runner or UnifiedLLMRunner(secrets, genai_client=genai_client)
-        bench = BrainBenchmarkRunner(repo, secrets, probe_runner)
-        for probed, status in _probe_candidate_models(candidates, bench, on_progress=on_progress):
-            if status in {ProbeStatus.ERROR, ProbeStatus.QUOTA_LIMITED}:
-                skipped_unhealthy.append(probed.id)
-                continue
-            repo.upsert_model(probed)
-            existing_ids.add(probed.id)
-            added_models.append(probed.id)
-        if skipped_unhealthy:
-            repo.add_excluded_ids(model_ids=skipped_unhealthy)
-    else:
-        for spec in candidates:
-            repo.upsert_model(spec)
-            existing_ids.add(spec.id)
-            added_models.append(spec.id)
+    cand_added, skipped_unhealthy = _persist_discovered_candidates(
+        repo, candidates, bench, verify_discovered=verify_discovered, on_progress=on_progress
+    )
+    added_models.extend(cand_added)
 
+    if added_models or recovered_models:
+        seqs = optimize_tier_sequences(
+            repo.list_models(),
+            repo.list_tools(),
+            repo.list_sequences(),
+            force_overwrite=False,
+        )
+        for seq in seqs.values():
+            repo.upsert_sequence(seq)
+
+    existing_previews_count = sum(
+        1 for m in repo.list_models() if is_preview_or_experimental_model(m.model_id, m.name)
+    )
     if on_progress:
         on_progress(1.0, f"Discovery fertig: +{len(added_models)} Modelle, +{len(added_tools)} Tools.")
 
     return DiscoverySummary(
         added_models=added_models,
         added_tools=added_tools,
+        recovered_models=recovered_models,
+        rechecked_models=rechecked_models,
         checked_sources=sources,
         warnings=warnings,
         skipped_excluded=skipped_excluded,
         skipped_unhealthy=skipped_unhealthy,
         skipped_previews=skipped_previews,
+        existing_previews_count=existing_previews_count,
     )

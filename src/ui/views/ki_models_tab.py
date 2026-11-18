@@ -15,11 +15,60 @@ from ki_brain import (
 
 from src.ui.views.ki_secret_dialog import render_missing_keys_action_bar
 from src.ui.views.ki_sequences_tab import format_probe_badge
-from src.ui.views.ki_task_overlay import invalidate_ki_ui_cache
+from src.ui.views.ki_task_overlay import (
+    filter_retryable_excluded_models,
+    format_discover_feedback,
+    invalidate_ki_ui_cache,
+    run_with_task_overlay,
+)
 
 
 def _set_feedback(level: str, message: str) -> None:
     st.session_state["ki_brain_feedback"] = {"level": level, "message": message}
+
+
+def _render_model_maintenance_bar(
+    brain: KIWebsearchBrain,
+    resolved: list[AIModelSpec],
+    *,
+    excluded_model_ids: tuple[str, ...],
+    excluded_model_reasons: dict[str, str] | None,
+    exclude_previews: bool,
+) -> None:
+    preview_models = [m for m in resolved if is_preview_or_experimental_model(m.model_id, m.name)]
+    retry_targets = filter_retryable_excluded_models(
+        excluded_model_ids, excluded_model_reasons, exclude_previews=exclude_previews
+    )
+    c_clean, c_retry = st.columns(2)
+    with c_clean:
+        do_clean = st.button(
+            f"🧹 Clean Previews ({len(preview_models)})", key="ki_purge_previews_btn", disabled=not preview_models,
+            use_container_width=True,
+            help=(f"Entfernt {len(preview_models)} Preview-/Experimental-Modell(e) dauerhaft (Deep Research Agent bleibt erhalten)." if preview_models else "Keine Preview-/Experimental-Modelle vorhanden (Deep Research Agent bleibt erhalten)."),
+        )
+    with c_retry:
+        do_retry = st.button(
+            f"🔄 Retry Excluded ({len(retry_targets)})", key="ki_retry_excluded_btn", disabled=not retry_targets,
+            use_container_width=True,
+            help=(f"Prüft {len(retry_targets)} ausgeschlossene Modell(e) inkl. früherer Quota-429-Einträge erneut und aktiviert funktionierende Modelle." if retry_targets else "Aktuell keine ausgeschlossenen Modelle zum erneuten Prüfen vorhanden."),
+        )
+    # Overlay, Cache-Invalidierung & Feedback strikt außerhalb schmaler Spalten
+    if do_clean:
+        removed = brain.remove_preview_models()
+        invalidate_ki_ui_cache()
+        _set_feedback("success" if removed else "info", f"Clean Previews: {len(removed)} Modell(e) entfernt ({', '.join(removed) or '–'}).")
+        st.rerun()
+    if do_retry:
+        try:
+            summary = run_with_task_overlay(
+                "🔄 Retry Excluded", "Prüfe ausgeschlossene & Quota-429-Modelle erneut...",
+                lambda cb: brain.auto_sync(verify_discovered=True, exclude_previews=exclude_previews, retry_excluded=True, on_progress=cb),
+            )
+            _set_feedback(*format_discover_feedback(summary, prefix="Retry Excluded fertig"))
+        except BrainError as exc:
+            _set_feedback("error", f"Retry Excluded fehlgeschlagen: {exc}")
+        invalidate_ki_ui_cache()
+        st.rerun()
 
 
 def render_models_tab(
@@ -29,71 +78,28 @@ def render_models_tab(
     models: list[AIModelSpec] | None = None,
     secret_statuses: list[SecretStatusEntry] | None = None,
     active_tab_label: str | None = None,
+    excluded_model_ids: tuple[str, ...] = (),
+    excluded_model_reasons: dict[str, str] | None = None,
+    exclude_previews: bool = True,
 ) -> None:
     """Zeigt alle registrierten KI-Modelle und erlaubt dynamisches CRUD."""
     resolved = models if models is not None else brain.list_models()
-    st.caption(
-        "Zentrale Modell-Liste aus Research-Bot, Alert-Bot, Gemini API Discovery & OpenAI-kompatiblen Free-Endpunkten."
-    )
+    st.caption("Zentrale Modell-Liste aus Research-Bot, Alert-Bot, Gemini API Discovery & OpenAI-kompatiblen Free-Endpunkten.")
     rows = [
-        {
-            "Name": m.name,
-            "ID": m.id,
-            "Provider": m.provider.value,
-            "Tier": m.tier_hint.value.capitalize(),
-            "Status": format_probe_badge(m.last_status, enabled=m.enabled),
-            "Latenz (ms)": m.last_latency_ms,
-            "Score": m.quality_score,
-            "Key-Env": m.api_key_env or "–",
-            "Diagnose": m.last_error or "–",
-        }
+        {"Name": m.name, "ID": m.id, "Provider": m.provider.value, "Tier": m.tier_hint.value.capitalize(), "Status": format_probe_badge(m.last_status, enabled=m.enabled), "Latenz (ms)": m.last_latency_ms, "Score": m.quality_score, "Key-Env": m.api_key_env or "–", "Diagnose": m.last_error or "–"}
         for m in resolved
     ]
     st.dataframe(
-        rows,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Score": st.column_config.NumberColumn(
-                "Score",
-                format="%.1f",
-                help=(
-                    "Qualitätsscore 0–100 (höher = besser): 45 % Latenz-Speed + 55 % Tier-Stärke "
-                    "(Fast 76 / Standard 84 / Deep 92) + 6 JSON-Bonus. Fixwerte: Untested=55, "
-                    "Quota 429=12, Error/Blocked=5, Missing Key=0."
-                ),
-            )
-        },
+        rows, use_container_width=True, hide_index=True,
+        column_config={"Score": st.column_config.NumberColumn("Score", format="%.1f", help="Qualitätsscore 0–100 (höher = besser): 45 % Latenz + 55 % Tier-Stärke (Fast 76 / Standard 84 / Deep 92) + 6 JSON-Bonus. Fixwerte: Untested=55, Quota 429=12, Error/Blocked=5, Missing Key=0.")},
     )
 
     model_envs = {m.api_key_env.strip().upper() for m in resolved if m.api_key_env.strip()}
-    render_missing_keys_action_bar(
-        brain,
-        is_admin=is_admin,
-        env_filter=model_envs,
-        section_key="models",
-        statuses=secret_statuses,
-        active_tab_label=active_tab_label,
-    )
-
+    render_missing_keys_action_bar(brain, is_admin=is_admin, env_filter=model_envs, section_key="models", statuses=secret_statuses, active_tab_label=active_tab_label)
     if not is_admin:
         return
 
-    preview_models = [m for m in resolved if not m.is_deep_agent and is_preview_or_experimental_model(m.model_id, m.name)]
-    if st.button(
-        f"🧹 Clean Previews ({len(preview_models)})",
-        key="ki_purge_previews_btn",
-        disabled=not preview_models,
-        help=(
-            f"Entfernt {len(preview_models)} Preview-/Experimental-Modell(e) dauerhaft (Deep Research Agent bleibt erhalten)."
-            if preview_models
-            else "Aktuell keine Preview-/Experimental-Modelle in der Tabelle vorhanden (Deep Research Agent bleibt erhalten)."
-        ),
-    ):
-        removed = brain.remove_preview_models()
-        invalidate_ki_ui_cache()
-        _set_feedback("success" if removed else "info", f"Clean Previews: {len(removed)} Modell(e) entfernt ({', '.join(removed) or '–'}).")
-        st.rerun()
+    _render_model_maintenance_bar(brain, resolved, excluded_model_ids=excluded_model_ids, excluded_model_reasons=excluded_model_reasons, exclude_previews=exclude_previews)
 
     st.subheader("⚙️ Modell aktivieren, bearbeiten oder entfernen")
     model_ids = [m.id for m in resolved]

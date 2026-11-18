@@ -162,7 +162,7 @@ class KIWebsearchBrain:
     def remove_model(self, model_id: str) -> bool:
         removed = self._repo.delete_model(model_id)
         if removed:
-            self._repo.add_excluded_ids(model_ids=[model_id])
+            self._repo.add_excluded_ids(model_ids=[model_id], reason="manual")
             self._prune_ids_from_sequences(model_ids={model_id.strip().lower()})
         return removed
 
@@ -186,7 +186,7 @@ class KIWebsearchBrain:
     def remove_tool(self, tool_id: str) -> bool:
         removed = self._repo.delete_tool(tool_id)
         if removed:
-            self._repo.add_excluded_ids(tool_ids=[tool_id])
+            self._repo.add_excluded_ids(tool_ids=[tool_id], reason="manual")
             self._prune_ids_from_sequences(tool_ids={tool_id.strip().lower()})
         return removed
 
@@ -226,7 +226,20 @@ class KIWebsearchBrain:
         if removed_models or removed_tools:
             rem_m_ids = [mid for mid, _ in removed_models]
             rem_t_ids = [tid for tid, _ in removed_tools]
-            self._repo.add_excluded_ids(model_ids=rem_m_ids, tool_ids=rem_t_ids)
+            model_reasons = {
+                mid: ("quota_limited" if st == ProbeStatus.QUOTA_LIMITED else "error")
+                for mid, st in removed_models
+            }
+            tool_reasons = {
+                tid: ("quota_limited" if st == ProbeStatus.QUOTA_LIMITED else "error")
+                for tid, st in removed_tools
+            }
+            self._repo.add_excluded_ids(
+                model_ids=rem_m_ids,
+                tool_ids=rem_t_ids,
+                model_reasons=model_reasons,
+                tool_reasons=tool_reasons,
+            )
             self._prune_ids_from_sequences(model_ids=set(rem_m_ids), tool_ids=set(rem_t_ids))
             seqs = optimize_tier_sequences(
                 self._repo.list_models(),
@@ -252,15 +265,15 @@ class KIWebsearchBrain:
         return [mid for mid, _ in rem_m], [tid for tid, _ in rem_t]
 
     def remove_preview_models(self) -> list[str]:
-        """Entfernt veraltete Preview-/Experimental-Modelle (außer Deep Research) dauerhaft aus Katalog & Sequenzen."""
+        """Entfernt Preview-/Experimental-Modelle (ausgenommen kanonischer Deep Research Agent) dauerhaft."""
         from ki_brain.discovery import is_preview_or_experimental_model
 
         removed: list[str] = []
         for m in self._repo.list_models():
-            if not m.is_deep_agent and is_preview_or_experimental_model(m.model_id, m.name) and self._repo.delete_model(m.id):
+            if is_preview_or_experimental_model(m.model_id, m.name) and self._repo.delete_model(m.id):
                 removed.append(m.id)
         if removed:
-            self._repo.add_excluded_ids(model_ids=removed)
+            self._repo.add_excluded_ids(model_ids=removed, reason="preview")
             self._prune_ids_from_sequences(model_ids=set(removed))
             seqs = optimize_tier_sequences(
                 self._repo.list_models(),
@@ -296,24 +309,48 @@ class KIWebsearchBrain:
             self._secrets, genai_client=self._genai_client, rate_limiter=self._rate_limiter
         )
 
+    def _reset_items_for_secret(
+        self, clean_name: str, from_statuses: set[ProbeStatus], target_status: ProbeStatus, error_msg: str = ""
+    ) -> None:
+        for m in self._repo.list_models():
+            if m.api_key_env.strip().upper() == clean_name and m.last_status in from_statuses:
+                self._repo.upsert_model(m.model_copy(update={"last_status": target_status, "last_error": error_msg}))
+        for t in self._repo.list_tools():
+            if t.api_key_env.strip().upper() == clean_name and t.last_status in from_statuses:
+                self._repo.upsert_tool(t.model_copy(update={"last_status": target_status, "last_error": error_msg}))
+
     def set_secret(self, env_name: str, new_secret_value: str) -> str:
-        """Speichert oder überschreibt ein Secret komplett verschlüsselt (Write-Only) und entsperrt Missing-Key-Einträge."""
+        """Speichert oder überschreibt ein Secret komplett verschlüsselt (Write-Only) und entsperrt Key-/Quota-Einträge."""
         clean_name = validate_secret_env_name(env_name)
         encrypted = encrypt_secret_value(new_secret_value)
         updated_at = self._repo.upsert_encrypted_secret(clean_name, encrypted)
         self._refresh_runtime_secrets()
-        for m in self._repo.list_models():
-            if m.api_key_env.upper() == clean_name and m.last_status == ProbeStatus.AUTH_MISSING:
-                self._repo.upsert_model(m.model_copy(update={"last_status": ProbeStatus.UNTESTED, "last_error": ""}))
-        for t in self._repo.list_tools():
-            if t.api_key_env.upper() == clean_name and t.last_status == ProbeStatus.AUTH_MISSING:
-                self._repo.upsert_tool(t.model_copy(update={"last_status": ProbeStatus.UNTESTED, "last_error": ""}))
+        self._reset_items_for_secret(
+            clean_name,
+            {ProbeStatus.AUTH_MISSING, ProbeStatus.QUOTA_LIMITED, ProbeStatus.ERROR},
+            ProbeStatus.UNTESTED,
+        )
         return updated_at
 
     def delete_secret(self, env_name: str) -> bool:
-        """Entfernt ein im Brain-Vault gespeichertes Secret."""
-        removed = self._repo.delete_encrypted_secret(env_name)
+        """Entfernt ein im Brain-Vault gespeichertes Secret und aktualisiert abhängige Statuswerte."""
+        clean_name = validate_secret_env_name(env_name)
+        removed = self._repo.delete_encrypted_secret(clean_name)
         self._refresh_runtime_secrets()
+        if removed:
+            if self._secrets.has_key(clean_name):
+                self._reset_items_for_secret(
+                    clean_name,
+                    {ProbeStatus.OK, ProbeStatus.QUOTA_LIMITED, ProbeStatus.ERROR, ProbeStatus.AUTH_MISSING},
+                    ProbeStatus.UNTESTED,
+                )
+            else:
+                self._reset_items_for_secret(
+                    clean_name,
+                    {ProbeStatus.OK, ProbeStatus.QUOTA_LIMITED, ProbeStatus.ERROR, ProbeStatus.UNTESTED},
+                    ProbeStatus.AUTH_MISSING,
+                    f"Key {clean_name} fehlt.",
+                )
         return removed
 
     def probe_items_for_secret(self, env_name: str) -> list[BenchmarkEntry]:
@@ -387,7 +424,14 @@ class KIWebsearchBrain:
         for name in all_names:
             in_vault = name in vault_ts
             in_env = self._base_secrets.has_key(name)
-            source = "Brain Vault (verschlüsselt)" if in_vault else ("ENV / Streamlit Secrets" if in_env else "Nicht gesetzt")
+            if in_vault and in_env:
+                source = "Brain Vault (verschlüsselt, überschreibt ENV/Secrets)"
+            elif in_vault:
+                source = "Brain Vault (verschlüsselt)"
+            elif in_env:
+                source = "ENV / Streamlit Secrets"
+            else:
+                source = "Nicht gesetzt"
             affected = [
                 *[f"Model: {m.id}" for m in models_list if m.api_key_env.strip().upper() == name],
                 *[f"Tool: {t.id}" for t in tools_list if t.api_key_env.strip().upper() == name],
@@ -420,6 +464,7 @@ class KIWebsearchBrain:
         *,
         verify_discovered: bool = True,
         exclude_previews: bool = True,
+        retry_excluded: bool = False,
         on_progress: Callable[[float, str], None] | None = None,
     ) -> DiscoverySummary:
         return auto_sync_catalog(
@@ -430,6 +475,7 @@ class KIWebsearchBrain:
             runner=self._runner,
             verify_discovered=verify_discovered,
             exclude_previews=exclude_previews,
+            retry_excluded=retry_excluded,
             on_progress=on_progress,
         )
 

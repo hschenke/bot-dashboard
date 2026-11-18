@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime
 import json
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ki_brain.catalog import build_default_models, build_default_sequences, build_default_tools
@@ -28,6 +28,8 @@ class BrainDashboardState:
     sequences: dict[BrainTier, TierSequenceConfig]
     latest_benchmark: BenchmarkReport | None
     secret_timestamps: dict[str, str]
+    excluded_model_ids: tuple[str, ...] = ()
+    excluded_model_reasons: dict[str, str] = field(default_factory=dict)
 
 _SCHEMA_SQL: tuple[str, ...] = (
     """
@@ -76,6 +78,28 @@ _SCHEMA_SQL: tuple[str, ...] = (
 
 def _utc_now_iso() -> str:
     return datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds")
+
+
+def _parse_excluded_payload(raw: str) -> tuple[set[str], set[str]]:
+    try:
+        data = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return set(), set()
+    models = {str(x).strip().lower() for x in data.get("models", []) if str(x).strip()}
+    tools = {str(x).strip().lower() for x in data.get("tools", []) if str(x).strip()}
+    return models, tools
+
+
+def _parse_reasons_payload(raw: str) -> tuple[dict[str, str], dict[str, str]]:
+    try:
+        data = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return {}, {}
+    m_raw = data.get("models") if isinstance(data.get("models"), dict) else {}
+    t_raw = data.get("tools") if isinstance(data.get("tools"), dict) else {}
+    m_reasons = {str(k).strip().lower(): str(v).strip() for k, v in m_raw.items() if str(k).strip() and str(v).strip()}
+    t_reasons = {str(k).strip().lower(): str(v).strip() for k, v in t_raw.items() if str(k).strip() and str(v).strip()}
+    return m_reasons, t_reasons
 
 
 class BrainRepository:
@@ -206,14 +230,11 @@ class BrainRepository:
 
     def list_excluded_ids(self) -> tuple[set[str], set[str]]:
         """Liefert persistent ausgeschlossene (gelöschte/defekte) Modell- und Tool-IDs."""
-        raw = self.get_meta("excluded_ids", "{}")
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            return set(), set()
-        models = {str(x).strip() for x in data.get("models", []) if str(x).strip()}
-        tools = {str(x).strip() for x in data.get("tools", []) if str(x).strip()}
-        return models, tools
+        return _parse_excluded_payload(self.get_meta("excluded_ids", "{}"))
+
+    def list_excluded_reasons(self) -> tuple[dict[str, str], dict[str, str]]:
+        """Liefert optionale Ausschlussgründe (`manual`, `quota_limited`, `error`, `preview`)."""
+        return _parse_reasons_payload(self.get_meta("excluded_reasons", "{}"))
 
     def _save_excluded_ids(self, models: set[str], tools: set[str]) -> None:
         self.set_meta(
@@ -221,13 +242,22 @@ class BrainRepository:
             json.dumps({"models": sorted(models), "tools": sorted(tools)}),
         )
 
+    def _save_excluded_reasons(self, m_reasons: dict[str, str], t_reasons: dict[str, str]) -> None:
+        self.set_meta(
+            "excluded_reasons",
+            json.dumps({"models": dict(sorted(m_reasons.items())), "tools": dict(sorted(t_reasons.items()))}),
+        )
+
     def add_excluded_ids(
         self,
         *,
         model_ids: list[str] | set[str] | tuple[str, ...] = (),
         tool_ids: list[str] | set[str] | tuple[str, ...] = (),
+        reason: str = "",
+        model_reasons: dict[str, str] | None = None,
+        tool_reasons: dict[str, str] | None = None,
     ) -> None:
-        """Markiert entfernte oder nicht funktionierende IDs dauerhaft gegen Auto-Sync-Wiederaufnahme."""
+        """Markiert entfernte oder nicht funktionierende IDs dauerhaft inkl. Ausschlussgrund."""
         clean_m = {str(x).strip().lower() for x in model_ids if str(x).strip()}
         clean_t = {str(x).strip().lower() for x in tool_ids if str(x).strip()}
         if not clean_m and not clean_t:
@@ -238,20 +268,42 @@ class BrainRepository:
         if updated_m != models or updated_t != tools:
             self._save_excluded_ids(updated_m, updated_t)
 
+        m_res_map, t_res_map = self.list_excluded_reasons()
+        orig_m, orig_t = dict(m_res_map), dict(t_res_map)
+        clean_default = reason.strip()
+        for mid in clean_m:
+            r = (model_reasons or {}).get(mid, clean_default).strip()
+            if r:
+                m_res_map[mid] = r
+        for tid in clean_t:
+            r = (tool_reasons or {}).get(tid, clean_default).strip()
+            if r:
+                t_res_map[tid] = r
+        if m_res_map != orig_m or t_res_map != orig_t:
+            self._save_excluded_reasons(m_res_map, t_res_map)
+
     def remove_excluded_id(self, *, model_id: str = "", tool_id: str = "") -> None:
-        """Hebt den Auto-Sync-Ausschluss bei expliziter manueller Neuanlage wieder auf."""
+        """Hebt den Auto-Sync-Ausschluss bei expliziter Wiederaufnahme wieder auf."""
         models, tools = self.list_excluded_ids()
-        changed = False
+        m_reasons, t_reasons = self.list_excluded_reasons()
+        ids_changed = False
+        reasons_changed = False
         clean_m = model_id.strip().lower()
         clean_t = tool_id.strip().lower()
         if clean_m and clean_m in models:
             models.discard(clean_m)
-            changed = True
+            ids_changed = True
         if clean_t and clean_t in tools:
             tools.discard(clean_t)
-            changed = True
-        if changed:
+            ids_changed = True
+        if clean_m and m_reasons.pop(clean_m, None) is not None:
+            reasons_changed = True
+        if clean_t and t_reasons.pop(clean_t, None) is not None:
+            reasons_changed = True
+        if ids_changed:
             self._save_excluded_ids(models, tools)
+        if reasons_changed:
+            self._save_excluded_reasons(m_reasons, t_reasons)
 
     def reset_to_defaults(self) -> None:
         self._executor.execute_batch(
@@ -259,7 +311,10 @@ class BrainRepository:
                 ("DELETE FROM brain_models", ()),
                 ("DELETE FROM brain_tools", ()),
                 ("DELETE FROM brain_sequences", ()),
-                ("DELETE FROM brain_meta WHERE key IN ('seeded_v1', 'seeded_catalog_rev', 'known_builtin_ids', 'excluded_ids')", ()),
+                (
+                    "DELETE FROM brain_meta WHERE key IN ('seeded_v1', 'seeded_catalog_rev', 'known_builtin_ids', 'excluded_ids', 'excluded_reasons')",
+                    (),
+                ),
             ]
         )
         self.ensure_seeded()
@@ -405,16 +460,17 @@ class BrainRepository:
         return decrypted
 
     def load_dashboard_state(self) -> BrainDashboardState:
-        """Lädt Modelle, Tools, Sequenzen, letzten Benchmark & Secret-Zeitstempel in einem Batch."""
+        """Lädt Modelle, Tools, Sequenzen, Benchmark, Secrets & Excluded-Metadaten in einem Batch."""
         stmts = [
             ("SELECT payload_json FROM brain_models ORDER BY id ASC", ()),
             ("SELECT payload_json FROM brain_tools ORDER BY id ASC", ()),
             ("SELECT tier, payload_json FROM brain_sequences", ()),
             ("SELECT payload_json FROM brain_benchmark_runs ORDER BY started_at DESC LIMIT 1", ()),
             ("SELECT env_name, updated_at FROM brain_secrets ORDER BY env_name ASC", ()),
+            ("SELECT key, value FROM brain_meta WHERE key IN (?, ?)", ("excluded_ids", "excluded_reasons")),
         ]
         try:
-            res_m, res_t, res_s, res_b, res_sec = self._executor.execute_batch(stmts)
+            res_m, res_t, res_s, res_b, res_sec, res_meta = self._executor.execute_batch(stmts)
         except BrainStorageError as exc:
             if "no such table" not in str(exc).lower():
                 raise
@@ -426,7 +482,7 @@ class BrainRepository:
             if self._cache_key:
                 with _INITIALIZED_LOCK:
                     _INITIALIZED_BACKENDS.add(self._cache_key)
-            res_m, res_t, res_s, res_b, res_sec = self._executor.execute_batch(stmts)
+            res_m, res_t, res_s, res_b, res_sec, res_meta = self._executor.execute_batch(stmts)
 
         models = [AIModelSpec.model_validate_json(str(r["payload_json"])) for r in res_m.rows]
         tools = [ToolSpec.model_validate_json(str(r["payload_json"])) for r in res_t.rows]
@@ -435,12 +491,17 @@ class BrainRepository:
             seqs[BrainTier(str(row["tier"]))] = TierSequenceConfig.model_validate_json(str(row["payload_json"]))
         latest = BenchmarkReport.model_validate_json(str(res_b.rows[0]["payload_json"])) if res_b.rows else None
         sec_ts = {str(r["env_name"]): str(r["updated_at"]) for r in res_sec.rows}
+        meta_map = {str(r["key"]): str(r["value"]) for r in res_meta.rows}
+        excl_m, _ = _parse_excluded_payload(meta_map.get("excluded_ids", "{}"))
+        reasons_m, _ = _parse_reasons_payload(meta_map.get("excluded_reasons", "{}"))
         return BrainDashboardState(
             models=models,
             tools=tools,
             sequences=seqs,
             latest_benchmark=latest,
             secret_timestamps=sec_ts,
+            excluded_model_ids=tuple(sorted(excl_m)),
+            excluded_model_reasons={mid: reasons_m[mid] for mid in excl_m if mid in reasons_m},
         )
 
     def close(self) -> None:

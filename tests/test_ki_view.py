@@ -54,10 +54,15 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
     assert "🧹 Prune Failing" in btn_labels
     assert "🔓 Unblock Tools" in btn_labels
     assert "🧹 Clean Previews (0)" in btn_labels
+    assert "🔄 Retry Excluded (0)" in btn_labels
     assert "🔒 Secret sicher speichern / komplett ersetzen" in btn_labels
 
     clean_prev_btn = next(b for b in at.tabs[1].button if "Clean Previews" in b.label)
+    retry_excl_btn = next(b for b in at.tabs[1].button if "Retry Excluded" in b.label)
     assert clean_prev_btn.disabled is True
+    assert retry_excl_btn.disabled is True
+    retry_cb = next(c for c in at.checkbox if "Ausgeschlossene Modelle bei 'Discover' erneut prüfen (0)" in c.label)
+    assert retry_cb.disabled is True
 
     top_order = ["🔎 Discover", "🚀 Benchmark & Optimize", "🧹 Prune Failing", "🔓 Unblock Tools"]
     assert [btn_labels.index(lbl) for lbl in top_order] == sorted(btn_labels.index(lbl) for lbl in top_order)
@@ -361,7 +366,9 @@ def test_ki_view_missing_key_preserves_tools_tab_and_renders_preview_purge(
     from streamlit.testing.v1 import AppTest
 
     assert is_preview_or_experimental_model("custom-pro", "Gemini Pro Preview 03-25") is True
-    assert is_preview_or_experimental_model("deep-research-pro-preview-12-2025", "Deep Research") is False
+    assert is_preview_or_experimental_model("deep-research-pro-preview-12-2025", "Deep Research") is True
+    assert is_preview_or_experimental_model("deep-research-max-preview-04-2026", "Deep Research Max Preview (Apr-21-2026)") is True
+    assert is_preview_or_experimental_model("deep-research-preview-04-2026", "Gemini Deep Research Agent") is False
 
     db_file = tmp_path / "ui_tab_lock.db"
     monkeypatch.setenv("BRAIN_SQLITE_PATH", str(db_file))
@@ -375,6 +382,26 @@ def test_ki_view_missing_key_preserves_tools_tab_and_renders_preview_purge(
             provider=ModelProvider.GOOGLE_GEMINI,
             model_id="gemini-legacy-preview",
             tier_hint=BrainTier.STANDARD,
+        )
+    )
+    brain.add_or_update_model(
+        AIModelSpec(
+            id="deep-research-max-preview-04-2026",
+            name="Deep Research Max Preview (Apr-21-2026)",
+            provider=ModelProvider.GEMINI_DEEP_AGENT,
+            model_id="deep-research-max-preview-04-2026",
+            tier_hint=BrainTier.DEEP,
+            is_deep_agent=True,
+        )
+    )
+    brain.add_or_update_model(
+        AIModelSpec(
+            id="deep-research-pro-preview-12-2025",
+            name="Deep Research Pro Preview (Dec-12-2025) [Rerouted]",
+            provider=ModelProvider.GEMINI_DEEP_AGENT,
+            model_id="deep-research-pro-preview-12-2025",
+            tier_hint=BrainTier.DEEP,
+            is_deep_agent=True,
         )
     )
     brain.close()
@@ -393,12 +420,16 @@ def test_ki_view_missing_key_preserves_tools_tab_and_renders_preview_purge(
     assert not at.exception
     tab_id_before = at.get("tab_container")[0].proto.id
 
-    # 1. Clean Previews (1) in Tab 1 (🧩 KI-Modelle) entfernt Preview-Modell & bleibt als Clean Previews (0) sichtbar
-    purge_btn = next(b for b in at.tabs[1].button if b.label == "🧹 Clean Previews (1)")
+    # 1. Clean Previews (3) in Tab 1 entfernt alle Preview-Modelle inkl. Deep-Research-Previews, behält aber Deep Research Agent
+    purge_btn = next(b for b in at.tabs[1].button if b.label == "🧹 Clean Previews (3)")
     assert purge_btn.disabled is False
     at = purge_btn.click().run()
     assert not at.exception
-    assert "gemini-legacy-exp" not in list(at.tabs[1].dataframe[0].value["ID"])
+    remaining_ids = list(at.tabs[1].dataframe[0].value["ID"])
+    assert "gemini-legacy-exp" not in remaining_ids
+    assert "deep-research-max-preview-04-2026" not in remaining_ids
+    assert "deep-research-pro-preview-12-2025" not in remaining_ids
+    assert "deep-research-preview-04-2026" in remaining_ids
     clean_zero_btn = next(b for b in at.tabs[1].button if b.label == "🧹 Clean Previews (0)")
     assert clean_zero_btn.disabled is True
 
@@ -580,3 +611,117 @@ def test_ki_view_benchmark_report_rendered_in_playground_tab(
     bench_df = at.tabs[3].dataframe[0].value
     assert "yahoo_search" in list(bench_df["ID"])
     assert not any("Missing Key" in b.label for b in at.tabs[3].button)
+
+
+def test_ki_view_retry_excluded_button_and_discover_feedback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ki_brain import DiscoverySummary
+    from src.ui.views.ki_task_overlay import (
+        filter_retryable_excluded_models,
+        format_discover_feedback,
+    )
+    from streamlit.testing.v1 import AppTest
+
+    excluded = ("gemini-3.6-flash", "gemini-4-argon", "deep-research-max-preview-04-2026")
+    reasons = {"gemini-3.6-flash": "quota_limited", "gemini-4-argon": "manual", "deep-research-max-preview-04-2026": "preview"}
+    assert filter_retryable_excluded_models(excluded, reasons, exclude_previews=True) == [
+        "gemini-3.6-flash",
+        "gemini-4-argon",
+    ]
+    assert len(filter_retryable_excluded_models(excluded, reasons, exclude_previews=False)) == 3
+
+    lvl, msg = format_discover_feedback(
+        DiscoverySummary(
+            added_models=["gemini-4-argon"],
+            added_tools=[],
+            recovered_models=["gemini-3.5-flash-lite", "gemini-4-hydrogen"],
+            rechecked_models=2,
+            checked_sources=["builtins", "gemini-models"],
+            existing_previews_count=2,
+        )
+    )
+    assert lvl == "success"
+    assert "2 von Quota/Error auf OK" in msg
+    assert "2 vorhandene Preview-Modell(e)" in msg and "Clean Previews" in msg
+
+    db_file = tmp_path / "retry_excl_ui.db"
+    repo = create_brain_repository(sqlite_path=db_file)
+    brain = KIWebsearchBrain(repo)
+    repo.add_excluded_ids(model_ids=["gemini-3.6-flash"], reason="quota_limited")
+    repo.add_excluded_ids(model_ids=["gemini-4-argon"], reason="manual")
+    repo.add_excluded_ids(model_ids=["deep-research-max-preview-04-2026"], reason="preview")
+
+    brain.auto_sync = MagicMock(  # type: ignore[method-assign]
+        return_value=DiscoverySummary(
+            added_models=["gemini-3.6-flash"],
+            checked_sources=["builtins", "gemini-models"],
+        )
+    )
+
+    col_depth = {"current": 0}
+    spinner_depths: list[int] = []
+    seen_buttons: list[str] = []
+    session_state: dict[str, Any] = {}
+
+    class _TrackedCol:
+        def __enter__(self) -> _TrackedCol:
+            col_depth["current"] += 1
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            col_depth["current"] -= 1
+            return False
+
+    class _TrackedSpinner:
+        def __enter__(self) -> _TrackedSpinner:
+            spinner_depths.append(col_depth["current"])
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+    def _btn_side_effect(label: str, **kw: object) -> bool:
+        seen_buttons.append(label)
+        return "Retry Excluded" in label
+
+    settings = AppSettings(brain_sqlite_path=str(db_file))
+    with (
+        patch("src.ui.views.ki_view.create_dashboard_brain", return_value=brain),
+        patch("streamlit.session_state", session_state),
+        patch("streamlit.columns", side_effect=lambda spec, **kw: [_TrackedCol() for _ in range(spec if isinstance(spec, int) else len(spec))]),
+        patch("streamlit.spinner", return_value=_TrackedSpinner()),
+        patch("streamlit.button", side_effect=_btn_side_effect),
+        patch("streamlit.rerun", side_effect=_RerunCalled),
+        pytest.raises(_RerunCalled),
+    ):
+        render_ki_view(settings, role=AuthRole.ADMIN)
+
+    assert "🔄 Retry Excluded (2)" in seen_buttons
+    brain.auto_sync.assert_called_once()
+    assert brain.auto_sync.call_args.kwargs["retry_excluded"] is True
+    assert brain.auto_sync.call_args.kwargs["exclude_previews"] is True
+    assert spinner_depths == [0]
+    assert session_state["ki_brain_feedback"]["message"].startswith("Retry Excluded fertig")
+
+    # Vault-Überschreibung wird im Tresor und Dialog transparent angezeigt
+    monkeypatch.setenv("BRAIN_SQLITE_PATH", str(db_file))
+    monkeypatch.setenv("GEMINI_API_KEY", "AIzaSyEnvKey")
+    with create_dashboard_brain(settings) as vault_brain:
+        vault_brain.set_secret("GEMINI_API_KEY", "AIzaSyVaultPaidKey")
+
+    def _app_vault() -> None:
+        from src.config.settings import load_app_settings
+        from src.domain.enums import AuthRole
+        from src.ui.views.ki_view import render_ki_view
+
+        render_ki_view(load_app_settings(allow_sibling_env_fallback=False), role=AuthRole.ADMIN)
+
+    at = AppTest.from_function(_app_vault).run()
+    assert not at.exception
+    assert any("Brain Vault (verschlüsselt, überschreibt ENV/Secrets)" in c.value for c in at.caption)
+    gemini_set_btn = next(b for b in at.button if b.key == "ki_vault_row_btn_GEMINI_API_KEY")
+    at = gemini_set_btn.click().run()
+    assert not at.exception
+    assert any("Aktive Quelle: **Brain Vault (verschlüsselt, überschreibt ENV/Secrets)**" in c.value for c in at.caption)
+

@@ -886,4 +886,165 @@ def test_searxng_html_fallback_open_meteo_and_legacy_db_upgrade(monkeypatch: pyt
     migrated.close()
 
 
+def test_discover_recovers_quota_429_and_paid_models_without_readding_previews(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_file = tmp_path / "billing_upgrade.db"
+    repo = create_brain_repository(sqlite_path=db_file)
+    mock_client = MagicMock()
+    mock_client.models.list.return_value = [
+        SimpleNamespace(name="models/gemini-3.5-flash-lite", display_name="Gemini 3.5 Flash-Lite", supported_actions=["generateContent"]),
+        SimpleNamespace(name="models/gemini-4-hydrogen", display_name="Gemini 4 Hydrogen", supported_actions=["generateContent"]),
+        SimpleNamespace(name="models/gemini-4-argon", display_name="Gemini 4 Argon", supported_actions=["generateContent"]),
+        SimpleNamespace(name="models/gemini-4-carbon", display_name="Gemini 4 Carbon", supported_actions=["generateContent"]),
+        SimpleNamespace(name="models/gemini-2.5-pro", display_name="Gemini 2.5 Pro", supported_actions=["generateContent"]),
+        SimpleNamespace(name="models/gemini-3.6-flash", display_name="Gemini 3.6 Flash", supported_actions=["generateContent"]),
+        SimpleNamespace(name="models/gemini-3.1-flash-lite", display_name="Gemini 3.1 Flash-Lite", supported_actions=["generateContent"]),
+        SimpleNamespace(name="models/gemini-4-dead", display_name="Gemini 4 Dead", supported_actions=["generateContent"]),
+        SimpleNamespace(name="models/gemini-2.5-flash-preview", display_name="Gemini 2.5 Flash Preview", supported_actions=["generateContent"]),
+        SimpleNamespace(name="models/deep-research-max-preview-04-2026", display_name="Deep Research Max Preview (Apr-21-2026)", supported_actions=[]),
+        SimpleNamespace(name="models/deep-research-pro-preview-12-2025", display_name="Deep Research Pro Preview (Dec-12-2025) [Rerouted]", supported_actions=[]),
+        SimpleNamespace(name="models/deep-research-preview-04-2026", display_name="Gemini Deep Research Agent", supported_actions=[]),
+    ]
+
+    def _fake_create(**kwargs: object) -> MagicMock:
+        mid = str(kwargs.get("model") or "")
+        if mid == "gemini-4-dead":
+            raise RuntimeError("404 NOT_FOUND model unavailable")
+        resp = MagicMock()
+        resp.status = "completed"
+        resp.output_text = "OK"
+        resp.steps = []
+        return resp
+
+    mock_client.interactions.create.side_effect = _fake_create
+    monkeypatch.setattr(
+        "ki_brain.discovery.safe_http_request",
+        lambda *_a, **_kw: (404, "https://searx.space", "text/plain", b""),
+    )
+
+    brain = KIWebsearchBrain(repo, BrainSecrets(gemini_api_key="AIzaSyPaidKey999"), genai_client=mock_client)
+
+    # Ausgangszustand analog Nutzer-Screenshot: bestehende Quota-429-Modelle, Deep-Research-Previews & Excluded-IDs
+    for mid in ("gemini-3.5-flash-lite", "gemini-4-hydrogen"):
+        m_spec = brain.get_model(mid)
+        assert m_spec is not None
+        brain.add_or_update_model(
+            m_spec.model_copy(update={"last_status": ProbeStatus.QUOTA_LIMITED, "last_error": "429 RESOURCE_EXHAUSTED"})
+        )
+    gg_tool = brain.get_tool("gemini_google_search")
+    assert gg_tool is not None
+    brain.add_or_update_tool(
+        gg_tool.model_copy(update={"last_status": ProbeStatus.QUOTA_LIMITED, "last_error": "429 QUOTA"})
+    )
+    brain.add_or_update_model(
+        AIModelSpec(
+            id="deep-research-max-preview-04-2026",
+            name="Deep Research Max Preview (Apr-21-2026)",
+            provider=ModelProvider.GEMINI_DEEP_AGENT,
+            model_id="deep-research-max-preview-04-2026",
+            tier_hint=BrainTier.DEEP,
+            is_deep_agent=True,
+        )
+    )
+    brain.add_or_update_model(
+        AIModelSpec(
+            id="deep-research-pro-preview-12-2025",
+            name="Deep Research Pro Preview (Dec-12-2025) [Rerouted]",
+            provider=ModelProvider.GEMINI_DEEP_AGENT,
+            model_id="deep-research-pro-preview-12-2025",
+            tier_hint=BrainTier.DEEP,
+            is_deep_agent=True,
+        )
+    )
+    repo.delete_model("gemini-3.6-flash")
+    repo.delete_model("gemini-3.1-flash-lite")
+    repo.add_excluded_ids(model_ids=["gemini-3.6-flash", "gemini-4-argon", "gemini-2.5-flash-preview"])
+    repo.add_excluded_ids(model_ids=["gemini-3.1-flash-lite"], reason="manual")
+    repo.add_excluded_ids(model_ids=["gemini-4-dead"], reason="error")
+    repo.add_excluded_ids(model_ids=["gemini-2.5-pro-preview"], reason="preview")
+
+    # 1. Discover erkennt Quota-Recovery auf bestehenden Modellen, re-prüft Altlasten/Quota-IDs & holt Paid-Modelle
+    summary = brain.auto_sync()
+    assert summary.rechecked_models == 2
+    assert set(summary.recovered_models) == {"gemini-3.5-flash-lite", "gemini-4-hydrogen"}
+    assert brain.get_model("gemini-3.5-flash-lite").last_status == ProbeStatus.OK  # type: ignore[union-attr]
+    assert brain.get_model("gemini-4-hydrogen").last_status == ProbeStatus.OK  # type: ignore[union-attr]
+    assert brain.get_tool("gemini_google_search").last_status == ProbeStatus.OK  # type: ignore[union-attr]
+
+    assert {"gemini-4-argon", "gemini-4-carbon", "gemini-2.5-pro", "gemini-3.6-flash"} <= set(summary.added_models)
+    assert brain.get_model("gemini-4-argon").tier_hint == BrainTier.DEEP  # type: ignore[union-attr]
+    assert "gemini-3.6-flash" not in repo.list_excluded_ids()[0]
+    assert "gemini-4-argon" not in repo.list_excluded_ids()[0]
+
+    # Manual/Error/Preview-Ausschlüsse bleiben unangetastet, vorhandene Previews werden gezählt
+    assert brain.get_model("gemini-3.1-flash-lite") is None
+    assert brain.get_model("gemini-4-dead") is None
+    assert brain.get_model("gemini-2.5-flash-preview") is None
+    assert "gemini-3.1-flash-lite" in summary.skipped_excluded
+    assert "gemini-4-dead" in summary.skipped_excluded
+    assert "gemini-2.5-flash-preview" in summary.skipped_previews
+    assert summary.existing_previews_count == 2
+    assert "gemini-3.5-flash-lite" in brain.get_sequence(BrainTier.FAST).model_sequence
+
+    # 2. Clean Previews entfernt Deep-Research-Previews inkl. '[Rerouted]', behält aber Deep Research Agent
+    purged = brain.remove_preview_models()
+    assert set(purged) == {"deep-research-max-preview-04-2026", "deep-research-pro-preview-12-2025"}
+    assert brain.get_model("deep-research-preview-04-2026") is not None
+    m_reasons, _ = repo.list_excluded_reasons()
+    assert m_reasons["deep-research-max-preview-04-2026"] == "preview"
+
+    # 3. Explizites retry_excluded=True prüft auch manuelle/error Exclusions nach, respektiert aber exclude_previews=True
+    retry_sum = brain.auto_sync(retry_excluded=True, exclude_previews=True)
+    assert "gemini-3.1-flash-lite" in retry_sum.added_models
+    assert brain.get_model("gemini-3.1-flash-lite").last_status == ProbeStatus.OK  # type: ignore[union-attr]
+    assert "gemini-4-dead" in retry_sum.skipped_unhealthy
+    assert brain.get_model("gemini-4-dead") is None
+    assert brain.get_model("gemini-2.5-flash-preview") is None
+    assert retry_sum.existing_previews_count == 0
+    brain.close()
+
+
+def test_secret_rotation_resets_quota_429_and_reports_vault_override(tmp_path: Path) -> None:
+    db_file = tmp_path / "secret_rotation.db"
+    brain = KIWebsearchBrain(
+        create_brain_repository(sqlite_path=db_file),
+        BrainSecrets(gemini_api_key="AIzaSyEnvFreeKey"),
+    )
+
+    flash = brain.get_model("gemini-3.5-flash-lite")
+    hydro = brain.get_model("gemini-4-hydrogen")
+    gg_tool = brain.get_tool("gemini_google_search")
+    bb_tool = brain.get_tool("browserbase_fetch")
+    assert flash and hydro and gg_tool and bb_tool
+
+    brain.add_or_update_model(flash.model_copy(update={"last_status": ProbeStatus.QUOTA_LIMITED, "last_error": "429 Free"}))
+    brain.add_or_update_model(hydro.model_copy(update={"last_status": ProbeStatus.ERROR, "last_error": "500 Err"}))
+    brain.add_or_update_tool(gg_tool.model_copy(update={"last_status": ProbeStatus.QUOTA_LIMITED, "last_error": "429 Tool"}))
+    brain.add_or_update_tool(bb_tool.model_copy(update={"last_status": ProbeStatus.AUTH_MISSING, "last_error": "Missing"}))
+
+    init_statuses = {s.env_name: s for s in brain.list_secret_statuses()}
+    assert init_statuses["GEMINI_API_KEY"].source == "ENV / Streamlit Secrets"
+
+    # Vault-Überschreibung setzt Quota 429 & Error auf UNTESTED zurück und weist auf Überschreibung hin
+    brain.set_secret("GEMINI_API_KEY", "AIzaSyPaidVaultKey")
+    vault_statuses = {s.env_name: s for s in brain.list_secret_statuses()}
+    assert vault_statuses["GEMINI_API_KEY"].source == "Brain Vault (verschlüsselt, überschreibt ENV/Secrets)"
+    assert brain.get_model("gemini-3.5-flash-lite").last_status == ProbeStatus.UNTESTED  # type: ignore[union-attr]
+    assert brain.get_model("gemini-4-hydrogen").last_status == ProbeStatus.UNTESTED  # type: ignore[union-attr]
+    assert brain.get_tool("gemini_google_search").last_status == ProbeStatus.UNTESTED  # type: ignore[union-attr]
+    assert brain.get_tool("browserbase_fetch").last_status == ProbeStatus.AUTH_MISSING  # type: ignore[union-attr]
+
+    # Löschen des Vault-Keys mit ENV-Fallback setzt Status erneut zurück; ohne Fallback -> AUTH_MISSING
+    brain.add_or_update_model(flash.model_copy(update={"last_status": ProbeStatus.QUOTA_LIMITED, "last_error": "429 Old"}))
+    assert brain.delete_secret("GEMINI_API_KEY") is True
+    after_del = {s.env_name: s for s in brain.list_secret_statuses()}
+    assert after_del["GEMINI_API_KEY"].source == "ENV / Streamlit Secrets"
+    assert brain.get_model("gemini-3.5-flash-lite").last_status == ProbeStatus.UNTESTED  # type: ignore[union-attr]
+
+    brain.set_secret("BROWSERBASE_API_KEY", "bb_temp_vault_key")
+    brain.add_or_update_tool(bb_tool.model_copy(update={"last_status": ProbeStatus.OK, "last_error": ""}))
+    assert brain.delete_secret("BROWSERBASE_API_KEY") is True
+    assert brain.get_tool("browserbase_fetch").last_status == ProbeStatus.AUTH_MISSING  # type: ignore[union-attr]
+    brain.close()
 

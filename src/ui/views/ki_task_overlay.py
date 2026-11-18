@@ -7,10 +7,12 @@ import time
 import streamlit as st
 from ki_brain import (
     BrainDashboardState,
+    DiscoverySummary,
     KIWebsearchBrain,
     ProbeStatus,
     SecretStatusEntry,
     UnblockSummary,
+    is_preview_or_experimental_model,
 )
 
 from src.ui.task_overlay import (
@@ -21,7 +23,9 @@ from src.ui.task_overlay import (
 
 __all__ = [
     "INSTANT_OVERLAY_HTML",
+    "filter_retryable_excluded_models",
     "format_cleanup_message",
+    "format_discover_feedback",
     "format_unblock_feedback",
     "invalidate_ki_ui_cache",
     "load_cached_ui_state",
@@ -114,3 +118,43 @@ def format_cleanup_message(brain: KIWebsearchBrain) -> tuple[str, str]:
         "success",
         f"Prune Failing: {len(rem_m)} Modelle ({m_txt}) & {len(rem_t)} Tools ({t_txt}) mit Status Error/429/202 entfernt (übrige Blocked erhalten).",
     )
+
+
+def filter_retryable_excluded_models(
+    excluded_model_ids: tuple[str, ...] | list[str],
+    excluded_reasons: dict[str, str] | None = None,
+    *,
+    exclude_previews: bool = True,
+) -> list[str]:
+    """Filtert wiederprüfbare ausgeschlossene Modelle (ignoriert Preview-Modelle, solange `exclude_previews=True`)."""
+    reasons = excluded_reasons or {}
+    return [
+        mid
+        for mid in excluded_model_ids
+        if not (exclude_previews and (reasons.get(mid) == "preview" or is_preview_or_experimental_model(mid)))
+    ]
+
+
+def format_discover_feedback(summary: DiscoverySummary, *, prefix: str = "Discover fertig") -> tuple[str, str]:
+    """Formatiert eine verständliche Zusammenfassung für `Discover` und `Retry Excluded`."""
+    parts = [f"+{len(summary.added_models)} Modelle", f"+{len(summary.added_tools)} Tools"]
+    if summary.recovered_models:
+        parts.append(f"{len(summary.recovered_models)} von Quota/Error auf OK")
+    skipped = len(summary.skipped_excluded) + len(summary.skipped_unhealthy)
+    notes = [
+        n
+        for n in (
+            f"{skipped} defekte/ausgeschlossene" if skipped else "",
+            f"{len(summary.skipped_previews)} Preview-Modelle" if summary.skipped_previews else "",
+        )
+        if n
+    ]
+    note_txt = f" ({', '.join(notes)} übersprungen)" if notes else ""
+    preview_hint = (
+        f" · 🧹 {summary.existing_previews_count} vorhandene Preview-Modell(e) im Tab 'KI-Modelle' über 'Clean Previews' entfernbar."
+        if summary.existing_previews_count
+        else ""
+    )
+    warn_txt = f" · Hinweise: {'; '.join(summary.warnings[:2])}" if summary.warnings else ""
+    level = "warning" if summary.warnings else "success"
+    return level, f"{prefix} ({', '.join(summary.checked_sources)}): {', '.join(parts)}{note_txt}.{preview_hint}{warn_txt}"

@@ -95,6 +95,8 @@ def open_secret_dialog(env_name: str, settings: AppSettings) -> None:
     st.markdown(f"### Secret `{clean_env}`")
     if cur_status and cur_status.affected_items:
         st.caption(f"Schaltet frei: **{', '.join(cur_status.affected_items)}**")
+    if cur_status and cur_status.is_configured:
+        st.caption(f"Aktive Quelle: **{cur_status.source}**")
     st.caption(
         "Sicherheitsmodus (Write-Only wie GitHub Secrets): Bestehende Keys werden "
         "niemals im Klartext angezeigt und immer komplett neu verschlüsselt überschrieben."
