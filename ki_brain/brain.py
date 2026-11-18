@@ -144,10 +144,16 @@ class KIWebsearchBrain:
             new_s = [tid for tid in seq.search_tool_sequence if tid not in drop_t]
             new_e = [tid for tid in seq.extractor_tool_sequence if tid not in drop_t]
             new_m = [mid for mid in seq.model_sequence if mid not in drop_m]
+            new_ps = [tid for tid in seq.paid_search_tool_sequence if tid not in drop_t]
+            new_pe = [tid for tid in seq.paid_extractor_tool_sequence if tid not in drop_t]
+            new_pm = [mid for mid in seq.paid_model_sequence if mid not in drop_m]
             if (
                 new_s != seq.search_tool_sequence
                 or new_e != seq.extractor_tool_sequence
                 or new_m != seq.model_sequence
+                or new_ps != seq.paid_search_tool_sequence
+                or new_pe != seq.paid_extractor_tool_sequence
+                or new_pm != seq.paid_model_sequence
             ):
                 self._repo.upsert_sequence(
                     seq.model_copy(
@@ -155,6 +161,9 @@ class KIWebsearchBrain:
                             "search_tool_sequence": new_s,
                             "extractor_tool_sequence": new_e,
                             "model_sequence": new_m,
+                            "paid_search_tool_sequence": new_ps,
+                            "paid_extractor_tool_sequence": new_pe,
+                            "paid_model_sequence": new_pm,
                         }
                     )
                 )
@@ -202,6 +211,14 @@ class KIWebsearchBrain:
     def reset_defaults(self) -> None:
         self._repo.reset_to_defaults()
 
+    def load_usage_quotas(self) -> dict[str, dict[str, dict[str, Any]]]:
+        """Liefert den periodenbasierten Free-Kontingent-Verbrauch (Monat/Tag/Lifetime)."""
+        return self._repo.load_usage_quotas()
+
+    def reset_usage_quotas(self) -> None:
+        """Setzt gespeicherte Verbrauchs-Zähler der Free-Kontingente zurück."""
+        self._repo.reset_usage_quotas()
+
     def cleanup_unhealthy_items_with_status(
         self,
         statuses: tuple[ProbeStatus, ...] = (
@@ -246,6 +263,7 @@ class KIWebsearchBrain:
                 self._repo.list_tools(),
                 self._repo.list_sequences(),
                 force_overwrite=False,
+                usage_state=self._repo.load_usage_quotas(),
             )
             for seq in seqs.values():
                 self._repo.upsert_sequence(seq)
@@ -280,6 +298,7 @@ class KIWebsearchBrain:
                 self._repo.list_tools(),
                 self._repo.list_sequences(),
                 force_overwrite=False,
+                usage_state=self._repo.load_usage_quotas(),
             )
             for seq in seqs.values():
                 self._repo.upsert_sequence(seq)
@@ -355,26 +374,30 @@ class KIWebsearchBrain:
 
     def probe_items_for_secret(self, env_name: str) -> list[BenchmarkEntry]:
         """Testet alle zu einem Secret gehörenden Modelle/Tools live und aktualisiert Tier-Sequenzen bei Erfolg."""
+        from ki_brain.quotas import select_grounding_model
+
         clean_name = validate_secret_env_name(env_name)
         self._refresh_runtime_secrets()
         bench = BrainBenchmarkRunner(self._repo, self._secrets, self._runner)
+        usage_state = self._repo.load_usage_quotas()
         entries: list[BenchmarkEntry] = []
 
         target_models = [m for m in self._repo.list_models(enabled_only=True) if m.api_key_env.strip().upper() == clean_name]
         for model in target_models:
-            um, entry = bench.probe_model(model)
-            self._repo.upsert_model(um)
+            um, entry = bench.probe_model(model, usage_state=usage_state)
+            if um != model:
+                self._repo.upsert_model(um)
             entries.append(entry)
 
         all_models = self._repo.list_models(enabled_only=True)
-        grounding_model = next(
-            (m for m in all_models if not m.is_deep_agent and m.provider.value == "google_gemini" and m.last_status == ProbeStatus.OK),
-            next((m for m in all_models if not m.is_deep_agent and m.provider.value == "google_gemini"), None),
-        )
         target_tools = [t for t in self._repo.list_tools(enabled_only=True) if t.api_key_env.strip().upper() == clean_name]
         for tool in target_tools:
-            ut, entry = bench.probe_tool(tool, DEFAULT_TEST_QUERY, DEFAULT_TEST_URL, grounding_model)
-            self._repo.upsert_tool(ut)
+            g_model = select_grounding_model(
+                all_models, self._secrets, executor_type=tool.executor_type, allow_paid=False
+            )
+            ut, entry = bench.probe_tool(tool, DEFAULT_TEST_QUERY, DEFAULT_TEST_URL, g_model, usage_state=usage_state)
+            if ut != tool:
+                self._repo.upsert_tool(ut)
             entries.append(entry)
 
         updated_seqs = self._repo.list_sequences()
@@ -384,6 +407,7 @@ class KIWebsearchBrain:
                 self._repo.list_tools(),
                 updated_seqs,
                 force_overwrite=False,
+                usage_state=self._repo.load_usage_quotas(),
             )
             updated_seqs = {t: self._repo.upsert_sequence(seq) for t, seq in seqs.items()}
 
@@ -485,6 +509,7 @@ class KIWebsearchBrain:
         test_query: str = DEFAULT_TEST_QUERY,
         test_url: str = DEFAULT_TEST_URL,
         force_overwrite_sequences: bool = False,
+        include_paid: bool = False,
         on_progress: Callable[[float, str], None] | None = None,
     ) -> BenchmarkReport:
         runner = BrainBenchmarkRunner(self._repo, self._secrets, self._runner)
@@ -492,6 +517,7 @@ class KIWebsearchBrain:
             test_query=test_query,
             test_url=test_url,
             force_overwrite_sequences=force_overwrite_sequences,
+            include_paid=include_paid,
             on_progress=on_progress,
         )
 
@@ -506,14 +532,29 @@ class KIWebsearchBrain:
         tier: BrainTier | str = BrainTier.STANDARD,
         language: str = "de",
         max_results: int = 8,
+        allow_paid: bool = False,
+        use_maps: bool | None = None,
+        latitude: float | None = None,
+        longitude: float | None = None,
         on_action: Callable[[str], None] | None = None,
     ) -> BrainSearchResult:
         return execute_tiered_search(
-            self._repo, self._secrets, query, BrainTier(tier), language=language, max_results=max_results, on_action=on_action
+            self._repo,
+            self._secrets,
+            query,
+            BrainTier(tier),
+            language=language,
+            max_results=max_results,
+            runner=self._runner,
+            allow_paid=allow_paid,
+            use_maps=use_maps,
+            latitude=latitude,
+            longitude=longitude,
+            on_action=on_action,
         )
 
-    def fetch_page(self, url: str) -> BrainFetchedPage:
-        return execute_tiered_fetch_page(self._repo, self._secrets, url)
+    def fetch_page(self, url: str, *, allow_paid: bool = False) -> BrainFetchedPage:
+        return execute_tiered_fetch_page(self._repo, self._secrets, url, allow_paid=allow_paid)
 
     def generate_text(
         self,
@@ -521,10 +562,18 @@ class KIWebsearchBrain:
         *,
         tier: BrainTier | str = BrainTier.FAST,
         system_instruction: str = "",
+        allow_paid: bool = False,
         on_action: Callable[[str], None] | None = None,
     ) -> BrainGenerationResult:
         return execute_tiered_text(
-            self._repo, self._secrets, self._runner, prompt, tier=BrainTier(tier), system_instruction=system_instruction, on_action=on_action
+            self._repo,
+            self._secrets,
+            self._runner,
+            prompt,
+            tier=BrainTier(tier),
+            system_instruction=system_instruction,
+            allow_paid=allow_paid,
+            on_action=on_action,
         )
 
     def generate_structured(
@@ -534,9 +583,17 @@ class KIWebsearchBrain:
         *,
         tier: BrainTier | str = BrainTier.FAST,
         system_instruction: str = "",
+        allow_paid: bool = False,
     ) -> tuple[ModelT, str]:
         return execute_tiered_structured(
-            self._repo, self._secrets, self._runner, prompt, schema_cls, tier=BrainTier(tier), system_instruction=system_instruction
+            self._repo,
+            self._secrets,
+            self._runner,
+            prompt,
+            schema_cls,
+            tier=BrainTier(tier),
+            system_instruction=system_instruction,
+            allow_paid=allow_paid,
         )
 
     def ask(
@@ -546,6 +603,10 @@ class KIWebsearchBrain:
         tier: BrainTier | str = BrainTier.STANDARD,
         language: str = "de",
         system_instruction: str = "",
+        allow_paid: bool = False,
+        use_maps: bool | None = None,
+        latitude: float | None = None,
+        longitude: float | None = None,
         on_action: Callable[[str], None] | None = None,
     ) -> BrainGenerationResult:
         return execute_tiered_ask(
@@ -556,6 +617,10 @@ class KIWebsearchBrain:
             tier=BrainTier(tier),
             language=language,
             system_instruction=system_instruction,
+            allow_paid=allow_paid,
+            use_maps=use_maps,
+            latitude=latitude,
+            longitude=longitude,
             on_action=on_action,
         )
 

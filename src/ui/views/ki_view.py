@@ -188,7 +188,14 @@ def render_ki_view(settings: AppSettings, role: AuthRole = AuthRole.ADMIN) -> No
                 excluded_model_reasons=ui_state.excluded_model_reasons, exclude_previews=exclude_previews,
             )
         with tab_tool:
-            render_tools_tab(brain, is_admin=is_admin, tools=tools, secret_statuses=secret_statuses, active_tab_label=KI_TAB_TOOLS)
+            render_tools_tab(
+                brain,
+                is_admin=is_admin,
+                tools=tools,
+                secret_statuses=secret_statuses,
+                active_tab_label=KI_TAB_TOOLS,
+                usage_quotas=ui_state.usage_quotas,
+            )
         with tab_play:
             render_playground_tab(brain, is_admin=is_admin, ui_state=ui_state)
     finally:

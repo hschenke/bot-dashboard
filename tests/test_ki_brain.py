@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -91,10 +92,16 @@ def test_default_catalog_contains_research_and_alert_bot_models_and_tools(tmp_pa
         "jina_reader",
         "browserbase_fetch",
         "gemini_google_search",
+        "gemini_google_maps",
         "gemini_url_context",
         "open_meteo",
     ):
         assert expected_tool in tool_ids
+
+    deep_agent = brain.get_model("deep-research-preview-04-2026")
+    maps_tool = brain.get_tool("gemini_google_maps")
+    assert deep_agent is not None and deep_agent.is_free is False
+    assert maps_tool is not None and maps_tool.free_quota_limit == 5000 and maps_tool.free_quota_period == "monthly"
 
     # Persistente Tombstone-Löschung + Reset
     assert brain.remove_tool("wikidata_api") is True
@@ -319,7 +326,10 @@ def test_benchmark_optimizes_fast_standard_deep_and_demotes_quota_429(monkeypatc
     assert std_seq.max_search_tools == 4
 
     assert deep_seq.max_pages_to_scrape == 5
-    assert deep_seq.use_deep_agent is True
+    assert deep_seq.use_deep_agent is False
+    assert deep_seq.paid_use_deep_agent is True
+    assert "deep-research-preview-04-2026" not in deep_seq.model_sequence
+    assert "deep-research-preview-04-2026" in deep_seq.paid_model_sequence
     assert len(deep_seq.search_tool_sequence) >= 5
 
     # Manual Override wird respektiert, bis force_overwrite_sequences=True
@@ -620,18 +630,19 @@ def test_brave_tavily_serper_and_sync_new_builtins(tmp_path: Path, monkeypatch: 
     repo = create_brain_repository(sqlite_path=db_file)
     # Simuliere bestehende ältere DB vor v0.8.0 (known_builtin_ids kannte neue APIs noch nicht)
     repo.set_meta("known_builtin_ids", json.dumps({"models": ["gemini-3.5-flash-lite"], "tools": ["yahoo_search"]}))
-    for tid in ("brave_search", "tavily_search", "serper_search", "openalex_api", "stackexchange_api", "tagesschau_rss"):
+    for tid in ("brave_search", "tavily_search", "serper_search", "openalex_api", "stackexchange_api", "tagesschau_rss", "gemini_google_maps"):
         repo.delete_tool(tid)
 
     brain = KIWebsearchBrain(repo, BrainSecrets())
     monkeypatch.setattr("ki_brain.discovery.safe_http_request", lambda *_a, **_kw: (404, "https://searx.space", "text/plain", b""))
     sync_sum = brain.auto_sync(verify_discovered=False)
-    for new_tid in ("brave_search", "tavily_search", "serper_search", "openalex_api", "stackexchange_api", "tagesschau_rss"):
+    for new_tid in ("brave_search", "tavily_search", "serper_search", "openalex_api", "stackexchange_api", "tagesschau_rss", "gemini_google_maps"):
         assert new_tid in sync_sum.added_tools
         assert brain.get_tool(new_tid) is not None
     assert brain.get_tool("brave_search").last_status == ProbeStatus.AUTH_MISSING  # type: ignore[union-attr]
     assert brain.get_tool("tavily_search").last_status == ProbeStatus.AUTH_MISSING  # type: ignore[union-attr]
     assert brain.get_tool("serper_search").last_status == ProbeStatus.AUTH_MISSING  # type: ignore[union-attr]
+    assert brain.get_tool("gemini_google_maps").last_status == ProbeStatus.AUTH_MISSING  # type: ignore[union-attr]
 
     # Executors mit API-Keys testen
     captured_headers: list[dict[str, str]] = []
@@ -880,9 +891,12 @@ def test_searxng_html_fallback_open_meteo_and_legacy_db_upgrade(monkeypatch: pyt
     migrated_tools = {t.id for t in migrated.list_tools()}
     migrated_models = {m.id for m in migrated.list_models()}
     assert "searxng_public" in migrated_tools
+    assert "gemini_google_maps" in migrated_tools
     assert "gemini-4-hydrogen" in migrated_models
     assert "gemini-3.6-flash" not in migrated_models
-    assert migrated.get_meta("seeded_catalog_rev") == "2"
+    assert migrated.get_meta("seeded_catalog_rev") == "3"
+    deep_m = migrated.get_model("deep-research-preview-04-2026")
+    assert deep_m is not None and deep_m.is_free is False
     migrated.close()
 
 
@@ -974,6 +988,11 @@ def test_discover_recovers_quota_429_and_paid_models_without_readding_previews(
 
     assert {"gemini-4-argon", "gemini-4-carbon", "gemini-2.5-pro", "gemini-3.6-flash"} <= set(summary.added_models)
     assert brain.get_model("gemini-4-argon").tier_hint == BrainTier.DEEP  # type: ignore[union-attr]
+    assert brain.get_model("gemini-4-argon").is_free is False  # type: ignore[union-attr]
+    assert brain.get_model("gemini-2.5-pro").is_free is False  # type: ignore[union-attr]
+    deep_after_sync = brain.get_sequence(BrainTier.DEEP)
+    assert "gemini-4-argon" not in deep_after_sync.model_sequence
+    assert "gemini-4-argon" in deep_after_sync.paid_model_sequence
     assert "gemini-3.6-flash" not in repo.list_excluded_ids()[0]
     assert "gemini-4-argon" not in repo.list_excluded_ids()[0]
 
@@ -1228,6 +1247,8 @@ def test_cost_aware_model_pricing_and_tier_sequencing() -> None:
         name="Gemini 4 Argon",
         model_id="gemini-4-argon",
         tier_hint=BrainTier.DEEP,
+        is_free=False,
+        free_quota_period="none",
         last_status=ProbeStatus.OK,
         last_latency_ms=480,
     )
@@ -1258,6 +1279,7 @@ def test_cost_aware_model_pricing_and_tier_sequencing() -> None:
     fast_seq = seqs[BrainTier.FAST].model_sequence
     std_seq = seqs[BrainTier.STANDARD].model_sequence
     deep_seq = seqs[BrainTier.DEEP].model_sequence
+    paid_deep_seq = seqs[BrainTier.DEEP].paid_model_sequence
 
     assert fast_seq[0] == "gemini-2.5-flash-lite"
     assert fast_seq.index("gemini-2.5-flash-lite") < fast_seq.index("gemini-4-hydrogen")
@@ -1268,8 +1290,365 @@ def test_cost_aware_model_pricing_and_tier_sequencing() -> None:
     assert std_seq.index("gemini-3.8-flash") < std_seq.index("gemini-4-hydrogen")
     assert std_seq.index("gemini-3.8-flash") < std_seq.index("groq/llama-3.1-8b-instant")
 
-    # Deep: starke Modelle vor 8B; geblockte / 429-Modelle bleiben ausgeschlossen
-    assert deep_seq.index("gemini-4-argon") < deep_seq.index("groq/llama-3.1-8b-instant")
+    # Deep 0%-Standard schließt Paid-Only Argon aus; Paid-Opt-In platziert Argon vor 8B
+    assert "gemini-4-argon" not in deep_seq
+    assert paid_deep_seq.index("gemini-4-argon") < paid_deep_seq.index("groq/llama-3.1-8b-instant")
     assert "or/broken/model-free" not in std_seq
+
+
+def test_google_maps_grounding_citations_geo_smart_and_gemini3_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ki_brain.llm_runner import (
+        extract_citations_from_interaction,
+        extract_grounding_tool_counts,
+    )
+    from ki_brain.models import BrainCitation
+    from ki_brain.quotas import is_gemini_3_or_newer, is_geo_or_maps_query, select_grounding_model
+
+    # 1. Citation & Grounding-Query-Count-Extraktion inkl. google_maps_result & place_citation
+    fake_interaction = SimpleNamespace(
+        usage=SimpleNamespace(
+            grounding_tool_count=[
+                SimpleNamespace(type="google_maps", count=2),
+                SimpleNamespace(type="google_search", count=1),
+            ]
+        ),
+        steps=[
+            SimpleNamespace(
+                type="google_maps_result",
+                result=[
+                    SimpleNamespace(
+                        places=[
+                            SimpleNamespace(
+                                name="Zeit für Brot Berlin",
+                                place_id="places/ChIJTestAlex1",
+                                url="",
+                                review_snippets=[SimpleNamespace(title="Tolle Zimtschnecken")],
+                            )
+                        ]
+                    )
+                ],
+            ),
+            SimpleNamespace(
+                type="model_output",
+                content=[
+                    SimpleNamespace(
+                        type="text",
+                        annotations=[
+                            SimpleNamespace(
+                                type="place_citation",
+                                name="Cafe Einstein",
+                                url="https://maps.google.com/?cid=4242",
+                                place_id="",
+                                review_snippets=[SimpleNamespace(title="Klassiker")],
+                            ),
+                            SimpleNamespace(
+                                type="url_citation",
+                                url="https://example.org/cafe-guide",
+                                title="Café Guide",
+                            ),
+                        ],
+                    )
+                ],
+            ),
+        ],
+    )
+    cites = extract_citations_from_interaction(fake_interaction)
+    assert len(cites) == 3
+    assert cites[0].source_tool == "gemini_google_maps"
+    assert "place_id:ChIJTestAlex1" in cites[0].url
+    assert "Zimtschnecken" in cites[0].snippet
+    assert cites[1].title == "Cafe Einstein" and cites[1].source_tool == "gemini_google_maps"
+    assert cites[2].source_tool == "gemini_google_search"
+    assert extract_grounding_tool_counts(fake_interaction) == {"google_maps": 2, "google_search": 1}
+
+    # 2. Gemini-3+-Guard für kostenfreies Maps Grounding & Geo-Smart-Erkennung
+    m25 = AIModelSpec(id="gemini-2.5-flash", name="G2.5", model_id="gemini-2.5-flash")
+    m35 = AIModelSpec(id="gemini-3.5-flash-lite", name="G3.5 Lite", model_id="gemini-3.5-flash-lite")
+    gemma3 = AIModelSpec(id="gemma-3-27b-it", name="Gemma 3", model_id="gemma-3-27b-it")
+    assert is_gemini_3_or_newer(m25) is False
+    assert is_gemini_3_or_newer(gemma3) is False
+    assert is_gemini_3_or_newer(m35) is True
+    assert is_geo_or_maps_query("Cafés am Alexanderplatz in Berlin") is True
+    assert is_geo_or_maps_query("Python 3.13 asyncio Änderungen") is False
+
+    secrets = BrainSecrets(gemini_api_key="AIzaSyTestKey123")
+    assert select_grounding_model([m25], secrets, executor_type="gemini_google_maps", allow_paid=False) is None
+    assert select_grounding_model([m25], secrets, executor_type="gemini_google_maps", allow_paid=True) == m25
+    assert select_grounding_model([m25, m35], secrets, executor_type="gemini_google_maps", allow_paid=False) == m35
+
+    # 3. Geo-Smart-Routing + Kontingent-Abbuchung über usage.grounding_tool_count
+    repo = create_brain_repository(sqlite_path=":memory:")
+    seen_create_calls: list[dict[str, Any]] = []
+
+    def _fake_maps_create(**kwargs: Any) -> SimpleNamespace:
+        seen_create_calls.append(kwargs)
+        return SimpleNamespace(
+            status="completed",
+            output_text="Empfehlung am Alexanderplatz: Zeit für Brot.",
+            usage=SimpleNamespace(grounding_tool_count=[SimpleNamespace(type="google_maps", count=2)]),
+            steps=fake_interaction.steps,
+        )
+
+    mock_client = MagicMock()
+    mock_client.interactions.create.side_effect = _fake_maps_create
+    brain = KIWebsearchBrain(repo, secrets, genai_client=mock_client)
+
+    def _fake_non_ai_search(tool: ToolSpec, q: str, **_kw: object) -> list[BrainCitation]:
+        if tool.executor_type in {"gemini_google_search", "gemini_google_maps"}:
+            from ki_brain.tools.registry import execute_search_tool as real_exec
+
+            return real_exec(tool, q, **_kw)  # type: ignore[arg-type]
+        return [BrainCitation(url=f"https://example.org/{tool.id}", title=tool.name, snippet="OK", source_tool=tool.id)]
+
+    monkeypatch.setattr("ki_brain.execution.execute_search_tool", _fake_non_ai_search)
+
+    seq_std = brain.get_sequence(BrainTier.STANDARD)
+    brain.update_sequence(
+        seq_std.model_copy(
+            update={
+                "search_tool_sequence": ["yahoo_search", "gemini_google_maps", "searxng_public"],
+                "max_search_tools": 3,
+                "manual_override": True,
+            }
+        )
+    )
+
+    non_geo = brain.search("Python 3.13 asyncio Neuerungen", tier=BrainTier.STANDARD)
+    assert "gemini_google_maps" not in non_geo.tools_executed
+    assert seen_create_calls == []
+
+    geo = brain.search("Cafés am Alexanderplatz in Berlin", tier=BrainTier.STANDARD)
+    assert "gemini_google_maps" in geo.tools_executed
+    assert seen_create_calls[-1]["tools"] == [{"type": "google_maps"}]
+    quotas = brain.load_usage_quotas()
+    assert quotas["tools"]["gemini_google_maps"]["used"] == 2
+
+    forced = brain.search(
+        "Python Konferenz",
+        tier=BrainTier.STANDARD,
+        use_maps=True,
+        latitude=52.5219,
+        longitude=13.4132,
+    )
+    assert "gemini_google_maps" in forced.tools_executed
+    assert seen_create_calls[-1]["tools"] == [{"type": "google_maps", "latitude": 52.5219, "longitude": 13.4132}]
+
+    suppressed = brain.search("Cafés am Alexanderplatz in Berlin", tier=BrainTier.STANDARD, use_maps=False)
+    assert "gemini_google_maps" not in suppressed.tools_executed
+    brain.close()
+
+
+def test_strict_zero_cost_enforcement_quota_exhaustion_and_allow_paid_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import datetime
+
+    from ki_brain import evaluate_tool_quota
+    from ki_brain.models import BrainCitation
+    from ki_brain.quotas import record_quota_usage
+
+    repo = create_brain_repository(sqlite_path=":memory:")
+    mock_client = MagicMock()
+    called_models: list[str] = []
+
+    def _fake_create(**kwargs: Any) -> SimpleNamespace:
+        target = str(kwargs.get("model") or kwargs.get("agent") or "")
+        called_models.append(target)
+        if kwargs.get("agent"):
+            return SimpleNamespace(id="bg_run_1", status="completed", output_text="Deep Research Paid Ergebnis", steps=[])
+        if kwargs.get("response_format"):
+            return SimpleNamespace(status="completed", output_text='{"topic": "Budget", "score": 100}', steps=[])
+        return SimpleNamespace(status="completed", output_text=f"Antwort von {target}", steps=[])
+
+    mock_client.interactions.create.side_effect = _fake_create
+    mock_client.interactions.get.return_value = SimpleNamespace(
+        id="bg_run_1", status="completed", output_text="Deep Research Paid Ergebnis", steps=[]
+    )
+    mock_client.models.list.return_value = [SimpleNamespace(name="models/gemini-3.5-flash-lite")]
+
+    brain = KIWebsearchBrain(repo, BrainSecrets(gemini_api_key="AIzaSyTestKey123"), genai_client=mock_client)
+    paid_model = AIModelSpec(
+        id="gemini-4-argon",
+        name="Gemini 4 Argon",
+        model_id="gemini-4-argon",
+        tier_hint=BrainTier.DEEP,
+        is_free=False,
+        free_quota_period="none",
+        last_status=ProbeStatus.OK,
+    )
+    paid_tool = ToolSpec(
+        id="paid_premium_api",
+        name="Paid Premium Search",
+        category=ToolCategory.WEB_SEARCH,
+        executor_type="custom_json_api",
+        endpoint_url="https://api.example.com/paid",
+        is_free=False,
+        free_quota_period="none",
+        paid_cost_per_1k=15.0,
+        last_status=ProbeStatus.OK,
+    )
+    brain.add_or_update_model(paid_model)
+    brain.add_or_update_tool(paid_tool)
+
+    # Manuell erzwungene Deep-Sequenz mit Paid-Only vorne + Fallback auf Free-Modell
+    deep_seq = brain.get_sequence(BrainTier.DEEP)
+    brain.update_sequence(
+        deep_seq.model_copy(
+            update={
+                "search_tool_sequence": ["paid_premium_api", "gemini_google_search", "wikipedia_api"],
+                "paid_search_tool_sequence": ["paid_premium_api", "gemini_google_search", "wikipedia_api"],
+                "model_sequence": ["gemini-4-argon", "deep-research-preview-04-2026", "gemini-2.5-flash"],
+                "paid_model_sequence": ["gemini-4-argon", "deep-research-preview-04-2026", "gemini-2.5-flash"],
+                "enable_page_scraping": False,
+                "manual_override": True,
+            }
+        )
+    )
+
+    executed_tool_ids: list[str] = []
+
+    def _fake_exec(tool: ToolSpec, *_a: object, **_kw: object) -> list[BrainCitation]:
+        executed_tool_ids.append(tool.id)
+        return [BrainCitation(url=f"https://example.org/{tool.id}", title=tool.id, snippet="Treffer", source_tool=tool.id)]
+
+    monkeypatch.setattr("ki_brain.execution.execute_search_tool", _fake_exec)
+    monkeypatch.setattr("ki_brain.benchmark.execute_search_tool", _fake_exec)
+    monkeypatch.setattr(
+        "ki_brain.benchmark.execute_extractor_tool",
+        lambda tool, url, **_kw: SimpleNamespace(text_content="Volltext Inhalt " * 20),
+    )
+
+    # 1. Strikter 0%-Modus: Paid Tool, Argon & Deep Research Agent bleiben strikt außen vor
+    res_search_free = brain.search("KI Sicherheit", tier=BrainTier.DEEP, allow_paid=False)
+    assert "paid_premium_api" not in res_search_free.tools_executed
+    assert "wikipedia_api" in res_search_free.tools_executed
+
+    res_text_free = brain.generate_text("Hallo", tier=BrainTier.DEEP, allow_paid=False)
+    assert res_text_free.model_used == "gemini-2.5-flash"
+
+    parsed, used_struct = brain.generate_structured("Bewerte", _SampleSchema, tier=BrainTier.DEEP, allow_paid=False)
+    assert parsed.score == 100 and used_struct == "gemini-2.5-flash"
+
+    res_ask_free = brain.ask("KI Trends", tier=BrainTier.DEEP, allow_paid=False)
+    assert res_ask_free.model_used == "gemini-2.5-flash"
+    assert "gemini-4-argon" not in called_models
+    assert "deep-research-preview-04-2026" not in called_models
+
+    # 2. Explizites Opt-In (allow_paid=True) bezieht Paid-Tool und Paid-Modelle ein
+    res_ask_paid = brain.ask("KI Trends", tier=BrainTier.DEEP, allow_paid=True)
+    assert "paid_premium_api" in res_ask_paid.tools_executed
+    assert res_ask_paid.model_used == "gemini-4-argon"
+    assert "gemini-4-argon" in called_models
+
+    # 3. Free-Kontingent erschöpfen (5.000/5.000) -> 0%-Sperre bis Periodenwechsel oder Reset
+    record_quota_usage(repo, tool_counts={"gemini_google_search": 5000})
+    gg_spec = brain.get_tool("gemini_google_search")
+    assert gg_spec is not None
+    cur_snap = evaluate_tool_quota(gg_spec, brain.load_usage_quotas())
+    assert cur_snap.exhausted is True and cur_snap.remaining == 0 and cur_snap.is_free_available is False
+
+    future_month = datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=35)
+    rollover_snap = evaluate_tool_quota(gg_spec, brain.load_usage_quotas(), now=future_month)
+    assert rollover_snap.exhausted is False and rollover_snap.remaining == 5000 and rollover_snap.is_free_available is True
+
+    executed_tool_ids.clear()
+    brain.search("Python Release", tier=BrainTier.DEEP, allow_paid=False)
+    assert "gemini_google_search" not in executed_tool_ids
+
+    brain.search("Python Release", tier=BrainTier.DEEP, allow_paid=True)
+    assert "gemini_google_search" in executed_tool_ids
+
+    # 4. Benchmark im 0%-Modus schützt vor kostenpflichtigen Probes, ohne Status zu zerstören (kein Löschen bei Prune Failing)
+    called_models.clear()
+    bench_report = brain.run_benchmark(force_overwrite_sequences=True, include_paid=False)
+    assert "gemini-4-argon" not in called_models
+    argon_after = brain.get_model("gemini-4-argon")
+    gg_after = brain.get_tool("gemini_google_search")
+    assert argon_after is not None and argon_after.last_status == ProbeStatus.OK
+    assert gg_after is not None and gg_after.last_status != ProbeStatus.QUOTA_LIMITED
+    deep_opt = bench_report.sequences[BrainTier.DEEP.value]
+    assert "gemini_google_search" not in deep_opt.search_tool_sequence
+    assert "gemini_google_search" in deep_opt.paid_search_tool_sequence
+    assert "gemini-4-argon" not in deep_opt.model_sequence
+    assert "gemini-4-argon" in deep_opt.paid_model_sequence
+
+    rem_m, rem_t = brain.cleanup_unhealthy_items()
+    assert "gemini-4-argon" not in rem_m and "gemini_google_search" not in rem_t
+
+    # 5. Kontingent-Reset gibt Tool wieder für 0%-Sequenz frei
+    brain.reset_usage_quotas()
+    reset_snap = evaluate_tool_quota(gg_spec, brain.load_usage_quotas())
+    assert reset_snap.remaining == 5000 and reset_snap.is_free_available is True
+    brain.close()
+
+
+def test_legacy_rev2_to_rev3_upgrade_preserves_customizations(tmp_path: Path) -> None:
+    from ki_brain.catalog import build_default_models, build_default_tools
+    from ki_brain.db_executors import SqliteBrainExecutor
+    from ki_brain.models import TierSequenceConfig
+    from ki_brain.storage import BrainRepository
+
+    rev2_db = tmp_path / "legacy_rev2.db"
+    ex = SqliteBrainExecutor(rev2_db)
+    seed_repo = BrainRepository(ex, seed_defaults=False)
+    seed_repo._init_schema()  # noqa: SLF001
+
+    old_models = [
+        m.model_copy(update={"is_free": True, "free_quota_period": "unlimited"}) if m.id == "deep-research-preview-04-2026" else m
+        for m in build_default_models()
+    ]
+    old_tools = [
+        t.model_copy(update={"free_quota_limit": 0, "free_quota_period": "unlimited"})
+        for t in build_default_tools()
+        if t.id != "gemini_google_maps"
+    ]
+    for m in old_models:
+        seed_repo.upsert_model(m)
+    for t in old_tools:
+        seed_repo.upsert_tool(t)
+
+    seed_repo.upsert_sequence(
+        TierSequenceConfig(
+            tier=BrainTier.FAST,
+            search_tool_sequence=["wikipedia_api"],
+            model_sequence=["gemini-3.5-flash-lite"],
+            manual_override=True,
+        )
+    )
+    seed_repo.upsert_sequence(
+        TierSequenceConfig(
+            tier=BrainTier.DEEP,
+            search_tool_sequence=["yahoo_search", "gemini_google_search"],
+            model_sequence=["deep-research-preview-04-2026", "gemini-2.5-flash"],
+            use_deep_agent=True,
+            manual_override=False,
+        )
+    )
+    seed_repo.set_meta("seeded_v1", "1")
+    seed_repo.set_meta("seeded_catalog_rev", "2")
+    import json
+
+    seed_repo.set_meta(
+        "known_builtin_ids",
+        json.dumps({"models": [m.id for m in old_models], "tools": [t.id for t in old_tools]}),
+    )
+    seed_repo.close()
+
+    upgraded = BrainRepository(SqliteBrainExecutor(rev2_db))
+    assert upgraded.get_meta("seeded_catalog_rev") == "3"
+    assert upgraded.get_tool("gemini_google_maps") is not None
+    assert upgraded.get_tool("gemini_google_search").free_quota_limit == 5000  # type: ignore[union-attr]
+    assert upgraded.get_model("deep-research-preview-04-2026").is_free is False  # type: ignore[union-attr]
+
+    fast_seq = upgraded.get_sequence(BrainTier.FAST)
+    assert fast_seq.manual_override is True and fast_seq.search_tool_sequence == ["wikipedia_api"]
+
+    deep_seq = upgraded.get_sequence(BrainTier.DEEP)
+    assert deep_seq.use_deep_agent is False
+    assert deep_seq.paid_use_deep_agent is True
+    assert "deep-research-preview-04-2026" not in deep_seq.model_sequence
+    assert "deep-research-preview-04-2026" in deep_seq.paid_model_sequence
+    upgraded.close()
+
 
 

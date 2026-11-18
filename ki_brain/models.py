@@ -98,7 +98,7 @@ class BrainSecrets:
 
 
 class AIModelSpec(BaseModel):
-    """Konfigurierbarer Eintrag eines kostenfreien KI-Modells im Brain-Katalog."""
+    """Konfigurierbarer Eintrag eines KI-Modells im Brain-Katalog (Standard: 0%-Kosten Free-Tier)."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -108,6 +108,9 @@ class AIModelSpec(BaseModel):
     model_id: str = Field(min_length=2, max_length=140)
     tier_hint: BrainTier = BrainTier.FAST
     is_free: bool = True
+    free_quota_limit: int = Field(default=0, ge=0)
+    free_quota_period: str = Field(default="unlimited", max_length=24)
+    free_quota_unit: str = Field(default="requests", max_length=32)
     requires_api_key: bool = True
     api_key_env: str = Field(default="GEMINI_API_KEY", max_length=64)
     base_url: str = Field(default="", max_length=300)
@@ -130,7 +133,7 @@ class AIModelSpec(BaseModel):
 
 
 class ToolSpec(BaseModel):
-    """Konfigurierbarer Eintrag eines kostenfreien Websearch- oder Extraktions-Tools."""
+    """Konfigurierbarer Eintrag eines Websearch-, Grounding- oder Extraktions-Tools."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -141,6 +144,10 @@ class ToolSpec(BaseModel):
     description: str = Field(default="", max_length=400)
     endpoint_url: str = Field(default="", max_length=400)
     is_free: bool = True
+    free_quota_limit: int = Field(default=0, ge=0)
+    free_quota_period: str = Field(default="unlimited", max_length=24)
+    free_quota_unit: str = Field(default="queries", max_length=32)
+    paid_cost_per_1k: float = Field(default=0.0, ge=0.0, le=1000.0)
     requires_api_key: bool = False
     api_key_env: str = Field(default="", max_length=64)
     origin_apps: list[str] = Field(default_factory=list)
@@ -159,7 +166,7 @@ class ToolSpec(BaseModel):
 
 
 class TierSequenceConfig(BaseModel):
-    """Optimierte Abfolge von Tools & Modellen für Fast, Standard oder Deep."""
+    """Optimierte Abfolge von Tools & Modellen (0%-Standard plus optionales Paid-Opt-In)."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -167,12 +174,16 @@ class TierSequenceConfig(BaseModel):
     search_tool_sequence: list[str] = Field(default_factory=list)
     extractor_tool_sequence: list[str] = Field(default_factory=list)
     model_sequence: list[str] = Field(default_factory=list)
+    paid_search_tool_sequence: list[str] = Field(default_factory=list)
+    paid_extractor_tool_sequence: list[str] = Field(default_factory=list)
+    paid_model_sequence: list[str] = Field(default_factory=list)
     max_search_tools: int = Field(default=3, ge=1, le=25)
     enable_page_scraping: bool = False
     max_pages_to_scrape: int = Field(default=0, ge=0, le=10)
     max_followup_rounds: int = Field(default=0, ge=0, le=4)
     single_pass: bool = True
     use_deep_agent: bool = False
+    paid_use_deep_agent: bool = False
     manual_override: bool = False
     optimization_rationale: str = Field(default="", max_length=1200)
     updated_at: str = Field(default="", max_length=64)

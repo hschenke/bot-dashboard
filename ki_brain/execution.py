@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
 from ki_brain.enums import BrainTier
 from ki_brain.exceptions import BrainProviderError, BrainSSRFError
-from ki_brain.llm_runner import UnifiedLLMRunner, is_quota_error
+from ki_brain.llm_runner import UnifiedLLMRunner, is_quota_error, pop_last_grounding_counts
 from ki_brain.models import (
     AIModelSpec,
     BrainCitation,
@@ -18,7 +18,15 @@ from ki_brain.models import (
     BrainGenerationResult,
     BrainSearchResult,
     BrainSecrets,
+    TierSequenceConfig,
     ToolSpec,
+)
+from ki_brain.quotas import (
+    evaluate_model_quota,
+    evaluate_tool_quota,
+    is_geo_or_maps_query,
+    record_quota_usage,
+    select_grounding_model,
 )
 from ki_brain.storage import BrainRepository
 from ki_brain.tools.registry import (
@@ -29,27 +37,83 @@ from ki_brain.tools.registry import (
 )
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
+_AI_GROUNDING_SEARCH = frozenset({"gemini_google_search", "gemini_google_maps"})
 
 
-def _ordered_models(repo: BrainRepository, tier: BrainTier) -> list[AIModelSpec]:
-    enabled = {m.id: m for m in repo.list_models(enabled_only=True)}
+def _ordered_models(
+    repo: BrainRepository,
+    tier: BrainTier,
+    *,
+    allow_paid: bool = False,
+    usage_state: dict[str, Any] | None = None,
+) -> list[AIModelSpec]:
+    enabled = repo.list_models(enabled_only=True)
+    allowed = {
+        m.id: m
+        for m in enabled
+        if allow_paid or evaluate_model_quota(m, usage_state).is_free_available
+    }
     seq = repo.get_sequence(tier)
-    ordered = [enabled[mid] for mid in seq.model_sequence if mid in enabled]
+    seq_ids = seq.paid_model_sequence if (allow_paid and seq.paid_model_sequence) else seq.model_sequence
+    ordered = [allowed[mid] for mid in seq_ids if mid in allowed]
     seen = {m.id for m in ordered}
-    for m in enabled.values():
+    for m in allowed.values():
         if m.id not in seen and (tier == BrainTier.DEEP or not m.is_deep_agent):
             ordered.append(m)
     return ordered
 
 
-def _ordered_tools(repo: BrainRepository, seq_ids: list[str], capability_fn: Callable[[ToolSpec], bool]) -> list[ToolSpec]:
-    enabled = {t.id: t for t in repo.list_tools(enabled_only=True) if capability_fn(t)}
-    ordered = [enabled[tid] for tid in seq_ids if tid in enabled]
+def _ordered_tools(
+    repo: BrainRepository,
+    seq: TierSequenceConfig,
+    capability_fn: Callable[[ToolSpec], bool],
+    *,
+    is_search: bool = True,
+    allow_paid: bool = False,
+    usage_state: dict[str, Any] | None = None,
+) -> list[ToolSpec]:
+    enabled = [t for t in repo.list_tools(enabled_only=True) if capability_fn(t)]
+    allowed = {
+        t.id: t
+        for t in enabled
+        if allow_paid or evaluate_tool_quota(t, usage_state).is_free_available
+    }
+    seq_ids = (
+        (seq.paid_search_tool_sequence if (allow_paid and seq.paid_search_tool_sequence) else seq.search_tool_sequence)
+        if is_search
+        else (
+            seq.paid_extractor_tool_sequence
+            if (allow_paid and seq.paid_extractor_tool_sequence)
+            else seq.extractor_tool_sequence
+        )
+    )
+    ordered = [allowed[tid] for tid in seq_ids if tid in allowed]
     seen = {t.id for t in ordered}
-    for t in enabled.values():
+    for t in allowed.values():
         if t.id not in seen:
             ordered.append(t)
     return ordered
+
+
+def _prioritize_maps_tools(
+    candidates: list[ToolSpec], *, wants_maps: bool, max_search_tools: int
+) -> list[ToolSpec]:
+    maps_tools = [t for t in candidates if t.executor_type.strip().lower() == "gemini_google_maps"]
+    others = [t for t in candidates if t.executor_type.strip().lower() != "gemini_google_maps"]
+    if not wants_maps or not maps_tools:
+        return others
+    insert_at = 0 if (max_search_tools <= 1 or not others) else 1
+    return others[:insert_at] + maps_tools + others[insert_at:]
+
+
+def _resolve_tool_usage_delta(tool: ToolSpec) -> int:
+    etype = tool.executor_type.strip().lower()
+    if etype in _AI_GROUNDING_SEARCH:
+        counts = pop_last_grounding_counts()
+        key = "google_maps" if etype == "gemini_google_maps" else "google_search"
+        raw = int(counts.get(key, 0))
+        return max(1, raw) if tool.free_quota_limit > 0 else raw
+    return 1 if tool.free_quota_limit > 0 else 0
 
 
 def execute_tiered_search(
@@ -60,20 +124,33 @@ def execute_tiered_search(
     *,
     language: str = "de",
     max_results: int = 8,
+    runner: Any = None,
+    allow_paid: bool = False,
+    use_maps: bool | None = None,
+    latitude: float | None = None,
+    longitude: float | None = None,
     on_action: Callable[[str], None] | None = None,
 ) -> BrainSearchResult:
-    """Durchsucht Tools exakt in der für `tier` optimierten Sequenz inkl. Fallback."""
+    """Durchsucht Tools in optimierter Sequenz (Standard: strikt 0% Kosten, Maps Geo-Smart)."""
     t0 = time.monotonic()
     clean_q = " ".join((query or "").split())[:240]
     if not clean_q:
         return BrainSearchResult(query="", tier=tier, latency_ms=0)
 
     seq = repo.get_sequence(tier)
-    candidates = _ordered_tools(repo, seq.search_tool_sequence, is_search_capable)
+    usage_state = repo.load_usage_quotas()
+    wants_maps = (use_maps is True) or (
+        use_maps is None and (is_geo_or_maps_query(clean_q) or (latitude is not None and longitude is not None))
+    )
+    ordered = _ordered_tools(repo, seq, is_search_capable, is_search=True, allow_paid=allow_paid, usage_state=usage_state)
+    candidates = _prioritize_maps_tools(ordered, wants_maps=wants_maps, max_search_tools=seq.max_search_tools)
+    enabled_models = repo.list_models(enabled_only=True)
+
     citations: list[BrainCitation] = []
     seen_urls: set[str] = set()
     executed: list[str] = []
     errors: dict[str, str] = {}
+    usage_deltas: dict[str, int] = {}
     tools_with_hits = 0
 
     for tool in candidates:
@@ -81,11 +158,27 @@ def execute_tiered_search(
             break
         if tool.requires_api_key and not secrets.has_key(tool.api_key_env):
             continue
+        etype = tool.executor_type.strip().lower()
+        g_model: AIModelSpec | None = None
+        if etype in _AI_GROUNDING_SEARCH:
+            g_model = select_grounding_model(enabled_models, secrets, executor_type=etype, allow_paid=allow_paid)
+            if g_model is None:
+                continue
+            pop_last_grounding_counts()
         if on_action:
             on_action(f"🔎 Suche via {tool.name}...")
         executed.append(tool.id)
         try:
-            hits = execute_search_tool(tool, clean_q, language=language, secrets=secrets, limit=tool.max_results)
+            if etype in _AI_GROUNDING_SEARCH:
+                hits = execute_search_tool(
+                    tool, clean_q, language=language, secrets=secrets, limit=tool.max_results,
+                    runner=runner, grounding_model=g_model, latitude=latitude, longitude=longitude,
+                )
+            else:
+                hits = execute_search_tool(tool, clean_q, language=language, secrets=secrets, limit=tool.max_results)
+            delta = _resolve_tool_usage_delta(tool)
+            if delta > 0:
+                usage_deltas[tool.id] = usage_deltas.get(tool.id, 0) + delta
             added_here = 0
             for hit in hits:
                 if hit.url not in seen_urls:
@@ -95,7 +188,11 @@ def execute_tiered_search(
             if added_here > 0:
                 tools_with_hits += 1
         except Exception as exc:
+            pop_last_grounding_counts()
             errors[tool.id] = str(exc)[:220]
+
+    if usage_deltas:
+        record_quota_usage(repo, tool_counts=usage_deltas)
 
     return BrainSearchResult(
         query=clean_q,
@@ -111,16 +208,24 @@ def execute_tiered_fetch_page(
     repo: BrainRepository,
     secrets: BrainSecrets,
     url: str,
+    *,
+    allow_paid: bool = False,
 ) -> BrainFetchedPage:
-    """Extrahiert Seiteninhalt über die priorisierte Extractor-Sequenz."""
+    """Extrahiert Seiteninhalt über die priorisierte Extractor-Sequenz (Standard: 0% Kosten)."""
     seq = repo.get_sequence(BrainTier.DEEP)
-    candidates = _ordered_tools(repo, seq.extractor_tool_sequence, is_extractor_capable)
+    usage_state = repo.load_usage_quotas()
+    candidates = _ordered_tools(
+        repo, seq, is_extractor_capable, is_search=False, allow_paid=allow_paid, usage_state=usage_state
+    )
     last_exc: Exception | None = None
     for tool in candidates:
         if tool.requires_api_key and not secrets.has_key(tool.api_key_env):
             continue
         try:
-            return execute_extractor_tool(tool, url, secrets=secrets)
+            page = execute_extractor_tool(tool, url, secrets=secrets)
+            if tool.free_quota_limit > 0:
+                record_quota_usage(repo, tool_counts={tool.id: 1})
+            return page
         except BrainSSRFError:
             raise
         except Exception as exc:
@@ -173,17 +278,21 @@ def execute_tiered_text(
     *,
     tier: BrainTier = BrainTier.FAST,
     system_instruction: str = "",
+    allow_paid: bool = False,
     on_action: Callable[[str], None] | None = None,
 ) -> BrainGenerationResult:
     t0 = time.monotonic()
+    usage_state = repo.load_usage_quotas()
     warnings: list[str] = []
-    for model in _ordered_models(repo, tier):
+    for model in _ordered_models(repo, tier, allow_paid=allow_paid, usage_state=usage_state):
         if model.is_deep_agent or (model.requires_api_key and not secrets.has_key(model.api_key_env)):
             continue
         if on_action:
             on_action(f"🤖 KI-Synthese via {model.name}...")
         try:
             text, citations = runner.run_text(model, prompt, system_instruction=system_instruction)
+            if model.free_quota_limit > 0:
+                record_quota_usage(repo, model_counts={model.id: 1})
             return BrainGenerationResult(
                 text=text,
                 tier=tier,
@@ -207,13 +316,17 @@ def execute_tiered_structured(
     *,
     tier: BrainTier = BrainTier.FAST,
     system_instruction: str = "",
+    allow_paid: bool = False,
 ) -> tuple[ModelT, str]:
+    usage_state = repo.load_usage_quotas()
     warnings: list[str] = []
-    for model in _ordered_models(repo, tier):
+    for model in _ordered_models(repo, tier, allow_paid=allow_paid, usage_state=usage_state):
         if not model.supports_structured_output or (model.requires_api_key and not secrets.has_key(model.api_key_env)):
             continue
         try:
             parsed = runner.run_structured(model, prompt, schema_cls, system_instruction=system_instruction)
+            if model.free_quota_limit > 0:
+                record_quota_usage(repo, model_counts={model.id: 1})
             return parsed, model.id
         except Exception as exc:
             warnings.append(f"{model.id}: {str(exc)[:120]}")
@@ -229,13 +342,30 @@ def execute_tiered_ask(
     tier: BrainTier = BrainTier.STANDARD,
     language: str = "de",
     system_instruction: str = "",
+    allow_paid: bool = False,
+    use_maps: bool | None = None,
+    latitude: float | None = None,
+    longitude: float | None = None,
     on_action: Callable[[str], None] | None = None,
 ) -> BrainGenerationResult:
-    """Vollständige Brain-Anfrage: Websuche -> optionaler Seitenabruf -> KI-Synthese -> Heuristik-Fallback."""
+    """Vollständige Brain-Anfrage: Websuche (+ Geo-Smart Maps) -> Scraping -> KI-Synthese (0%-Standard)."""
     t0 = time.monotonic()
     seq = repo.get_sequence(tier)
     max_hits = 12 if tier == BrainTier.DEEP else (8 if tier == BrainTier.STANDARD else 5)
-    search_res = execute_tiered_search(repo, secrets, query, tier, language=language, max_results=max_hits, on_action=on_action)
+    search_res = execute_tiered_search(
+        repo,
+        secrets,
+        query,
+        tier,
+        language=language,
+        max_results=max_hits,
+        runner=runner,
+        allow_paid=allow_paid,
+        use_maps=use_maps,
+        latitude=latitude,
+        longitude=longitude,
+        on_action=on_action,
+    )
 
     pages: list[BrainFetchedPage] = []
     if seq.enable_page_scraping and seq.max_pages_to_scrape > 0 and search_res.citations:
@@ -243,7 +373,7 @@ def execute_tiered_ask(
             try:
                 if on_action:
                     on_action(f"📄 Extrahiere Volltext: {cite.url[:55]}...")
-                pages.append(execute_tiered_fetch_page(repo, secrets, cite.url))
+                pages.append(execute_tiered_fetch_page(repo, secrets, cite.url, allow_paid=allow_paid))
             except Exception:  # noqa: S110
                 pass
 
@@ -259,8 +389,9 @@ def execute_tiered_ask(
     )
     sys_msg = system_instruction or "Beantworte die Anfrage präzise, faktenbasiert und zitiere relevante Quellen als `[Titel](URL)`."
 
+    usage_state = repo.load_usage_quotas()
     warnings: list[str] = [f"{k}: {v}" for k, v in search_res.tool_errors.items()]
-    for model in _ordered_models(repo, tier):
+    for model in _ordered_models(repo, tier, allow_paid=allow_paid, usage_state=usage_state):
         if model.requires_api_key and not secrets.has_key(model.api_key_env):
             continue
         if model.is_deep_agent and tier != BrainTier.DEEP:
@@ -269,6 +400,8 @@ def execute_tiered_ask(
             on_action(f"🤖 Synthese via {model.name}...")
         try:
             text, extra_cites = runner.run_text(model, full_prompt, system_instruction=sys_msg)
+            if model.free_quota_limit > 0:
+                record_quota_usage(repo, model_counts={model.id: 1})
             all_cites = list(search_res.citations)
             seen = {c.url for c in all_cites}
             for ec in extra_cites:

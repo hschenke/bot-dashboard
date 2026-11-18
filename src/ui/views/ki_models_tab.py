@@ -11,6 +11,7 @@ from ki_brain import (
     ModelProvider,
     SecretStatusEntry,
     estimate_blended_cost_per_1m,
+    format_model_budget_label,
     is_preview_or_experimental_model,
 )
 
@@ -85,12 +86,13 @@ def render_models_tab(
 ) -> None:
     """Zeigt alle registrierten KI-Modelle und erlaubt dynamisches CRUD."""
     resolved = models if models is not None else brain.list_models()
-    st.caption("Zentrale Modell-Liste aus Research-Bot, Alert-Bot, Gemini API Discovery & OpenAI-kompatiblen Free-Endpunkten.")
+    st.caption("Zentrale Modell-Liste (Standard-Sequencing strikt 0% Kosten; `💳 Paid-Only` nur mit Opt-In `allow_paid=True`).")
     rows = [
         {
             "Name": m.name, "Provider": m.provider.value, "Tier": m.tier_hint.value.capitalize(),
             "Status": format_probe_badge(m.last_status, enabled=m.enabled), "Latenz (ms)": m.last_latency_ms,
-            "Score": m.quality_score, "Kosten (~$/1M)": estimate_blended_cost_per_1m(m), "Diagnose": m.last_error or "–",
+            "Score": m.quality_score, "Kosten (~$/1M)": estimate_blended_cost_per_1m(m),
+            "Budget": format_model_budget_label(m), "Diagnose": m.last_error or "–",
         }
         for m in resolved
     ]
@@ -100,7 +102,8 @@ def render_models_tab(
             "Tier": st.column_config.TextColumn("Tier", width="small"),
             "Latenz (ms)": st.column_config.NumberColumn("Latenz", format="%d ms", width="small", help="Antwortzeit des letzten Live-Tests in Millisekunden."),
             "Score": st.column_config.NumberColumn("Score", format="%.1f", width="small", help="Qualitätsscore 0–100 (höher = besser): 45 % Latenz + 55 % Tier-Stärke (Fast 76 / Standard 84 / Deep 92) + 6 JSON-Bonus + Kapazitätsausgleich. Fixwerte: Untested=55, Quota 429=12, Error/Blocked=5, Missing Key=0."),
-            "Kosten (~$/1M)": st.column_config.NumberColumn("Kosten (~$/1M)", format="$%.2f", width="small", help="Geschätzte Mischkosten je 1 Mio. Tokens (USD, 75 % Input + 25 % Output; $0.00 = Free/Gemma). Günstige & gleichzeitig starke Modelle stehen beim Sequencing zuerst."),
+            "Kosten (~$/1M)": st.column_config.NumberColumn("Kosten (~$/1M)", format="$%.2f", width="small", help="Geschätzte Mischkosten je 1 Mio. Tokens (USD, 75 % Input + 25 % Output; $0.00 = Free/Gemma). Im Free Tier entstehen $0.00; relevant für Rate/Opt-In."),
+            "Budget": st.column_config.TextColumn("Budget", width="small", help="🆓 Free Tier / 🆓 $0 Forever im 0%-Standard aktiv; 💳 Paid-Only nur mit Opt-In (`allow_paid=True`)."),
         },
     )
 
@@ -152,10 +155,12 @@ def render_models_tab(
                 m_base_url = st.text_input("Base-URL (für OpenAI-Compat)", value=existing.base_url if existing else "", placeholder="https://api.groq.com/openai/v1")
                 m_rpm = st.number_input("Max RPM", min_value=1, max_value=240, value=existing.max_rpm if existing else 15)
             m_notes = st.text_input("Notiz", value=existing.notes if existing else "")
-            c3, c4 = st.columns(2)
+            c3, c4, c5 = st.columns(3)
             with c3:
                 m_struct = st.checkbox("Structured JSON Output", value=existing.supports_structured_output if existing else True)
             with c4:
+                m_is_free = st.checkbox("Free-Tier / 0%-Kosten (ohne allow_paid)", value=existing.is_free if existing else True)
+            with c5:
                 m_enabled = st.checkbox("Aktiviert", value=existing.enabled if existing else True)
             submitted = st.form_submit_button("💾 Modell speichern", use_container_width=True)
 
@@ -164,6 +169,10 @@ def render_models_tab(
                 spec = AIModelSpec(
                     id=m_id.strip().lower(), name=m_name.strip() or m_id.strip(), provider=m_provider,
                     model_id=m_model_id.strip() or m_id.strip(), tier_hint=m_tier,
+                    is_free=bool(m_is_free),
+                    free_quota_limit=existing.free_quota_limit if existing else 0,
+                    free_quota_period="unlimited" if m_is_free else "none",
+                    free_quota_unit=existing.free_quota_unit if existing else "requests",
                     requires_api_key=bool(m_key_env.strip()), api_key_env=m_key_env.strip(), base_url=m_base_url.strip(),
                     supports_structured_output=bool(m_struct),
                     supports_google_search=(m_provider == ModelProvider.GOOGLE_GEMINI),

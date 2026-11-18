@@ -15,9 +15,10 @@ Zusätzlich stellt dieses Repository mit [`ki_brain`](ki_brain/__init__.py) ein 
 - **🗄️ Datenbank-Inspektor (`Turso Cloud` & `SQLite`)**:
   - Verbindet sich mit den 3 Bot-Datenbanken (Turso HTTPS Hrana v2 oder lokal per Read-Only-SQLite).
 - **🧠 KI-View (Zentrales KI & Websearch Brain)**:
-  - Vereint alle kostenfrei verfügbaren Modelle (Gemini Flash/Lite/Argon, Deep Research Agent, Groq/OpenRouter/OpenAI-Compat) und kostenfreien Websearch-/Extraktions-Tools aus **Research-Bot** & **Alert-Bot** (Yahoo, DuckDuckGo HTML/Lite/Instant, Google News RSS, Wikipedia, Wikidata, Hacker News, Reddit, arXiv, Jina Reader, Direct HTTP, Browserbase, Open-Meteo).
+  - Vereint kostenfreie Modelle (Gemini Flash/Lite/Hydrogen, Gemma, Groq, OpenRouter `:free`) sowie Paid-Opt-In-Modelle (Deep Research Agent, Argon/Pro) und Websearch-/Grounding-/Extraktions-Tools (Yahoo, SearXNG, DuckDuckGo, Google News RSS, Wikipedia, Wikidata, Hacker News, Reddit, arXiv, Gemini Search & Maps Grounding mit 5.000 Free-Queries/Monat ab Gemini 3+, Jina Reader, Direct HTTP, Browserbase, Open-Meteo).
+  - **Strikte 0%-Kosten-Priorität & Kontingent-Tracking**: Sequencing und Ausführungs-Pipeline schließen kostenpflichtige Modelle sowie erschöpfte Free-Kontingente standardmäßig aus und beziehen sie erst über explizites Request-Opt-In (`allow_paid=True`) ein.
   - **Dynamische Verwaltung**: Neue Modelle & Tools (`custom_json_api`, `custom_rss_feed`) manuell oder per **Auto-Sync** (`client.models.list()`, OpenRouter `:free`, Groq) hinzufügen, bearbeiten, aktivieren/deaktivieren oder entfernen.
-  - **Testlauf & Sequenz-Optimierung**: Ermittelt per 1-Klick-Benchmark die optimale Ausführungs-Sequenz für **3 Stufen: `Fast`, `Standard` und `Deep`**.
+  - **Testlauf & Sequenz-Optimierung**: Ermittelt per 1-Klick-Benchmark die optimale Ausführungs-Sequenz für **3 Stufen: `Fast`, `Standard` und `Deep`** (0%-Standard + Paid-Opt-In-Kette).
 - **⚙️ System & Check-Historie**:
   - Konfigurations-Matrix und persistiertes Prüfprotokoll (`fleet_check_logs`).
 
@@ -32,10 +33,12 @@ pip install "git+https://github.com/hschenke/bot-dashboard.git"
 ```python
 from ki_brain import KIWebsearchBrain
 
-# Nutzt optional dieselbe Turso Cloud DB (BRAIN_TURSO_URL / TURSO_URL)
+# Nutzt optional dieselbe Turso Cloud DB (BRAIN_TURSO_URL / TURSO_URL); standardmäßig strikt 0% Kosten.
 with KIWebsearchBrain.from_env() as brain:
     hits = brain.search("Aktuelle Entwicklungen KI", tier="fast")
+    maps_hits = brain.search("Cafés am Alexanderplatz Berlin", tier="standard")  # Geo-Smart Maps Grounding
     answer = brain.ask("Tiefgehende Marktanalyse", tier="deep")
+    paid = brain.ask("Tiefenanalyse mit Paid-Modellen", tier="deep", allow_paid=True)
 ```
 
 ---

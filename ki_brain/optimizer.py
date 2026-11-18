@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 from collections.abc import Iterable
+from typing import Any
 
 from ki_brain.enums import BrainTier, ProbeStatus, ToolCategory
 from ki_brain.models import AIModelSpec, TierSequenceConfig, ToolSpec
@@ -12,6 +13,7 @@ from ki_brain.pricing import (
     compute_cost_score,
     is_small_capacity_model,
 )
+from ki_brain.quotas import evaluate_model_quota, evaluate_tool_quota
 from ki_brain.tools.registry import is_extractor_capable, is_search_capable
 
 DEFAULT_TEST_QUERY = "Python AI"
@@ -62,29 +64,41 @@ def _is_usable_status(status: ProbeStatus) -> bool:
     return status in {ProbeStatus.OK, ProbeStatus.UNTESTED}
 
 
-def _rank_tools_for_tier(tools: list[ToolSpec], tier: BrainTier) -> list[ToolSpec]:
-    usable = [t for t in tools if t.enabled and _is_usable_status(t.last_status)]
+def _rank_tools_for_tier(
+    tools: list[ToolSpec],
+    tier: BrainTier,
+    *,
+    usage_state: dict[str, Any] | None = None,
+    allow_paid: bool = False,
+) -> list[ToolSpec]:
+    enabled = [t for t in tools if t.enabled]
+    if not allow_paid:
+        enabled = [t for t in enabled if evaluate_tool_quota(t, usage_state).is_free_available]
+    usable = [t for t in enabled if _is_usable_status(t.last_status)]
     if not usable:
-        usable = [t for t in tools if t.enabled and t.last_status != ProbeStatus.AUTH_MISSING]
+        usable = [t for t in enabled if t.last_status != ProbeStatus.AUTH_MISSING]
 
     def _score(t: ToolSpec) -> tuple[int, float]:
+        snap = evaluate_tool_quota(t, usage_state)
+        budget_score = 100.0 if (snap.is_free and snap.limit == 0) else (20.0 + 80.0 * snap.budget_ratio if snap.is_free_available else 0.0)
+        free_pref = 15.0 if snap.is_free_available else 0.0
         status_rank = 2 if t.last_status == ProbeStatus.OK else 1
         speed = compute_speed_score(t.last_latency_ms or 1200)
         keyfree_bonus = 10.0 if not t.requires_api_key else 0.0
         if tier == BrainTier.FAST:
-            val = 0.60 * speed + 0.25 * (t.reliability_score or 50.0) + 0.15 * t.quality_score + keyfree_bonus
+            val = 0.48 * speed + 0.22 * (t.reliability_score or 50.0) + 0.15 * t.quality_score + 0.15 * budget_score + keyfree_bonus + free_pref
         elif tier == BrainTier.STANDARD:
-            val = 0.35 * speed + 0.35 * (t.quality_score or 50.0) + 0.30 * (t.reliability_score or 50.0)
+            val = 0.28 * speed + 0.30 * (t.quality_score or 50.0) + 0.27 * (t.reliability_score or 50.0) + 0.15 * budget_score + free_pref
         else:
             rich_cat = 10.0 if t.category in {ToolCategory.ACADEMIC_SEARCH, ToolCategory.COMMUNITY_SEARCH} else 5.0
-            val = 0.50 * (t.quality_score or 50.0) + 0.35 * (t.reliability_score or 50.0) + 0.15 * speed + rich_cat
+            val = 0.45 * (t.quality_score or 50.0) + 0.30 * (t.reliability_score or 50.0) + 0.15 * speed + 0.10 * budget_score + rich_cat + (0.0 if allow_paid else free_pref)
         return status_rank, val
 
     sorted_tools = sorted(usable, key=_score, reverse=True)
     if tier == BrainTier.FAST:
         return sorted_tools
 
-    # Für Standard/Deep zuerst besten Vertreter jeder Kategorie wählen (Quellen-Diversität)
+    # Für Standard/Deep zuerst besten Vertreter jeder Kategorie wählen (inkl. AI Grounding)
     picked: list[ToolSpec] = []
     seen_ids: set[str] = set()
     for cat in (
@@ -92,6 +106,7 @@ def _rank_tools_for_tier(tools: list[ToolSpec], tier: BrainTier) -> list[ToolSpe
         ToolCategory.NEWS_SEARCH,
         ToolCategory.ACADEMIC_SEARCH,
         ToolCategory.COMMUNITY_SEARCH,
+        ToolCategory.AI_GROUNDING,
     ):
         for t in sorted_tools:
             if t.category == cat and t.id not in seen_ids:
@@ -104,12 +119,23 @@ def _rank_tools_for_tier(tools: list[ToolSpec], tier: BrainTier) -> list[ToolSpe
     return picked
 
 
-def _rank_models_for_tier(models: list[AIModelSpec], tier: BrainTier) -> list[AIModelSpec]:
-    usable = [m for m in models if m.enabled and _is_usable_status(m.last_status)]
+def _rank_models_for_tier(
+    models: list[AIModelSpec],
+    tier: BrainTier,
+    *,
+    usage_state: dict[str, Any] | None = None,
+    allow_paid: bool = False,
+) -> list[AIModelSpec]:
+    enabled = [m for m in models if m.enabled]
+    if not allow_paid:
+        enabled = [m for m in enabled if evaluate_model_quota(m, usage_state).is_free_available]
+    usable = [m for m in enabled if _is_usable_status(m.last_status)]
     if not usable:
-        usable = [m for m in models if m.enabled and m.last_status != ProbeStatus.AUTH_MISSING]
+        usable = [m for m in enabled if m.last_status != ProbeStatus.AUTH_MISSING]
 
     def _score(m: AIModelSpec) -> tuple[int, float]:
+        snap = evaluate_model_quota(m, usage_state)
+        free_pref = 10.0 if (snap.is_free_available and tier != BrainTier.DEEP) else 0.0
         status_rank = 2 if m.last_status == ProbeStatus.OK else 1
         speed = compute_speed_score(m.last_latency_ms or 1500, max_ms=8000)
         qual = m.quality_score if m.quality_score > 0 else (55.0 + compute_capability_adjustment(m))
@@ -121,13 +147,13 @@ def _rank_models_for_tier(models: list[AIModelSpec], tier: BrainTier) -> list[AI
                 return 0, -10.0
             hint = 10.0 if m.tier_hint == BrainTier.FAST else (4.0 if m.tier_hint == BrainTier.STANDARD else 0.0)
             pen = -8.0 if small_pen else 0.0
-            return status_rank, 0.35 * speed + 0.35 * qual + 0.30 * cost_eff + hint + pen
+            return status_rank, 0.35 * speed + 0.35 * qual + 0.30 * cost_eff + hint + pen + free_pref
         if tier == BrainTier.STANDARD:
             if m.is_deep_agent:
                 return 0, 0.0
             hint = 14.0 if m.tier_hint == BrainTier.STANDARD else (4.0 if m.tier_hint == BrainTier.FAST else 2.0)
             pen = -12.0 if small_pen else 0.0
-            return status_rank, 0.40 * qual + 0.25 * speed + 0.35 * cost_eff + hint + pen
+            return status_rank, 0.40 * qual + 0.25 * speed + 0.35 * cost_eff + hint + pen + free_pref
         hint = 16.0 if (m.is_deep_agent or m.tier_hint == BrainTier.DEEP) else (10.0 if m.tier_hint == BrainTier.STANDARD else 0.0)
         pen = -14.0 if small_pen else 0.0
         return status_rank, 0.60 * qual + 0.25 * cost_eff + 0.15 * speed + hint + pen
@@ -138,16 +164,27 @@ def _rank_models_for_tier(models: list[AIModelSpec], tier: BrainTier) -> list[AI
     return ranked
 
 
-def _format_rationale(tier: BrainTier, search_ids: list[str], model_ids: list[str], tools: Iterable[ToolSpec]) -> str:
+def _format_rationale(
+    tier: BrainTier,
+    search_ids: list[str],
+    model_ids: list[str],
+    tools: Iterable[ToolSpec],
+    models: Iterable[AIModelSpec],
+    usage_state: dict[str, Any] | None = None,
+) -> str:
     skipped = [
         f"{t.id} ({t.last_status.value})"
         for t in tools
         if t.enabled and t.last_status in {ProbeStatus.QUOTA_LIMITED, ProbeStatus.AUTH_MISSING, ProbeStatus.BLOCKED, ProbeStatus.ERROR}
     ]
+    paid_only = [m.id for m in models if m.enabled and not evaluate_model_quota(m, usage_state).is_free_available]
+    exhausted_t = [t.id for t in tools if t.enabled and not evaluate_tool_quota(t, usage_state).is_free_available]
     top_s = " → ".join(search_ids[:4]) or "–"
     top_m = " → ".join(model_ids[:3]) or "Heuristik"
-    skip_note = f" | Übersprungen: {', '.join(skipped[:4])}" if skipped else ""
-    return f"[{tier.value.upper()}] Suche: {top_s} | Modelle (Preis+Qualität): {top_m}{skip_note}"[:1150]
+    skip_note = f" | Übersprungen: {', '.join(skipped[:3])}" if skipped else ""
+    paid_count = len(paid_only) + len(exhausted_t)
+    paid_note = f" | Paid-Opt-In: {paid_count}" if paid_count else ""
+    return f"[{tier.value.upper()} · 0% Kosten] Suche: {top_s} | Modelle: {top_m}{skip_note}{paid_note}"[:1150]
 
 
 def optimize_tier_sequences(
@@ -156,8 +193,9 @@ def optimize_tier_sequences(
     existing_sequences: dict[BrainTier, TierSequenceConfig],
     *,
     force_overwrite: bool = False,
+    usage_state: dict[str, Any] | None = None,
 ) -> dict[BrainTier, TierSequenceConfig]:
-    """Berechnet optimierte Ausführungs-Sequenzen für Fast, Standard & Deep."""
+    """Berechnet 0%-kostenfreie Sequenzen (und Paid-Opt-In-Ketten) für Fast, Standard & Deep."""
     search_tools = [t for t in tools if is_search_capable(t)]
     extractors = [t for t in tools if is_extractor_capable(t)]
     now = datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds")
@@ -168,58 +206,46 @@ def optimize_tier_sequences(
         if prev is not None and prev.manual_override and not force_overwrite:
             result[tier] = prev
             continue
-        ranked_search = _rank_tools_for_tier(search_tools, tier)
-        ranked_ext = _rank_tools_for_tier(extractors, tier)
-        ranked_models = _rank_models_for_tier(models, tier)
-        s_ids = [t.id for t in ranked_search]
-        e_ids = [t.id for t in ranked_ext]
-        m_ids = [m.id for m in ranked_models]
-        has_deep_agent = any(m.is_deep_agent and _is_usable_status(m.last_status) for m in ranked_models)
+        free_s = [t.id for t in _rank_tools_for_tier(search_tools, tier, usage_state=usage_state, allow_paid=False)]
+        free_e = [t.id for t in _rank_tools_for_tier(extractors, tier, usage_state=usage_state, allow_paid=False)]
+        free_m_objs = _rank_models_for_tier(models, tier, usage_state=usage_state, allow_paid=False)
+        free_m = [m.id for m in free_m_objs]
+
+        paid_s = [t.id for t in _rank_tools_for_tier(search_tools, tier, usage_state=usage_state, allow_paid=True)]
+        paid_e = [t.id for t in _rank_tools_for_tier(extractors, tier, usage_state=usage_state, allow_paid=True)]
+        paid_m_objs = _rank_models_for_tier(models, tier, usage_state=usage_state, allow_paid=True)
+        paid_m = [m.id for m in paid_m_objs]
+
+        has_free_deep = any(m.is_deep_agent and _is_usable_status(m.last_status) for m in free_m_objs)
+        has_paid_deep = any(m.is_deep_agent and _is_usable_status(m.last_status) for m in paid_m_objs)
+        rationale = _format_rationale(tier, free_s, free_m, tools, models, usage_state)
 
         if tier == BrainTier.FAST:
             cfg = TierSequenceConfig(
-                tier=tier,
-                search_tool_sequence=s_ids,
-                extractor_tool_sequence=e_ids,
-                model_sequence=m_ids,
-                max_search_tools=2,
-                enable_page_scraping=False,
-                max_pages_to_scrape=0,
-                max_followup_rounds=0,
-                single_pass=True,
-                use_deep_agent=False,
-                optimization_rationale=_format_rationale(tier, s_ids, m_ids, tools),
-                updated_at=now,
+                tier=tier, search_tool_sequence=free_s, extractor_tool_sequence=free_e, model_sequence=free_m,
+                paid_search_tool_sequence=paid_s, paid_extractor_tool_sequence=paid_e, paid_model_sequence=paid_m,
+                max_search_tools=2, enable_page_scraping=False, max_pages_to_scrape=0, max_followup_rounds=0,
+                single_pass=True, use_deep_agent=False, paid_use_deep_agent=False,
+                optimization_rationale=rationale, updated_at=now,
             )
         elif tier == BrainTier.STANDARD:
+            has_ext = bool(free_e or paid_e)
             cfg = TierSequenceConfig(
-                tier=tier,
-                search_tool_sequence=s_ids,
-                extractor_tool_sequence=e_ids,
-                model_sequence=m_ids,
-                max_search_tools=4,
-                enable_page_scraping=bool(e_ids),
-                max_pages_to_scrape=2 if e_ids else 0,
-                max_followup_rounds=1,
-                single_pass=False,
-                use_deep_agent=False,
-                optimization_rationale=_format_rationale(tier, s_ids, m_ids, tools),
-                updated_at=now,
+                tier=tier, search_tool_sequence=free_s, extractor_tool_sequence=free_e, model_sequence=free_m,
+                paid_search_tool_sequence=paid_s, paid_extractor_tool_sequence=paid_e, paid_model_sequence=paid_m,
+                max_search_tools=4, enable_page_scraping=has_ext, max_pages_to_scrape=2 if has_ext else 0,
+                max_followup_rounds=1, single_pass=False, use_deep_agent=False, paid_use_deep_agent=False,
+                optimization_rationale=rationale, updated_at=now,
             )
         else:
+            has_ext = bool(free_e or paid_e)
             cfg = TierSequenceConfig(
-                tier=tier,
-                search_tool_sequence=s_ids,
-                extractor_tool_sequence=e_ids,
-                model_sequence=m_ids,
-                max_search_tools=max(6, len(s_ids)),
-                enable_page_scraping=bool(e_ids),
-                max_pages_to_scrape=5 if e_ids else 0,
-                max_followup_rounds=2,
-                single_pass=False,
-                use_deep_agent=has_deep_agent,
-                optimization_rationale=_format_rationale(tier, s_ids, m_ids, tools),
-                updated_at=now,
+                tier=tier, search_tool_sequence=free_s, extractor_tool_sequence=free_e, model_sequence=free_m,
+                paid_search_tool_sequence=paid_s, paid_extractor_tool_sequence=paid_e, paid_model_sequence=paid_m,
+                max_search_tools=max(6, len(free_s), len(paid_s)), enable_page_scraping=has_ext,
+                max_pages_to_scrape=5 if has_ext else 0, max_followup_rounds=2, single_pass=False,
+                use_deep_agent=has_free_deep, paid_use_deep_agent=has_paid_deep,
+                optimization_rationale=rationale, updated_at=now,
             )
         result[tier] = cfg
     return result

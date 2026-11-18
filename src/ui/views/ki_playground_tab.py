@@ -45,6 +45,20 @@ def _render_live_test_section(brain: KIWebsearchBrain, is_admin: bool) -> None:
             tier = st.selectbox("Ausführungs-Stufe", options=[BrainTier.FAST, BrainTier.STANDARD, BrainTier.DEEP], index=1, format_func=lambda t: t.value.capitalize())
         with c2:
             mode = st.selectbox("Modus", options=["ask (Web + KI-Synthese)", "search (nur Tool-Sequenz)"])
+        c3, c4 = st.columns(2, vertical_alignment="bottom")
+        with c3:
+            maps_mode = st.selectbox(
+                "🗺️ Google Maps Grounding",
+                options=["Auto (Geo-Smart)", "Immer aktiv", "Aus"],
+                index=0,
+                help="Geo-Smart aktiviert Google Maps Grounding (5.000/Mo in Gemini 3+) nur bei Orts-, Adress- oder Routenbezug.",
+            )
+        with c4:
+            allow_paid = st.checkbox(
+                "💳 Kostenpflichtige Modelle/Tools bei Bedarf einbeziehen (allow_paid)",
+                value=False,
+                help="Standard ist strikt 0% Kosten. Erst mit Opt-In werden Paid-Only-Modelle (z. B. Deep Research / Argon / Pro) und erschöpfte Kontingente genutzt.",
+            )
         submitted = st.form_submit_button("▶️ Anfrage über Brain ausführen", disabled=not is_admin, use_container_width=True)
 
     if not submitted:
@@ -52,19 +66,23 @@ def _render_live_test_section(brain: KIWebsearchBrain, is_admin: bool) -> None:
     if not query.strip():
         st.warning("Bitte gib eine Such- oder Forschungsfrage ein.")
         return
+    use_maps: bool | None = True if maps_mode == "Immer aktiv" else (False if maps_mode == "Aus" else None)
+    budget_note = "Paid Opt-In" if allow_paid else "0% Kosten"
     try:
         if mode.startswith("search"):
-            with st.spinner(f"Führe Websearch ({tier.value.capitalize()}) aus..."):
-                res_s = brain.search(query, tier=tier)
-            st.caption(f"Tier: `{res_s.tier.value}` · Latenz: `{res_s.latency_ms} ms` · Tools: `{', '.join(res_s.tools_executed) or '–'}`")
+            with st.spinner(f"Führe Websearch ({tier.value.capitalize()} · {budget_note}) aus..."):
+                res_s = brain.search(query, tier=tier, allow_paid=allow_paid, use_maps=use_maps)
+            invalidate_ki_ui_cache()
+            st.caption(f"Tier: `{res_s.tier.value}` · Modus: `{budget_note}` · Latenz: `{res_s.latency_ms} ms` · Tools: `{', '.join(res_s.tools_executed) or '–'}`")
             for cite in res_s.citations:
                 st.markdown(f"- **[{cite.title or cite.url}]({cite.url})** (`{cite.source_tool}`) – {cite.snippet}")
             if not res_s.citations:
                 st.info("Keine Treffer von den aktiven Suchtools erhalten.")
             return
-        with st.spinner(f"Führe Brain Ask ({tier.value.capitalize()}) aus..."):
-            res_a = brain.ask(query, tier=tier)
-        st.caption(f"Modell: `{res_a.model_used}` · Tier: `{res_a.tier.value}` · Seiten gescraped: `{res_a.pages_fetched}` · Latenz: `{res_a.latency_ms} ms`")
+        with st.spinner(f"Führe Brain Ask ({tier.value.capitalize()} · {budget_note}) aus..."):
+            res_a = brain.ask(query, tier=tier, allow_paid=allow_paid, use_maps=use_maps)
+        invalidate_ki_ui_cache()
+        st.caption(f"Modell: `{res_a.model_used}` · Modus: `{budget_note}` · Tier: `{res_a.tier.value}` · Seiten gescraped: `{res_a.pages_fetched}` · Latenz: `{res_a.latency_ms} ms`")
         st.markdown(res_a.text)
         if res_a.citations:
             with st.expander(f"🔗 Verwendete Quellen ({len(res_a.citations)})", expanded=False):
@@ -111,11 +129,13 @@ def _render_bot_api_section() -> None:
     st.code('pip install "git+https://github.com/hschenke/bot-dashboard.git"', language="bash")
     st.code(
         "from ki_brain import KIWebsearchBrain\n\n"
-        "# Nutzt dieselbe zentrale Turso-Cloud-DB (BRAIN_TURSO_URL / TURSO_URL)\n"
-        "# und lädt automatisch optimierte Fast-, Standard- und Deep-Sequenzen.\n"
+        "# Standardmäßig strikt 0% Kosten (nur Free-Tier & unverbrauchte Kontingente).\n"
+        "# Kostenpflichtige Modelle/Kontingent-Überschreitungen nur bei allow_paid=True.\n"
         "with KIWebsearchBrain.from_env() as brain:\n"
         '    fast_hits = brain.search("Aktuelle KI-News", tier="fast")\n'
-        '    answer = brain.ask("Vergleich lokaler LLM-Frameworks", tier="deep")\n',
+        '    local_places = brain.search("Cafés am Alexanderplatz Berlin", tier="standard")  # Geo-Smart Maps\n'
+        '    free_answer = brain.ask("Vergleich lokaler LLM-Frameworks", tier="deep")\n'
+        '    paid_deep = brain.ask("Tiefenanalyse Quantencomputer", tier="deep", allow_paid=True)\n',
         language="python",
     )
 

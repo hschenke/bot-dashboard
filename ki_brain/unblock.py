@@ -18,6 +18,7 @@ DEFAULT_PROBE_QUERY_RULES: dict[str, str] = {
     "duckduckgo_instant": "Python",
     "open_meteo": "Berlin",
     "wikidata_api": "Python",
+    "gemini_google_maps": "Cafés am Alexanderplatz in Berlin",
 }
 
 
@@ -100,6 +101,8 @@ def resolve_blocked_tools(
     on_progress: Callable[[float, str], None] | None = None,
 ) -> UnblockSummary:
     """Wendet Regeln auf `Blocked`-Tools an, aktiviert `searx.space`-Pool und testet live nach."""
+    from ki_brain.quotas import select_grounding_model
+
     if on_progress:
         on_progress(0.08, "Analysiere Blocked-Tools und wende Remediation-Rules an...")
     all_tools = repo.list_tools(enabled_only=True)
@@ -139,6 +142,8 @@ def resolve_blocked_tools(
             activated_alts.append(f"searxng_public ({searx_tool.endpoint_url})")
 
     bench = BrainBenchmarkRunner(repo, secrets, runner)
+    models_enabled = repo.list_models(enabled_only=True)
+    usage_state = repo.load_usage_quotas()
     updated_entries = []
     unblocked_ids: list[str] = []
     still_blocked: dict[str, str] = {}
@@ -150,7 +155,12 @@ def resolve_blocked_tools(
                 0.38 + 0.50 * (idx / max(1, len(targets))),
                 f"Teste Tool live nach ({idx}/{len(targets)}): `{tool.id}`...",
             )
-        ut, entry = bench.probe_tool(tool, test_query, test_url, None)
+        g_model = (
+            select_grounding_model(models_enabled, secrets, executor_type=tool.executor_type, allow_paid=False)
+            if tool.category == ToolCategory.AI_GROUNDING
+            else None
+        )
+        ut, entry = bench.probe_tool(tool, test_query, test_url, g_model, usage_state=usage_state)
         if ut.last_status == ProbeStatus.BLOCKED:
             yahoo_alt = _try_yahoo_alternate_endpoint(bench, ut, test_query, test_url)
             if yahoo_alt is not None:
@@ -167,7 +177,13 @@ def resolve_blocked_tools(
         on_progress(0.92, "Aktualisiere Fast-, Standard- und Deep-Sequenzen...")
     updated_seqs = repo.list_sequences()
     if unblocked_ids or activated_alts:
-        seqs = optimize_tier_sequences(repo.list_models(), repo.list_tools(), updated_seqs, force_overwrite=False)
+        seqs = optimize_tier_sequences(
+            repo.list_models(),
+            repo.list_tools(),
+            updated_seqs,
+            force_overwrite=False,
+            usage_state=repo.load_usage_quotas(),
+        )
         updated_seqs = {t: repo.upsert_sequence(seq) for t, seq in seqs.items()}
 
     latest = repo.get_latest_benchmark()

@@ -2,8 +2,18 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import streamlit as st
-from ki_brain import BrainError, KIWebsearchBrain, SecretStatusEntry, ToolCategory, ToolSpec
+from ki_brain import (
+    BrainError,
+    KIWebsearchBrain,
+    SecretStatusEntry,
+    ToolCategory,
+    ToolSpec,
+    evaluate_tool_quota,
+    format_quota_label,
+)
 
 from src.ui.views.ki_secret_dialog import render_missing_keys_action_bar
 from src.ui.views.ki_sequences_tab import format_probe_badge
@@ -30,6 +40,7 @@ _EXECUTOR_OPTIONS: tuple[str, ...] = (
     "jina_reader",
     "browserbase_fetch",
     "gemini_google_search",
+    "gemini_google_maps",
     "gemini_url_context",
     "open_meteo",
 )
@@ -46,9 +57,11 @@ def render_tools_tab(
     tools: list[ToolSpec] | None = None,
     secret_statuses: list[SecretStatusEntry] | None = None,
     active_tab_label: str | None = None,
+    usage_quotas: dict[str, Any] | None = None,
 ) -> None:
-    """Zeigt alle Websearch- & Extraktions-Tools inkl. CRUD & HTTP-Diagnose."""
+    """Zeigt alle Websearch-, Grounding- & Extraktions-Tools inkl. Free-Kontingent & CRUD."""
     resolved = tools if tools is not None else brain.list_tools()
+    quotas = usage_quotas if usage_quotas is not None else brain.load_usage_quotas()
     rows = [
         {
             "Name": t.name,
@@ -59,16 +72,19 @@ def render_tools_tab(
             "Quality": t.quality_score,
             "Reliability": t.reliability_score,
             "Key": t.api_key_env or "Keyless",
+            "Kontingent / Kosten": format_quota_label(
+                evaluate_tool_quota(t, quotas),
+                paid_cost_per_1k=t.paid_cost_per_1k,
+            ),
             "Diagnose": t.last_error or "–",
         }
         for t in resolved
     ]
     st.dataframe(rows, use_container_width=True, hide_index=True)
     st.caption(
-        "ℹ️ **SearXNG (`searxng_public`)** nutzt den öffentlichen `searx.space`-Pool inkl. HTML-Fallback "
-        "(eigene Instanz-URL unten im Editor unter `searxng_public` eintragbar). "
-        "Bei DuckDuckGo-Cloud-Sperre (`HTTP 202`): kostenfreien Key (`TAVILY_API_KEY`, `SERPER_API_KEY`, `BRAVE_SEARCH_API_KEY`) "
-        "setzen oder auf `yahoo_search` / `searxng_public` vertrauen & DDG optional deaktivieren."
+        "ℹ️ **0%-Kosten & Free-Kontingente:** Gemini Search & Google Maps Grounding bieten je **5.000 Queries/Mo** im Paid Tier (ab Gemini 3+; Maps bei 2.5 sofort $25/1k, daher 0%-Schutz). "
+        "Weitere Gratisfelder: Tavily (1.000/Mo), Brave (1.000/Mo), Serper (2.500 Starter), Browserbase (60/Mo) — nach Ausschöpfen nur mit `allow_paid=True`. "
+        "**SearXNG (`searxng_public`)** nutzt `searx.space` inkl. HTML-Fallback."
     )
 
     tool_envs = {t.api_key_env.strip().upper() for t in resolved if t.api_key_env.strip()}
@@ -82,6 +98,15 @@ def render_tools_tab(
     )
 
     if is_admin:
+        if st.button(
+            "🔄 Free-Kontingent-Zähler zurücksetzen",
+            key="ki_reset_usage_quotas_btn",
+            help="Setzt den lokal gezählten Verbrauchsstand (Monat/Tag/Lifetime) auf 0 zurück.",
+        ):
+            brain.reset_usage_quotas()
+            invalidate_ki_ui_cache()
+            _set_feedback("success", "Free-Kontingent-Zähler zurückgesetzt.")
+            st.rerun()
         _render_tool_controls(brain, resolved)
         _render_tool_form(brain, resolved)
 
@@ -113,10 +138,12 @@ def _render_tool_controls(brain: KIWebsearchBrain, tools: list[ToolSpec]) -> Non
 
 def _render_tool_form(brain: KIWebsearchBrain, tools: list[ToolSpec]) -> None:
     tool_ids = [t.id for t in tools]
+    period_opts = ["unlimited", "monthly", "daily", "lifetime", "none"]
     with st.expander("➕ Neues Tool manuell eintragen oder bearbeiten", expanded=False):
         mode = st.selectbox("Vorlage / Bearbeitung", options=["➕ Neues Tool", *tool_ids], key="ki_tool_edit_sel")
         existing = next((t for t in tools if t.id == mode), None)
         cur_exec = existing.executor_type if (existing and existing.executor_type in _EXECUTOR_OPTIONS) else _EXECUTOR_OPTIONS[0]
+        cur_per = existing.free_quota_period if (existing and existing.free_quota_period in period_opts) else "unlimited"
 
         with st.form(f"ki_tool_crud_form_{mode}"):
             c1, c2 = st.columns(2)
@@ -143,8 +170,19 @@ def _render_tool_form(brain: KIWebsearchBrain, tools: list[ToolSpec]) -> None:
                 snippet_field = st.text_input("JSON Snippet-Feld (optional)", value=str(cfg.get("snippet_field", "snippet")), placeholder="snippet / description")
             with c7:
                 probe_query = st.text_input("Probe Query Rule (optional)", value=str(cfg.get("probe_query", "")), placeholder="z. B. Python oder Berlin")
+            cq1, cq2, cq3 = st.columns(3)
+            with cq1:
+                t_quota_limit = st.number_input("Free-Kontingent (0=∞)", min_value=0, max_value=100_000, value=int(existing.free_quota_limit if existing else 0))
+            with cq2:
+                t_quota_period = st.selectbox("Periode", options=period_opts, index=period_opts.index(cur_per))
+            with cq3:
+                t_paid_1k = st.number_input("Paid USD/1k danach", min_value=0.0, max_value=1000.0, value=float(existing.paid_cost_per_1k if existing else 0.0))
             t_desc = st.text_input("Beschreibung", value=existing.description if existing else "")
-            t_enabled = st.checkbox("Aktiviert", value=existing.enabled if existing else True)
+            cf1, cf2 = st.columns(2)
+            with cf1:
+                t_is_free = st.checkbox("Im Free-Tier nutzbar (ohne allow_paid)", value=existing.is_free if existing else True)
+            with cf2:
+                t_enabled = st.checkbox("Aktiviert", value=existing.enabled if existing else True)
             submitted = st.form_submit_button("💾 Tool speichern", use_container_width=True)
 
         if submitted:
@@ -169,6 +207,11 @@ def _render_tool_form(brain: KIWebsearchBrain, tools: list[ToolSpec]) -> None:
                     executor_type=t_exec,
                     description=t_desc.strip(),
                     endpoint_url=t_url.strip(),
+                    is_free=bool(t_is_free),
+                    free_quota_limit=int(t_quota_limit),
+                    free_quota_period=t_quota_period if t_is_free else "none",
+                    free_quota_unit=existing.free_quota_unit if existing else "queries",
+                    paid_cost_per_1k=float(t_paid_1k),
                     requires_api_key=bool(t_key_env.strip()),
                     api_key_env=t_key_env.strip(),
                     origin_apps=existing.origin_apps if existing else ["manual"],

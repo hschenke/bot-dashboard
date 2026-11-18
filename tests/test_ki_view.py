@@ -81,9 +81,20 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
     assert "Key-Env" not in models_df.columns
     assert "Latenz (ms)" in models_df.columns
     assert "Kosten (~$/1M)" in models_df.columns
+    assert "Budget" in models_df.columns
     assert all(float(val) >= 0.0 for val in models_df["Kosten (~$/1M)"])
+    assert any("Paid-Only" in str(val) for val in models_df["Budget"])
+    assert "Kontingent / Kosten" in tools_df.columns
     assert "searxng_public" in list(tools_df["ID"])
+    assert "gemini_google_maps" in list(tools_df["ID"])
+    assert any("5000/5000/Mo" in str(val) for val in tools_df["Kontingent / Kosten"])
+    assert any("🆓 0% Kosten" in e.label for e in at.tabs[0].expander)
+    assert any("💳 Paid-Opt-In" in c.value for c in at.tabs[0].caption)
+    assert any(c.label.startswith("💳 Kostenpflichtige Modelle/Tools") and c.value is False for c in at.tabs[3].checkbox)
+    maps_sel = next(s for s in at.tabs[3].selectbox if s.label == "🗺️ Google Maps Grounding")
+    assert maps_sel.value == "Auto (Geo-Smart)"
     tools_btn_labels = [b.label for b in at.tabs[2].button]
+    assert "🔄 Free-Kontingent-Zähler zurücksetzen" in tools_btn_labels
     assert "🔑 Missing Key: BRAVE_SEARCH_API_KEY" in tools_btn_labels
     assert "🔑 Missing Key: TAVILY_API_KEY" in tools_btn_labels
     assert "🔑 Missing Key: SERPER_API_KEY" in tools_btn_labels
@@ -735,4 +746,37 @@ def test_ki_view_retry_excluded_button_and_discover_feedback(
     at = gemini_set_btn.click().run()
     assert not at.exception
     assert any("Aktive Quelle: **Brain Vault (verschlüsselt, überschreibt ENV/Secrets)**" in c.value for c in at.caption)
+
+
+def test_ki_view_quota_display_and_reset_button(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ki_brain.quotas import record_quota_usage
+    from streamlit.testing.v1 import AppTest
+
+    db_file = tmp_path / "ui_quota_reset.db"
+    monkeypatch.setenv("BRAIN_SQLITE_PATH", str(db_file))
+    repo = create_brain_repository(sqlite_path=db_file)
+    record_quota_usage(repo, tool_counts={"gemini_google_maps": 25})
+    repo.close()
+
+    def _app() -> None:
+        import os
+
+        from src.config.settings import AppSettings
+        from src.domain.enums import AuthRole
+        from src.ui.views.ki_view import render_ki_view
+
+        render_ki_view(AppSettings(brain_sqlite_path=os.environ["BRAIN_SQLITE_PATH"]), role=AuthRole.ADMIN)
+
+    at = AppTest.from_function(_app).run()
+    assert not at.exception
+    tools_df_before = at.tabs[2].dataframe[0].value
+    assert any("4975/5000/Mo" in str(v) for v in tools_df_before["Kontingent / Kosten"])
+
+    reset_q_btn = next(b for b in at.tabs[2].button if b.key == "ki_reset_usage_quotas_btn")
+    at = reset_q_btn.click().run()
+    assert not at.exception
+    tools_df_after = at.tabs[2].dataframe[0].value
+    assert any("5000/5000/Mo" in str(v) for v in tools_df_after["Kontingent / Kosten"])
+    assert any("zurückgesetzt" in s.value for s in at.success)
+
 

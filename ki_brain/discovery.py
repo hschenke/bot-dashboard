@@ -18,6 +18,8 @@ from ki_brain.enums import BrainTier, ModelProvider, ProbeStatus, ToolCategory
 from ki_brain.llm_runner import UnifiedLLMRunner
 from ki_brain.models import AIModelSpec, BrainSecrets, ToolSpec
 from ki_brain.optimizer import optimize_tier_sequences
+from ki_brain.pricing import infer_model_is_free
+from ki_brain.quotas import select_grounding_model
 from ki_brain.security import validate_identifier
 from ki_brain.storage import BrainRepository
 from ki_brain.tools.http_utils import API_HEADERS, safe_http_request
@@ -185,13 +187,17 @@ def _discover_gemini_models(client: genai.Client, *, exclude_previews: bool = Tr
             skipped_previews.append(model_id)
             continue
         tier, is_deep = _guess_gemini_tier(model_id)
+        prov = ModelProvider.GEMINI_DEEP_AGENT if is_deep else ModelProvider.GOOGLE_GEMINI
+        is_free_flag = infer_model_is_free(model_id, display, provider=prov)
         discovered.append(
             AIModelSpec(
                 id=validate_identifier(model_id, "Modell-ID"),
                 name=display,
-                provider=ModelProvider.GEMINI_DEEP_AGENT if is_deep else ModelProvider.GOOGLE_GEMINI,
+                provider=prov,
                 model_id=model_id,
                 tier_hint=tier,
+                is_free=is_free_flag,
+                free_quota_period="unlimited" if is_free_flag else "none",
                 supports_structured_output=not is_deep,
                 supports_google_search=not is_deep,
                 supports_url_context=not is_deep,
@@ -387,23 +393,20 @@ def _recheck_unhealthy_existing(
     ]
     if ai_tools:
         healthy_models = repo.list_models(enabled_only=True)
-        grounding_model = next(
-            (
-                m
-                for m in healthy_models
-                if not m.is_deep_agent
-                and m.provider == ModelProvider.GOOGLE_GEMINI
-                and m.last_status == ProbeStatus.OK
-            ),
-            None,
-        )
-        if grounding_model is not None:
-            for tool in ai_tools:
-                was_quota = tool.last_status == ProbeStatus.QUOTA_LIMITED
-                probed_t, entry_t = bench.probe_tool(tool, grounding_model=grounding_model)
-                repo.upsert_tool(probed_t)
-                if was_quota and entry_t.status == ProbeStatus.OK:
-                    quota_recovered = True
+        for tool in ai_tools:
+            grounding_model = select_grounding_model(
+                healthy_models,
+                secrets,
+                executor_type=tool.executor_type,
+                allow_paid=False,
+            )
+            if grounding_model is None:
+                continue
+            was_quota = tool.last_status == ProbeStatus.QUOTA_LIMITED
+            probed_t, entry_t = bench.probe_tool(tool, grounding_model=grounding_model)
+            repo.upsert_tool(probed_t)
+            if was_quota and entry_t.status == ProbeStatus.OK:
+                quota_recovered = True
     return recovered, len(targets), quota_recovered
 
 
@@ -609,6 +612,7 @@ def auto_sync_catalog(
             repo.list_tools(),
             repo.list_sequences(),
             force_overwrite=False,
+            usage_state=repo.load_usage_quotas(),
         )
         for seq in seqs.values():
             repo.upsert_sequence(seq)

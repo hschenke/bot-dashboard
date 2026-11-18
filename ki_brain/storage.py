@@ -7,16 +7,20 @@ import json
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from ki_brain.catalog import build_default_models, build_default_sequences, build_default_tools
 from ki_brain.db_executors import BrainSqlExecutor, SqliteBrainExecutor, TursoBrainExecutor
 from ki_brain.enums import BrainTier
 from ki_brain.exceptions import BrainStorageError
 from ki_brain.models import AIModelSpec, BenchmarkReport, TierSequenceConfig, ToolSpec
+from ki_brain.pricing import infer_model_is_free
+from ki_brain.quotas import USAGE_QUOTAS_META_KEY, parse_usage_quotas
 from ki_brain.security import validate_identifier
 
 _INITIALIZED_BACKENDS: set[str] = set()
 _INITIALIZED_LOCK = threading.Lock()
+_CATALOG_REV = "3"
 
 
 @dataclass(frozen=True)
@@ -30,6 +34,7 @@ class BrainDashboardState:
     secret_timestamps: dict[str, str]
     excluded_model_ids: tuple[str, ...] = ()
     excluded_model_reasons: dict[str, str] = field(default_factory=dict)
+    usage_quotas: dict[str, dict[str, dict[str, Any]]] = field(default_factory=lambda: {"tools": {}, "models": {}})
 
 _SCHEMA_SQL: tuple[str, ...] = (
     """
@@ -149,7 +154,7 @@ class BrainRepository:
             "SELECT key, value FROM brain_meta WHERE key IN ('seeded_v1', 'seeded_catalog_rev', 'known_builtin_ids', 'excluded_ids')"
         )
         meta = {str(r["key"]): str(r["value"]) for r in meta_res.rows}
-        if meta.get("seeded_v1") == "1" and meta.get("seeded_catalog_rev") == "2":
+        if meta.get("seeded_v1") == "1" and meta.get("seeded_catalog_rev") == _CATALOG_REV:
             return
 
         now = _utc_now_iso()
@@ -160,34 +165,25 @@ class BrainRepository:
         if meta.get("seeded_v1") != "1":
             for model in defaults_models:
                 stmts.append(
-                    (
-                        "INSERT OR IGNORE INTO brain_models (id, payload_json, updated_at) VALUES (?, ?, ?)",
-                        (model.id, model.model_dump_json(), now),
-                    )
+                    ("INSERT OR IGNORE INTO brain_models (id, payload_json, updated_at) VALUES (?, ?, ?)", (model.id, model.model_dump_json(), now))
                 )
             for tool in defaults_tools:
                 stmts.append(
-                    (
-                        "INSERT OR IGNORE INTO brain_tools (id, payload_json, updated_at) VALUES (?, ?, ?)",
-                        (tool.id, tool.model_dump_json(), now),
-                    )
+                    ("INSERT OR IGNORE INTO brain_tools (id, payload_json, updated_at) VALUES (?, ?, ?)", (tool.id, tool.model_dump_json(), now))
                 )
             for tier, seq in build_default_sequences().items():
                 updated_seq = seq.model_copy(update={"updated_at": seq.updated_at or now})
                 stmts.append(
-                    (
-                        "INSERT OR IGNORE INTO brain_sequences (tier, payload_json, updated_at) VALUES (?, ?, ?)",
-                        (tier.value, updated_seq.model_dump_json(), now),
-                    )
+                    ("INSERT OR IGNORE INTO brain_sequences (tier, payload_json, updated_at) VALUES (?, ?, ?)", (tier.value, updated_seq.model_dump_json(), now))
                 )
             known_ids = {"models": [m.id for m in defaults_models], "tools": [t.id for t in defaults_tools]}
             stmts.append(("INSERT OR REPLACE INTO brain_meta (key, value) VALUES (?, ?)", ("known_builtin_ids", json.dumps(known_ids))))
             stmts.append(("INSERT OR REPLACE INTO brain_meta (key, value) VALUES (?, ?)", ("seeded_v1", "1")))
-            stmts.append(("INSERT OR REPLACE INTO brain_meta (key, value) VALUES (?, ?)", ("seeded_catalog_rev", "2")))
+            stmts.append(("INSERT OR REPLACE INTO brain_meta (key, value) VALUES (?, ?)", ("seeded_catalog_rev", _CATALOG_REV)))
             self._executor.execute_batch(stmts)
             return
 
-        # Einmaliger non-destruktiver Upgrade-Sync für bestehende Datenbanken (z. B. searxng_public & Gemini 4)
+        # Non-destruktives Katalog-Upgrade (inkl. Maps Grounding, Kontingent-Limits & Paid-Only-Klassifikation)
         try:
             known = json.loads(meta.get("known_builtin_ids") or "{}")
         except json.JSONDecodeError:
@@ -196,37 +192,63 @@ class BrainRepository:
             excl = json.loads(meta.get("excluded_ids") or "{}")
         except json.JSONDecodeError:
             excl = {}
-        known_m = set(known.get("models", []))
-        known_t = set(known.get("tools", []))
+        known_m, known_t = set(known.get("models", [])), set(known.get("tools", []))
         excl_m = {str(x).strip().lower() for x in excl.get("models", [])}
         excl_t = {str(x).strip().lower() for x in excl.get("tools", [])}
 
         for model in defaults_models:
             if model.id not in known_m and model.id not in excl_m:
-                stmts.append(
-                    (
-                        "INSERT OR IGNORE INTO brain_models (id, payload_json, updated_at) VALUES (?, ?, ?)",
-                        (model.id, model.model_dump_json(), now),
-                    )
-                )
+                stmts.append(("INSERT OR IGNORE INTO brain_models (id, payload_json, updated_at) VALUES (?, ?, ?)", (model.id, model.model_dump_json(), now)))
             known_m.add(model.id)
         for tool in defaults_tools:
             if tool.id not in known_t and tool.id not in excl_t:
-                stmts.append(
-                    (
-                        "INSERT OR IGNORE INTO brain_tools (id, payload_json, updated_at) VALUES (?, ?, ?)",
-                        (tool.id, tool.model_dump_json(), now),
-                    )
-                )
+                stmts.append(("INSERT OR IGNORE INTO brain_tools (id, payload_json, updated_at) VALUES (?, ?, ?)", (tool.id, tool.model_dump_json(), now)))
             known_t.add(tool.id)
-        stmts.append(
-            (
-                "INSERT OR REPLACE INTO brain_meta (key, value) VALUES (?, ?)",
-                ("known_builtin_ids", json.dumps({"models": sorted(known_m), "tools": sorted(known_t)})),
-            )
-        )
-        stmts.append(("INSERT OR REPLACE INTO brain_meta (key, value) VALUES (?, ?)", ("seeded_catalog_rev", "2")))
+
+        self._append_rev3_metadata_upgrades(stmts, defaults_tools, now)
+        stmts.append(("INSERT OR REPLACE INTO brain_meta (key, value) VALUES (?, ?)", ("known_builtin_ids", json.dumps({"models": sorted(known_m), "tools": sorted(known_t)}))))
+        stmts.append(("INSERT OR REPLACE INTO brain_meta (key, value) VALUES (?, ?)", ("seeded_catalog_rev", _CATALOG_REV)))
         self._executor.execute_batch(stmts)
+
+    def _append_rev3_metadata_upgrades(
+        self, stmts: list[tuple[str, tuple[str, ...]]], defaults_tools: list[ToolSpec], now: str
+    ) -> None:
+        default_t_map = {t.id: t for t in defaults_tools}
+        for m in self.list_models():
+            if m.source != "custom" and not infer_model_is_free(
+                m.model_id, m.name, provider=m.provider, input_cost_per_1m=m.input_cost_per_1m, output_cost_per_1m=m.output_cost_per_1m
+            ) and (m.is_free or m.free_quota_period != "none"):
+                up_m = m.model_copy(update={"is_free": False, "free_quota_period": "none"})
+                stmts.append(("UPDATE brain_models SET payload_json = ?, updated_at = ? WHERE id = ?", (up_m.model_dump_json(), now, m.id)))
+        for t in self.list_tools():
+            dt = default_t_map.get(t.id)
+            if dt and t.free_quota_limit == 0 and dt.free_quota_limit > 0:
+                up_t = t.model_copy(update={
+                    "free_quota_limit": dt.free_quota_limit, "free_quota_period": dt.free_quota_period,
+                    "free_quota_unit": dt.free_quota_unit, "paid_cost_per_1k": dt.paid_cost_per_1k,
+                })
+                stmts.append(("UPDATE brain_tools SET payload_json = ?, updated_at = ? WHERE id = ?", (up_t.model_dump_json(), now, t.id)))
+        paid_model_ids = {
+            m.id for m in self.list_models()
+            if not m.is_free or not infer_model_is_free(m.model_id, m.name, provider=m.provider, input_cost_per_1m=m.input_cost_per_1m, output_cost_per_1m=m.output_cost_per_1m)
+        }
+        for seq in self.list_sequences().values():
+            if seq.manual_override:
+                continue
+            free_m_seq = [mid for mid in seq.model_sequence if mid not in paid_model_ids]
+            paid_m_seq = seq.paid_model_sequence or list(seq.model_sequence)
+            paid_s_seq = seq.paid_search_tool_sequence or list(seq.search_tool_sequence)
+            paid_e_seq = seq.paid_extractor_tool_sequence or list(seq.extractor_tool_sequence)
+            has_paid_deep = any(mid == "deep-research-preview-04-2026" for mid in paid_m_seq)
+            up_s = seq.model_copy(update={
+                "model_sequence": free_m_seq,
+                "paid_model_sequence": paid_m_seq,
+                "paid_search_tool_sequence": paid_s_seq,
+                "paid_extractor_tool_sequence": paid_e_seq,
+                "use_deep_agent": False,
+                "paid_use_deep_agent": bool(seq.use_deep_agent or has_paid_deep) if seq.tier == BrainTier.DEEP else False,
+            })
+            stmts.append(("UPDATE brain_sequences SET payload_json = ?, updated_at = ? WHERE tier = ?", (up_s.model_dump_json(), now, seq.tier.value)))
 
     def list_excluded_ids(self) -> tuple[set[str], set[str]]:
         """Liefert persistent ausgeschlossene (gelöschte/defekte) Modell- und Tool-IDs."""
@@ -459,15 +481,23 @@ class BrainRepository:
                 decrypted[str(row["env_name"])] = val
         return decrypted
 
+    def load_usage_quotas(self) -> dict[str, dict[str, dict[str, Any]]]:
+        """Lädt periodenbezogene Free-Kontingent-Zähler aus `brain_meta`."""
+        return parse_usage_quotas(self.get_meta(USAGE_QUOTAS_META_KEY, "{}"))
+
+    def reset_usage_quotas(self) -> None:
+        """Setzt gespeicherte Verbrauchs-Zähler zurück."""
+        self.set_meta(USAGE_QUOTAS_META_KEY, json.dumps({"tools": {}, "models": {}}))
+
     def load_dashboard_state(self) -> BrainDashboardState:
-        """Lädt Modelle, Tools, Sequenzen, Benchmark, Secrets & Excluded-Metadaten in einem Batch."""
+        """Lädt Modelle, Tools, Sequenzen, Benchmark, Secrets & Kontingente in einem Batch."""
         stmts = [
             ("SELECT payload_json FROM brain_models ORDER BY id ASC", ()),
             ("SELECT payload_json FROM brain_tools ORDER BY id ASC", ()),
             ("SELECT tier, payload_json FROM brain_sequences", ()),
             ("SELECT payload_json FROM brain_benchmark_runs ORDER BY started_at DESC LIMIT 1", ()),
             ("SELECT env_name, updated_at FROM brain_secrets ORDER BY env_name ASC", ()),
-            ("SELECT key, value FROM brain_meta WHERE key IN (?, ?)", ("excluded_ids", "excluded_reasons")),
+            ("SELECT key, value FROM brain_meta WHERE key IN (?, ?, ?)", ("excluded_ids", "excluded_reasons", USAGE_QUOTAS_META_KEY)),
         ]
         try:
             res_m, res_t, res_s, res_b, res_sec, res_meta = self._executor.execute_batch(stmts)
@@ -494,6 +524,7 @@ class BrainRepository:
         meta_map = {str(r["key"]): str(r["value"]) for r in res_meta.rows}
         excl_m, _ = _parse_excluded_payload(meta_map.get("excluded_ids", "{}"))
         reasons_m, _ = _parse_reasons_payload(meta_map.get("excluded_reasons", "{}"))
+        quotas = parse_usage_quotas(meta_map.get(USAGE_QUOTAS_META_KEY, "{}"))
         return BrainDashboardState(
             models=models,
             tools=tools,
@@ -502,6 +533,7 @@ class BrainRepository:
             secret_timestamps=sec_ts,
             excluded_model_ids=tuple(sorted(excl_m)),
             excluded_model_reasons={mid: reasons_m[mid] for mid in excl_m if mid in reasons_m},
+            usage_quotas=quotas,
         )
 
     def close(self) -> None:

@@ -44,7 +44,7 @@ def _set_feedback(level: str, message: str) -> None:
 def _render_sequence_card(seq: TierSequenceConfig) -> None:
     title, subtitle = _TIER_TITLES[seq.tier]
     lock_badge = " · 🔒 Manual" if seq.manual_override else " · 🤖 Auto"
-    with st.expander(f"{title}{lock_badge}", expanded=True):
+    with st.expander(f"{title}{lock_badge} · 🆓 0% Kosten", expanded=True):
         st.caption(subtitle)
         search_chain = " → ".join(seq.search_tool_sequence) or "–"
         ext_chain = " → ".join(seq.extractor_tool_sequence) or "–"
@@ -52,6 +52,15 @@ def _render_sequence_card(seq: TierSequenceConfig) -> None:
         st.markdown(f"**Such-Sequenz (`max={seq.max_search_tools}`):** `{search_chain}`")
         st.markdown(f"**Extraktoren (`scrape={seq.enable_page_scraping}`, `pages={seq.max_pages_to_scrape}`):** `{ext_chain}`")
         st.markdown(f"**KI-Modelle (`deep_agent={seq.use_deep_agent}`):** `{model_chain}`")
+        paid_diff = (
+            (seq.paid_search_tool_sequence and seq.paid_search_tool_sequence != seq.search_tool_sequence)
+            or (seq.paid_model_sequence and seq.paid_model_sequence != seq.model_sequence)
+            or (seq.paid_use_deep_agent != seq.use_deep_agent)
+        )
+        if paid_diff:
+            paid_s = " → ".join(seq.paid_search_tool_sequence or seq.search_tool_sequence) or "–"
+            paid_m = " → ".join(seq.paid_model_sequence or seq.model_sequence) or "Heuristik"
+            st.caption(f"💳 Paid-Opt-In (`allow_paid=True`): Suche `{paid_s}` · KI `{paid_m}` (`deep_agent={seq.paid_use_deep_agent}`)")
         if seq.optimization_rationale:
             st.caption(f"Logik: {seq.optimization_rationale}")
 
@@ -100,7 +109,7 @@ def _render_sequence_editor(
             with c4:
                 scrape_on = st.checkbox("Seiten-Scraping aktiv", value=cur.enable_page_scraping)
             with c5:
-                deep_agent_on = st.checkbox("Deep Agent aktiv", value=cur.use_deep_agent)
+                deep_agent_on = st.checkbox("Deep Agent aktiv (0%-Standard)", value=cur.use_deep_agent)
             submitted = st.form_submit_button("💾 Sequenz speichern", use_container_width=True)
 
         if submitted:

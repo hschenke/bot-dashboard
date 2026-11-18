@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
 from collections.abc import Callable
 from typing import Any, TypeVar
@@ -20,6 +21,7 @@ from ki_brain.security import sanitize_display_url
 from ki_brain.tools.http_utils import API_HEADERS, safe_http_request
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
+_GROUNDING_LOCAL = threading.local()
 _JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
 _QUOTA_MARKERS = ("429", "quota", "resource_exhausted", "too_many_requests", "ratelimit")
 _PERMANENT_ERROR_MARKERS = (
@@ -105,30 +107,98 @@ def extract_interaction_text(interaction: Any) -> str:
     return "\n\n".join(parts).strip()
 
 
+def pop_last_grounding_counts() -> dict[str, int]:
+    """Liest und leert die im aktuellen Thread zuletzt gemeldeten Grounding-Query-Zähler."""
+    counts = getattr(_GROUNDING_LOCAL, "counts", None)
+    _GROUNDING_LOCAL.counts = {}
+    return dict(counts) if isinstance(counts, dict) else {}
+
+
+def extract_grounding_tool_counts(interaction: Any) -> dict[str, int]:
+    """Liest abgerechnete Search-/Maps-Grounding-Anfragen aus `interaction.usage.grounding_tool_count`."""
+    usage = getattr(interaction, "usage", None)
+    raw_counts = getattr(usage, "grounding_tool_count", None) if usage is not None else None
+    if not isinstance(raw_counts, (list, tuple)):
+        return {}
+    totals: dict[str, int] = {}
+    for entry in raw_counts:
+        g_type = getattr(entry, "type", None)
+        g_cnt = getattr(entry, "count", None)
+        if isinstance(g_type, str) and isinstance(g_cnt, int) and not isinstance(g_cnt, bool) and g_cnt > 0:
+            clean = g_type.strip().lower()
+            totals[clean] = totals.get(clean, 0) + g_cnt
+    return totals
+
+
+def _build_place_citation(obj: Any) -> BrainCitation | None:
+    raw_url = str(getattr(obj, "url", "") or "").strip()
+    raw_pid = str(getattr(obj, "place_id", "") or "").strip()
+    if not raw_url and raw_pid:
+        clean_pid = raw_pid.removeprefix("places/").strip()
+        if clean_pid:
+            raw_url = f"https://www.google.com/maps/place/?q=place_id:{clean_pid}"
+    safe = sanitize_display_url(raw_url)
+    if safe == "#":
+        return None
+    title = str(getattr(obj, "name", "") or getattr(obj, "title", "") or "").strip()[:180]
+    snippets_raw = getattr(obj, "review_snippets", None)
+    snippets: list[str] = []
+    if isinstance(snippets_raw, (list, tuple)):
+        for rs in snippets_raw[:3]:
+            r_title = str(getattr(rs, "title", "") or "").strip()
+            if r_title:
+                snippets.append(r_title)
+    return BrainCitation(
+        url=safe,
+        title=title or "Google Maps Place",
+        snippet=" · ".join(snippets)[:320],
+        source_tool="gemini_google_maps",
+    )
+
+
 def extract_citations_from_interaction(interaction: Any) -> list[BrainCitation]:
-    """Extrahiert `url_citation`-Annotationen aus einer Gemini Interaction."""
+    """Extrahiert Web- (`url_citation`) und Maps-Zitate (`place_citation`, `google_maps_result`)."""
     citations: list[BrainCitation] = []
     seen: set[str] = set()
-    for step in getattr(interaction, "steps", None) or []:
-        if getattr(step, "type", None) != "model_output":
+    steps = getattr(interaction, "steps", None)
+    if not isinstance(steps, (list, tuple)):
+        return citations
+
+    def _add(cite: BrainCitation | None) -> None:
+        if cite is not None and cite.url not in seen:
+            seen.add(cite.url)
+            citations.append(cite)
+
+    for step in steps:
+        stype = getattr(step, "type", None)
+        if stype == "google_maps_result":
+            results = getattr(step, "result", None)
+            if isinstance(results, (list, tuple)):
+                for res in results:
+                    places = getattr(res, "places", None)
+                    if isinstance(places, (list, tuple)):
+                        for pl in places:
+                            _add(_build_place_citation(pl))
             continue
-        for block in getattr(step, "content", None) or []:
+        if stype != "model_output":
+            continue
+        content = getattr(step, "content", None)
+        if not isinstance(content, (list, tuple)):
+            continue
+        for block in content:
             if getattr(block, "type", None) != "text":
                 continue
-            for ann in getattr(block, "annotations", None) or []:
-                if getattr(ann, "type", None) != "url_citation":
-                    continue
-                safe = sanitize_display_url(str(getattr(ann, "url", "") or ""))
-                if safe == "#" or safe in seen:
-                    continue
-                seen.add(safe)
-                citations.append(
-                    BrainCitation(
-                        url=safe,
-                        title=str(getattr(ann, "title", "") or "").strip()[:180],
-                        source_tool="gemini_google_search",
-                    )
-                )
+            anns = getattr(block, "annotations", None)
+            if not isinstance(anns, (list, tuple)):
+                continue
+            for ann in anns:
+                atype = getattr(ann, "type", None)
+                if atype == "url_citation":
+                    safe = sanitize_display_url(str(getattr(ann, "url", "") or ""))
+                    if safe != "#":
+                        _add(BrainCitation(url=safe, title=str(getattr(ann, "title", "") or "").strip()[:180], source_tool="gemini_google_search"))
+                elif atype == "place_citation":
+                    _add(_build_place_citation(ann))
     return citations
 
 
@@ -194,11 +264,12 @@ class UnifiedLLMRunner:
         *,
         system_instruction: str = "",
         timeout_seconds: float = 40.0,
-        tools: list[dict[str, str]] | None = None,
+        tools: list[dict[str, Any]] | None = None,
         on_poll_tick: Callable[[], None] | None = None,
         cancel_check: Callable[[], None] | None = None,
     ) -> tuple[str, list[BrainCitation]]:
         """Führt eine Text- oder Agenten-Anfrage gegen genau ein Modell aus."""
+        _GROUNDING_LOCAL.counts = {}
         if model.provider == ModelProvider.OPENAI_COMPATIBLE:
             if cancel_check is not None:
                 cancel_check()
@@ -224,6 +295,7 @@ class UnifiedLLMRunner:
             text = extract_interaction_text(interaction)
             if not text:
                 raise BrainProviderError(f"Leere Antwort von Modell '{model.model_id}'.")
+            _GROUNDING_LOCAL.counts = extract_grounding_tool_counts(interaction)
             return text, extract_citations_from_interaction(interaction)
 
         return self._run_with_transient_retry(_invoke, cancel_check=cancel_check)

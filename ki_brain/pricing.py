@@ -107,6 +107,30 @@ def resolve_model_token_costs(model: AIModelSpec) -> tuple[float, float]:
     return 0.75, 3.50
 
 
+_PAID_ONLY_PRO_RE = re.compile(r"(?:^|[-_/: ])pro(?:$|[-_/: ])")
+_PAID_ONLY_MARKERS = ("deep-research", "argon", "carbon", "ultra")
+
+
+def infer_model_is_free(
+    model_id: str,
+    name: str = "",
+    *,
+    provider: ModelProvider = ModelProvider.GOOGLE_GEMINI,
+    input_cost_per_1m: float | None = None,
+    output_cost_per_1m: float | None = None,
+) -> bool:
+    """Ermittelt, ob ein Modell im Free-Tier / gratis nutzbar ist (vs. strikt Paid-Only)."""
+    slug = f"{model_id} {name}".lower()
+    if ":free" in slug or "gemma-" in slug or (model_id.lower().startswith("or/") and model_id.lower().endswith("-free")):
+        return True
+    if any(tok in slug for tok in _PAID_ONLY_MARKERS) or _PAID_ONLY_PRO_RE.search(slug):
+        return False
+    return not (
+        provider == ModelProvider.OPENAI_COMPATIBLE
+        and (float(input_cost_per_1m or 0.0) > 0.0 or float(output_cost_per_1m or 0.0) > 0.0)
+    )
+
+
 def estimate_blended_cost_per_1m(model: AIModelSpec) -> float:
     """Berechnet geschätzte Mischkosten je 1M Tokens (75 % Input + 25 % Output in USD)."""
     in_cost, out_cost = resolve_model_token_costs(model)
@@ -117,3 +141,13 @@ def compute_cost_score(model: AIModelSpec) -> float:
     """Normiert Modellkosten auf 0..100 Punkte (günstiger = höher)."""
     blended = estimate_blended_cost_per_1m(model)
     return round(100.0 / (1.0 + 0.50 * max(0.0, blended)), 1)
+
+
+def format_model_budget_label(model: AIModelSpec) -> str:
+    """Kurze Budget-Einstufung für die KI-Modelle-Tabelle."""
+    if not model.is_free:
+        return "💳 Paid-Only"
+    if estimate_blended_cost_per_1m(model) == 0.0:
+        return "🆓 $0 Forever"
+    return "🆓 Free Tier"
+
