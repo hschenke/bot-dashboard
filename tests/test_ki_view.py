@@ -65,7 +65,7 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
         top_btn = next(b for b in at.button if b.label == top_lbl)
         assert top_btn.proto.type == "secondary"
 
-    # Herkunft- & Aktiv-Spalte entfernt in KI-Modelle & Websearch/Tools + Brave/Tavily/Serper Missing Keys + SearXNG sichtbar
+    # Herkunft- & Aktiv-Spalte entfernt in KI-Modelle & Websearch/Tools + Brave/Tavily/Serper Missing Keys nur im Websearch-Tab
     models_df = at.tabs[1].dataframe[0].value
     tools_df = at.tabs[2].dataframe[0].value
     assert "Herkunft" not in models_df.columns
@@ -73,10 +73,19 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
     assert "Aktiv" not in models_df.columns
     assert "Aktiv" not in tools_df.columns
     assert "searxng_public" in list(tools_df["ID"])
-    assert "🔑 Missing Key: BRAVE_SEARCH_API_KEY" in btn_labels
-    assert "🔑 Missing Key: TAVILY_API_KEY" in btn_labels
-    assert "🔑 Missing Key: SERPER_API_KEY" in btn_labels
+    tools_btn_labels = [b.label for b in at.tabs[2].button]
+    assert "🔑 Missing Key: BRAVE_SEARCH_API_KEY" in tools_btn_labels
+    assert "🔑 Missing Key: TAVILY_API_KEY" in tools_btn_labels
+    assert "🔑 Missing Key: SERPER_API_KEY" in tools_btn_labels
     assert "🔑 Missing Key: REDDIT_CLIENT_ID" not in btn_labels
+
+    # Sequenzen-Tab (tabs[0]) und Live-Test-Tab (tabs[3]) zeigen KEINE redundanten Missing-Key-Buttons mehr
+    assert not any("Missing Key" in b.label for b in at.tabs[0].button)
+    assert not any("Missing Key" in b.label for b in at.tabs[3].button)
+
+    # Letzter Benchmark-Testlauf liegt im Live-Test-Tab (tabs[3]), nicht mehr im Sequenzen-Tab (tabs[0])
+    assert not any("Letzter Benchmark-Testlauf" in s.value for s in at.tabs[0].subheader)
+    assert any("Letzter Benchmark-Testlauf" in s.value for s in at.tabs[3].subheader)
 
     # Tabs nutzen stabile client-seitige IDs ohne on_change='rerun' (kein Server-Reload beim Tab-Wechsel)
     ki_tc = at.get("tab_container")[0]
@@ -517,5 +526,57 @@ def test_ki_ui_cache_prevents_redundant_loads_and_invalidates_on_write(tmp_path:
     brain.close()
 
 
+def test_ki_view_benchmark_report_rendered_in_playground_tab(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ki_brain.models import BenchmarkEntry, BenchmarkReport, ProbeStatus
+    from streamlit.testing.v1 import AppTest
 
+    db_file = tmp_path / "bench_tab4.db"
+    monkeypatch.setenv("BRAIN_SQLITE_PATH", str(db_file))
+    repo = create_brain_repository(sqlite_path=db_file)
+    repo.save_benchmark_run(
+        BenchmarkReport(
+            run_id="bench_tab4_run",
+            started_at="2026-11-18T10:00:00+00:00",
+            finished_at="2026-11-18T10:00:05+00:00",
+            test_query="Python AI",
+            test_url="https://de.wikipedia.org/wiki/Python",
+            entries=[
+                BenchmarkEntry(
+                    item_type="tool",
+                    item_id="yahoo_search",
+                    name="Yahoo Search",
+                    status=ProbeStatus.OK,
+                    latency_ms=120,
+                    result_count=5,
+                    quality_score=91.5,
+                    details="5 Treffer",
+                )
+            ],
+            healthy_tools_count=1,
+            healthy_models_count=0,
+        )
+    )
+    repo.close()
 
+    def _app() -> None:
+        import os
+
+        from src.config.settings import AppSettings
+        from src.domain.enums import AuthRole
+        from src.ui.views.ki_view import render_ki_view
+
+        render_ki_view(AppSettings(brain_sqlite_path=os.environ["BRAIN_SQLITE_PATH"]), role=AuthRole.ADMIN)
+
+    at = AppTest.from_function(_app).run()
+    assert not at.exception
+    assert len(at.tabs[0].dataframe) == 0
+    assert not any("Letzter Benchmark-Testlauf" in s.value for s in at.tabs[0].subheader)
+    assert not any("Missing Key" in b.label for b in at.tabs[0].button)
+
+    assert any("Letzter Benchmark-Testlauf" in s.value for s in at.tabs[3].subheader)
+    assert any("bench_tab4_run" in c.value for c in at.tabs[3].caption)
+    bench_df = at.tabs[3].dataframe[0].value
+    assert "yahoo_search" in list(bench_df["ID"])
+    assert not any("Missing Key" in b.label for b in at.tabs[3].button)

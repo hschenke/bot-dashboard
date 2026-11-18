@@ -127,7 +127,10 @@ def test_render_overview_view_renders_successfully(
     assert sub_titles == ["🌐 Health", "⚙️ Action"]
     assert mock_expander.call_args.kwargs["expanded"] is False
     btn_labels = [call.args[0] for call in mock_btn.call_args_list]
-    assert "⚡ Alle prüfen" in btn_labels
+    assert "⚡ Check All" in btn_labels
+    assert "⚡ Alle prüfen" not in btn_labels
+    check_all_call = next(c for c in mock_btn.call_args_list if c.args[0] == "⚡ Check All")
+    assert check_all_call.kwargs.get("type", "secondary") == "secondary"
 
 
 def test_format_iso_timestamp_format() -> None:
@@ -200,9 +203,11 @@ def test_render_overview_view_shows_wakeup_controls_for_sleeping_app(
     assert table_rows[0]["Awake"] == "🌙 Sleeping"
     assert "Details" not in table_rows[0]
     btn_labels = [call.args[0] for call in mock_btn.call_args_list]
-    assert "⚡ Alle prüfen" in btn_labels
-    assert "☀️ Alle aufwecken" in btn_labels
+    assert "⚡ Check All" in btn_labels
+    assert "☀️ Wake All" in btn_labels
     assert "☀️ App aufwecken" in btn_labels
+    assert "⚡ Alle prüfen" not in btn_labels
+    assert "☀️ Alle aufwecken" not in btn_labels
 
 
 def test_queued_worker_renders_english_badge_status_link_and_active_end() -> None:
@@ -270,15 +275,47 @@ class _RerunCalled(Exception):
     pass
 
 
-def test_check_all_button_runs_spinner_outside_header_columns() -> None:
+@pytest.mark.parametrize("trigger_label", ["⚡ Check All", "☀️ Wake All"])
+def test_check_all_and_wake_all_buttons_run_task_overlay_outside_header_columns(
+    trigger_label: str,
+) -> None:
+    from src.ui.task_overlay import INSTANT_OVERLAY_HTML
+
+    assert "st-key-overview_top_btn_" in INSTANT_OVERLAY_HTML
+    assert "st-key-ki_top_btn_" in INSTANT_OVERLAY_HTML
+
     awake_snap = _create_mock_snapshot()
-    session_state: dict[str, Any] = {"fleet_snapshots": [awake_snap]}
+    sleeping_url = UrlCheckResult(
+        app_id=AppId.NEWS_BOT,
+        target_url=awake_snap.spec.streamlit_url,
+        health_endpoint_url=f"{awake_snap.spec.streamlit_url}~/+/_stcore/health",
+        status=HealthStatus.ASLEEP,
+        http_status_code=200,
+        latency_ms=110,
+        is_streamlit_awake=False,
+        health_endpoint_ok=False,
+        message="Sleeping",
+        checked_at="2026-11-13T10:00:00+00:00",
+    )
+    sleeping_snap = AppFleetSnapshot(
+        spec=awake_snap.spec,
+        overall_status=HealthStatus.ASLEEP,
+        url_check=sleeping_url,
+        workflow_check=awake_snap.workflow_check,
+        db_check=awake_snap.db_check,
+        checked_at=awake_snap.checked_at,
+    )
+
+    session_state: dict[str, Any] = {"fleet_snapshots": [sleeping_snap]}
     coordinator = MagicMock(spec=FleetCheckCoordinator)
     coordinator.check_all_apps.return_value = [awake_snap]
+    coordinator.wake_and_refresh_apps.return_value = ([("News-Bot", True, "HTTP 204")], [awake_snap])
     repository = MagicMock()
 
     col_depth = {"current": 0, "max": 0}
     spinner_depths: list[int] = []
+    overlay_keys: list[str] = []
+    md_calls: list[str] = []
 
     class _TrackedCol:
         def __enter__(self) -> _TrackedCol:
@@ -302,29 +339,41 @@ def test_check_all_button_runs_spinner_outside_header_columns() -> None:
         count = spec if isinstance(spec, int) else len(spec)
         return [_TrackedCol() for _ in range(count)]
 
+    def _tracked_container(**kwargs: Any) -> _DummyContext:
+        if "key" in kwargs:
+            overlay_keys.append(str(kwargs["key"]))
+        return _DummyContext()
+
     with (
         patch("streamlit.session_state", session_state),
         patch("streamlit.columns", side_effect=_tracked_cols),
+        patch("streamlit.container", side_effect=_tracked_container),
+        patch("streamlit.markdown", side_effect=lambda text, **kw: md_calls.append(str(text))),
         patch("streamlit.spinner", return_value=_TrackedSpinner()),
         patch("streamlit.title"),
-        patch("streamlit.button", side_effect=lambda label, **kwargs: label == "⚡ Alle prüfen"),
+        patch("streamlit.button", side_effect=lambda label, **kwargs: label == trigger_label),
         patch("streamlit.rerun", side_effect=_RerunCalled),
         pytest.raises(_RerunCalled),
     ):
-        render_overview_view([awake_snap], coordinator, repository, role=AuthRole.ADMIN)
+        render_overview_view([sleeping_snap], coordinator, repository, role=AuthRole.ADMIN)
 
-    coordinator.check_all_apps.assert_called_once_with(repository=repository)
+    if trigger_label == "⚡ Check All":
+        coordinator.check_all_apps.assert_called_once_with(repository=repository)
+    else:
+        coordinator.wake_and_refresh_apps.assert_called_once_with([sleeping_snap], repository=repository)
     assert col_depth == {"current": 0, "max": 1}
     assert spinner_depths == [0]
+    assert "ki_task_overlay" in overlay_keys
+    assert any("ki-task-backdrop" in m for m in md_calls)
 
 
 def test_wake_all_action_and_single_wake_and_worker_feedback() -> None:
-    from src.ui.views.overview_feedback import (
+    from src.ui.views.overview_actions import (
         run_wake_all_action,
         run_wake_single_action,
         run_worker_trigger_action,
-        update_single_snapshot_state,
     )
+    from src.ui.views.overview_feedback import update_single_snapshot_state
 
     awake_news = _create_mock_snapshot()
     asleep_spec = ManagedAppSpec(
@@ -672,3 +721,79 @@ def test_apptest_overview_db_and_settings_views_render_cleanly(monkeypatch: pyte
     )
     assert any("https://github.com/hschenke/alert-bot/actions/runs/42" in m for m in markdowns)
 
+    check_all_btn = next(b for b in at.button if b.label == "⚡ Check All")
+    assert check_all_btn.proto.type == "secondary"
+    assert "overview_top_btn_check_all" in check_all_btn.proto.id
+
+
+def test_apptest_overview_wake_all_secondary_button_and_overlay(monkeypatch: pytest.MonkeyPatch) -> None:
+    from streamlit.testing.v1 import AppTest
+
+    monkeypatch.setenv("NEWS_BOT_URL", "https://holli-news-bot.streamlit.app/")
+    monkeypatch.setenv("NEWS_BOT_REPO", "hschenke/news-bot")
+
+    def _app() -> None:
+        from unittest.mock import MagicMock
+
+        from src.checks.coordinator import FleetCheckCoordinator
+        from src.config.settings import load_app_settings
+        from src.domain.enums import AuthRole, HealthStatus, WorkflowRunState
+        from src.domain.models import (
+            AppFleetSnapshot,
+            DatabaseHealthSummary,
+            UrlCheckResult,
+            WorkflowRunSummary,
+        )
+        from src.ui.views.overview_view import render_overview_view
+
+        spec = load_app_settings(allow_sibling_env_fallback=False).managed_apps[0]
+        sleeping_snap = AppFleetSnapshot(
+            spec=spec,
+            overall_status=HealthStatus.ASLEEP,
+            url_check=UrlCheckResult(
+                app_id=spec.app_id,
+                target_url=spec.streamlit_url,
+                health_endpoint_url=f"{spec.streamlit_url}_stcore/health",
+                status=HealthStatus.ASLEEP,
+                http_status_code=200,
+                latency_ms=90,
+                is_streamlit_awake=False,
+                health_endpoint_ok=False,
+                message="Sleeping",
+                checked_at="2026-11-18T12:00:00+00:00",
+            ),
+            workflow_check=WorkflowRunSummary(
+                app_id=spec.app_id,
+                workflow_file=spec.primary_workflow,
+                state=WorkflowRunState.SUCCESS,
+                status_label="Success",
+                conclusion="success",
+                run_url=f"https://github.com/{spec.github_repo}/actions/runs/42",
+                branch="main",
+                started_at="2026-11-18T11:00:00Z",
+                updated_at="2026-11-18T11:02:00Z",
+                message="OK",
+            ),
+            db_check=DatabaseHealthSummary(
+                app_id=spec.app_id,
+                backend_label="Turso Cloud",
+                status=HealthStatus.ONLINE,
+                latency_ms=30,
+                table_metrics=(),
+                message="OK",
+                checked_at="2026-11-18T12:00:00+00:00",
+            ),
+            checked_at="2026-11-18T12:00:00+00:00",
+        )
+        coord = MagicMock(spec=FleetCheckCoordinator)
+        repo = MagicMock()
+        render_overview_view([sleeping_snap], coord, repo, role=AuthRole.ADMIN)
+
+    at = AppTest.from_function(_app).run()
+    assert not at.exception
+    check_btn = next(b for b in at.button if b.label == "⚡ Check All")
+    wake_btn = next(b for b in at.button if b.label == "☀️ Wake All")
+    assert check_btn.proto.type == "secondary"
+    assert wake_btn.proto.type == "secondary"
+    assert "overview_top_btn_check_all" in check_btn.proto.id
+    assert "overview_top_btn_wake_all" in wake_btn.proto.id

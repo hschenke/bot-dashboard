@@ -157,7 +157,7 @@ def render_ki_view(settings: AppSettings, role: AuthRole = AuthRole.ADMIN) -> No
 
         tab_seq, tab_mod, tab_tool, tab_play = _open_ki_tabs()
         with tab_seq:
-            render_sequences_tab(brain, is_admin=is_admin, models=models, tools=tools, sequences=seqs, latest_benchmark=latest_bench, secret_statuses=secret_statuses, active_tab_label=KI_TAB_SEQ)
+            render_sequences_tab(brain, is_admin=is_admin, models=models, tools=tools, sequences=seqs)
         with tab_mod:
             render_models_tab(brain, is_admin=is_admin, models=models, secret_statuses=secret_statuses, active_tab_label=KI_TAB_MODELS)
         with tab_tool:

@@ -1,21 +1,17 @@
-"""KI-View Tab 1: Ausführungs-Sequenzen für Fast, Standard & Deep + Benchmark-Report."""
+"""KI-View Tab 1: Ausführungs-Sequenzen für Fast, Standard & Deep + Editor."""
 
 from __future__ import annotations
 
 import streamlit as st
 from ki_brain import (
     AIModelSpec,
-    BenchmarkReport,
     BrainTier,
     KIWebsearchBrain,
     ProbeStatus,
-    SecretStatusEntry,
     TierSequenceConfig,
     ToolSpec,
 )
 
-from src.ui.formatters import format_iso_timestamp
-from src.ui.views.ki_secret_dialog import render_missing_keys_action_bar
 from src.ui.views.ki_task_overlay import invalidate_ki_ui_cache
 
 _STATUS_BADGES: dict[ProbeStatus, str] = {
@@ -137,11 +133,8 @@ def render_sequences_tab(
     models: list[AIModelSpec] | None = None,
     tools: list[ToolSpec] | None = None,
     sequences: dict[BrainTier, TierSequenceConfig] | None = None,
-    latest_benchmark: BenchmarkReport | None = None,
-    secret_statuses: list[SecretStatusEntry] | None = None,
-    active_tab_label: str | None = None,
 ) -> None:
-    """Rendert Fast/Standard/Deep-Sequenzen, Editor & den letzten Benchmark-Report."""
+    """Rendert Fast/Standard/Deep-Sequenzen & den manuellen Sequenz-Editor."""
     seqs = sequences if sequences is not None else brain.list_sequences()
     cols = st.columns(3)
     for idx, tier in enumerate((BrainTier.FAST, BrainTier.STANDARD, BrainTier.DEEP)):
@@ -155,36 +148,3 @@ def render_sequences_tab(
             models=models if models is not None else brain.list_models(),
             tools=tools if tools is not None else brain.list_tools(),
         )
-
-    st.divider()
-    st.subheader("📊 Letzter Benchmark-Testlauf")
-    report = latest_benchmark if latest_benchmark is not None else brain.get_latest_benchmark()
-    if report is None:
-        st.caption("Noch kein Benchmark-Testlauf ausgeführt. Starte oben den Testlauf zur automatischen Optimierung.")
-        render_missing_keys_action_bar(brain, is_admin=is_admin, section_key="seq", statuses=secret_statuses, active_tab_label=active_tab_label)
-        return
-
-    st.caption(
-        f"Lauf `{report.run_id}` · Zeit: {format_iso_timestamp(report.finished_at)} · "
-        f"Gesund: {report.healthy_tools_count} Tools / {report.healthy_models_count} Modelle · Query: `{report.test_query}`"
-    )
-    rows = [
-        {
-            "Typ": "Model" if e.item_type == "model" else "Tool",
-            "Name": e.name,
-            "ID": e.item_id,
-            "Status": format_probe_badge(e.status),
-            "Latenz (ms)": e.latency_ms,
-            "Treffer": e.result_count,
-            "Score": e.quality_score,
-            "Details": e.details,
-        }
-        for e in sorted(report.entries, key=lambda x: (x.item_type, -x.quality_score, x.latency_ms))
-    ]
-    st.dataframe(
-        rows,
-        use_container_width=True,
-        hide_index=True,
-        column_config={"Score": st.column_config.NumberColumn("Score", format="%.1f", help="Qualitätsscore 0–100 (höher = besser) aus Antwortzeit, Ertrag & Modell-Tier.")},
-    )
-    render_missing_keys_action_bar(brain, is_admin=is_admin, section_key="seq_bench", statuses=secret_statuses, active_tab_label=active_tab_label)

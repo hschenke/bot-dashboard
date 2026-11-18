@@ -17,13 +17,14 @@ from src.ui.formatters import (
     format_workflow_badge,
     render_markdown_table,
 )
+from src.ui.task_overlay import render_instant_overlay_bridge
 from src.ui.views.live_poller import render_live_status_poller
-from src.ui.views.overview_feedback import (
-    render_feedback_banner,
+from src.ui.views.overview_actions import (
     run_card_action,
     run_check_all_action,
     run_wake_all_action,
 )
+from src.ui.views.overview_feedback import render_feedback_banner
 
 
 def _has_waking_candidate(snap: AppFleetSnapshot) -> bool:
@@ -42,11 +43,11 @@ def _render_header(snapshots: list[AppFleetSnapshot], role: AuthRole) -> str | N
     with cols[0]:
         st.title("Holli Dashboard")
     with cols[1]:
-        if st.button("⚡ Alle prüfen", type="primary", use_container_width=True):
+        if st.button("⚡ Check All", key="overview_top_btn_check_all", use_container_width=True):
             clicked = "check_all"
     if show_wake_all:
         with cols[2]:
-            if st.button("☀️ Alle aufwecken", use_container_width=True):
+            if st.button("☀️ Wake All", key="overview_top_btn_wake_all", use_container_width=True):
                 clicked = "wake_all"
     return clicked
 
@@ -182,6 +183,7 @@ def render_overview_view(
 ) -> None:
     """Rendert die zentrale Dashboard-Übersicht (KPIs, URL-Status & Cloud-Worker)."""
     header_action = _render_header(snapshots, role)
+    render_instant_overlay_bridge()
     if header_action == "check_all":
         run_check_all_action(coordinator, repository)
     elif header_action == "wake_all":

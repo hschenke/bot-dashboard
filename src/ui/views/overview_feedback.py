@@ -1,4 +1,4 @@
-"""Kompakte Status-Rückmeldungen und Wakeup-/Worker-Aktionen für die Übersicht."""
+"""Kompakte Status-Rückmeldungen für die Dashboard-Übersicht."""
 
 from __future__ import annotations
 
@@ -6,12 +6,9 @@ from typing import Any
 
 import streamlit as st
 
-from src.checks.coordinator import FleetCheckCoordinator
 from src.domain.enums import WorkflowRunState
-from src.domain.exceptions import ProbeError
 from src.domain.models import AppFleetSnapshot
 from src.security.sanitization import sanitize_display_url
-from src.storage.repository import SqlDashboardRepository
 from src.ui.formatters import format_workflow_badge
 
 _ACTIVE_WORKER_STATES = {WorkflowRunState.QUEUED, WorkflowRunState.RUNNING}
@@ -102,85 +99,6 @@ def update_single_snapshot_state(idx: int, updated: AppFleetSnapshot) -> None:
             else f"Online & Awake: {updated.spec.title} · Startet noch: {', '.join(remaining)}."
         )
         st.session_state["overview_feedback"] = feedback
-
-
-def run_check_all_action(
-    coordinator: FleetCheckCoordinator,
-    repository: SqlDashboardRepository,
-) -> None:
-    """Prüft alle Apps im Vollbild-Spinner (ohne Button-Spalten zu verschieben)."""
-    with st.spinner("Checking Apps, Workers & DBs..."):
-        st.session_state["fleet_snapshots"] = coordinator.check_all_apps(repository=repository)
-    st.session_state.pop("overview_feedback", None)
-    st.rerun()
-
-
-def run_wake_all_action(
-    snapshots: list[AppFleetSnapshot],
-    coordinator: FleetCheckCoordinator,
-    repository: SqlDashboardRepository,
-) -> None:
-    """Weckt alle schlafenden Apps auf, aktualisiert die Tabelle und setzt kompaktes Feedback."""
-    with st.spinner("Waking sleeping Apps..."):
-        wake_results, updated = coordinator.wake_and_refresh_apps(snapshots, repository=repository)
-    st.session_state["fleet_snapshots"] = updated
-    st.session_state["overview_feedback"] = build_wake_feedback(wake_results, updated)
-    st.rerun()
-
-
-def run_wake_single_action(
-    snap: AppFleetSnapshot,
-    idx: int,
-    coordinator: FleetCheckCoordinator,
-    repository: SqlDashboardRepository,
-) -> None:
-    """Weckt eine einzelne App auf, aktualisiert ihren Snapshot und setzt Feedback."""
-    with st.spinner(f"Waking {snap.spec.title}..."):
-        ok, msg, updated = coordinator.wake_and_refresh_single_app(snap.spec, repository=repository)
-    update_single_snapshot_state(idx, updated)
-    st.session_state["overview_feedback"] = build_wake_feedback([(snap.spec.title, ok, msg)], [updated])
-    st.rerun()
-
-
-def run_worker_trigger_action(
-    snap: AppFleetSnapshot,
-    idx: int,
-    coordinator: FleetCheckCoordinator,
-    repository: SqlDashboardRepository,
-) -> None:
-    """Startet den GitHub Actions Worker, holt den neuen Run-Status und aktiviert Live-Polling."""
-    try:
-        with st.spinner(f"Starting Worker for {snap.spec.title}..."):
-            _, updated = coordinator.trigger_and_refresh_worker(snap, repository=repository)
-        update_single_snapshot_state(idx, updated)
-        wf = updated.workflow_check
-        is_new_run = wf.run_url != snap.workflow_check.run_url or wf.started_at != snap.workflow_check.started_at
-        pending = wf.state in _ACTIVE_WORKER_STATES or not is_new_run
-        st.session_state["overview_feedback"] = build_worker_feedback(updated, pending=pending)
-    except ProbeError as exc:
-        st.session_state["overview_feedback"] = {
-            "level": "error", "message": f"{snap.spec.title}: {exc}", "wake_titles": [], "worker_titles": [],
-        }
-    st.rerun()
-
-
-def run_card_action(
-    action: str | None,
-    snap: AppFleetSnapshot,
-    idx: int,
-    coordinator: FleetCheckCoordinator,
-    repository: SqlDashboardRepository,
-) -> None:
-    """Führt Karten-Aktionen außerhalb der Button-Spalten aus, um Verschiebungen zu vermeiden."""
-    if action == "check_single":
-        with st.spinner(f"Checking {snap.spec.title}..."):
-            updated = coordinator.check_single_app(snap.spec, repository=repository)
-        update_single_snapshot_state(idx, updated)
-        st.rerun()
-    elif action == "trigger_worker":
-        run_worker_trigger_action(snap, idx, coordinator, repository)
-    elif action == "wake_single":
-        run_wake_single_action(snap, idx, coordinator, repository)
 
 
 def render_feedback_banner() -> None:
