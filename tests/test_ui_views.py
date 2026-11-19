@@ -878,5 +878,66 @@ def test_apptest_overview_wake_all_secondary_button_and_overlay(monkeypatch: pyt
     wake_btn = next(b for b in at.button if b.label == "☀️ Wake All")
     assert check_btn.proto.type == "secondary"
     assert wake_btn.proto.type == "secondary"
+    assert wake_btn.disabled is False
     assert "overview_top_btn_check_all" in check_btn.proto.id
     assert "overview_top_btn_wake_all" in wake_btn.proto.id
+
+    def _app_awake() -> None:
+        from unittest.mock import MagicMock
+
+        from src.checks.coordinator import FleetCheckCoordinator
+        from src.config.settings import load_app_settings
+        from src.domain.enums import AuthRole, HealthStatus, WorkflowRunState
+        from src.domain.models import (
+            AppFleetSnapshot,
+            DatabaseHealthSummary,
+            UrlCheckResult,
+            WorkflowRunSummary,
+        )
+        from src.ui.views.overview_view import render_overview_view
+
+        spec = load_app_settings(allow_sibling_env_fallback=False).managed_apps[0]
+        awake_snap = AppFleetSnapshot(
+            spec=spec,
+            overall_status=HealthStatus.ONLINE,
+            url_check=UrlCheckResult(
+                app_id=spec.app_id,
+                target_url=spec.streamlit_url,
+                health_endpoint_url=f"{spec.streamlit_url}_stcore/health",
+                status=HealthStatus.ONLINE,
+                http_status_code=200,
+                latency_ms=45,
+                is_streamlit_awake=True,
+                health_endpoint_ok=True,
+                message="Online",
+                checked_at="2026-11-18T12:00:00+00:00",
+            ),
+            workflow_check=WorkflowRunSummary(
+                app_id=spec.app_id,
+                workflow_file=spec.primary_workflow,
+                state=WorkflowRunState.SUCCESS,
+                status_label="Success",
+                conclusion="success",
+                run_url=f"https://github.com/{spec.github_repo}/actions/runs/42",
+                branch="main",
+                started_at="2026-11-18T11:00:00Z",
+                updated_at="2026-11-18T11:02:00Z",
+                message="OK",
+            ),
+            db_check=DatabaseHealthSummary(
+                app_id=spec.app_id,
+                backend_label="Turso Cloud",
+                status=HealthStatus.ONLINE,
+                latency_ms=30,
+                table_metrics=(),
+                message="OK",
+                checked_at="2026-11-18T12:00:00+00:00",
+            ),
+            checked_at="2026-11-18T12:00:00+00:00",
+        )
+        render_overview_view([awake_snap], MagicMock(spec=FleetCheckCoordinator), MagicMock(), role=AuthRole.ADMIN)
+
+    at_awake = AppTest.from_function(_app_awake).run()
+    assert not at_awake.exception
+    wake_disabled_btn = next(b for b in at_awake.button if b.label == "☀️ Wake All")
+    assert wake_disabled_btn.disabled is True

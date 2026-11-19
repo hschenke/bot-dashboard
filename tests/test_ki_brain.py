@@ -257,11 +257,10 @@ def test_auto_sync_discovers_gemini_groq_and_openrouter_models(monkeypatch: pyte
     assert "or/broken/dead-free" in summary_again.skipped_excluded
     assert probed_gemini_calls == []
 
-    # Wenn exclude_previews=False, kann Preview aufgenommen und anschließend gezielt bereinigt werden
+    # Wenn exclude_previews=False, kann Preview aufgenommen und manuell wieder entfernt werden
     summary_prev = brain.auto_sync(exclude_previews=False)
     assert "gemini-3.1-flash-lite-preview" in summary_prev.added_models
-    purged = brain.remove_preview_models()
-    assert purged == ["gemini-3.1-flash-lite-preview"]
+    assert brain.remove_model("gemini-3.1-flash-lite-preview") is True
     assert brain.get_model("deep-research-preview-04-2026") is not None
     brain.close()
 
@@ -894,7 +893,7 @@ def test_searxng_html_fallback_open_meteo_and_legacy_db_upgrade(monkeypatch: pyt
     assert "gemini_google_maps" in migrated_tools
     assert "gemini-4-hydrogen" in migrated_models
     assert "gemini-3.6-flash" not in migrated_models
-    assert migrated.get_meta("seeded_catalog_rev") == "3"
+    assert migrated.get_meta("seeded_catalog_rev") == "4"
     deep_m = migrated.get_model("deep-research-preview-04-2026")
     assert deep_m is not None and deep_m.is_free is False
     migrated.close()
@@ -1005,22 +1004,6 @@ def test_discover_recovers_quota_429_and_paid_models_without_readding_previews(
     assert "gemini-2.5-flash-preview" in summary.skipped_previews
     assert summary.existing_previews_count == 2
     assert "gemini-3.5-flash-lite" in brain.get_sequence(BrainTier.FAST).model_sequence
-
-    # 2. Clean Previews entfernt Deep-Research-Previews inkl. '[Rerouted]', behält aber Deep Research Agent
-    purged = brain.remove_preview_models()
-    assert set(purged) == {"deep-research-max-preview-04-2026", "deep-research-pro-preview-12-2025"}
-    assert brain.get_model("deep-research-preview-04-2026") is not None
-    m_reasons, _ = repo.list_excluded_reasons()
-    assert m_reasons["deep-research-max-preview-04-2026"] == "preview"
-
-    # 3. Explizites retry_excluded=True prüft auch manuelle/error Exclusions nach, respektiert aber exclude_previews=True
-    retry_sum = brain.auto_sync(retry_excluded=True, exclude_previews=True)
-    assert "gemini-3.1-flash-lite" in retry_sum.added_models
-    assert brain.get_model("gemini-3.1-flash-lite").last_status == ProbeStatus.OK  # type: ignore[union-attr]
-    assert "gemini-4-dead" in retry_sum.skipped_unhealthy
-    assert brain.get_model("gemini-4-dead") is None
-    assert brain.get_model("gemini-2.5-flash-preview") is None
-    assert retry_sum.existing_previews_count == 0
     brain.close()
 
 
@@ -1635,7 +1618,7 @@ def test_legacy_rev2_to_rev3_upgrade_preserves_customizations(tmp_path: Path) ->
     seed_repo.close()
 
     upgraded = BrainRepository(SqliteBrainExecutor(rev2_db))
-    assert upgraded.get_meta("seeded_catalog_rev") == "3"
+    assert upgraded.get_meta("seeded_catalog_rev") == "4"
     assert upgraded.get_tool("gemini_google_maps") is not None
     assert upgraded.get_tool("gemini_google_search").free_quota_limit == 5000  # type: ignore[union-attr]
     assert upgraded.get_model("deep-research-preview-04-2026").is_free is False  # type: ignore[union-attr]
@@ -1799,7 +1782,6 @@ def test_run_full_pipeline_executes_all_four_steps_with_progress_and_options(tmp
     progress_events: list[tuple[float, str]] = []
     summary = brain.run_full_pipeline(
         exclude_previews=True,
-        retry_excluded=True,
         include_paid=False,
         on_progress=lambda f, m: progress_events.append((f, m)),
     )
@@ -1810,7 +1792,7 @@ def test_run_full_pipeline_executes_all_four_steps_with_progress_and_options(tmp
     assert summary.pruned_models == (("bad-m", ProbeStatus.ERROR),)
     assert progress_events[-1][0] == 1.0
     brain.auto_sync.assert_called_once()
-    assert brain.auto_sync.call_args.kwargs["retry_excluded"] is True
+    assert brain.auto_sync.call_args.kwargs["exclude_previews"] is True
     assert brain.run_benchmark.call_args.kwargs["include_paid"] is False
 
     # Optionen erlauben gezieltes Abwählen einzelner Schritte
@@ -1820,5 +1802,98 @@ def test_run_full_pipeline_executes_all_four_steps_with_progress_and_options(tmp
     brain.close()
 
 
+def test_rev4_sequence_sanitization_and_prune_removes_stale_deleted_preview(tmp_path: Path) -> None:
+    import json
+
+    from ki_brain.catalog import build_default_models, build_default_tools
+    from ki_brain.db_executors import SqliteBrainExecutor
+    from ki_brain.models import TierSequenceConfig
+    from ki_brain.storage import BrainRepository
+
+    rev3_db = tmp_path / "stale_rev3.db"
+    seed_repo = BrainRepository(SqliteBrainExecutor(rev3_db), seed_defaults=False)
+    seed_repo._init_schema()  # noqa: SLF001
+
+    # Simuliert Live-DB nach Löschung von deep-research-preview-04-2026: Modell weg, aber noch in Deep-Rationale & paid_use_deep_agent
+    models = [m for m in build_default_models() if m.id != "deep-research-preview-04-2026"]
+    tools = build_default_tools()
+    seed_repo.upsert_models_batch(models)
+    seed_repo.upsert_tools_batch(tools)
+    seed_repo.upsert_sequence(
+        TierSequenceConfig(
+            tier=BrainTier.DEEP,
+            search_tool_sequence=["yahoo_search", "wikipedia_api"],
+            model_sequence=["gemini-3.5-flash-lite"],
+            paid_model_sequence=["deep-research-preview-04-2026", "gemini-3.5-flash-lite"],
+            use_deep_agent=False,
+            paid_use_deep_agent=True,
+            manual_override=False,
+            optimization_rationale="Deep (0%-Standard): Suche yahoo_search | KI gemini-3.5-flash-lite | Paid-Opt-In: deep-research-preview-04-2026.",
+        )
+    )
+    seed_repo.set_meta("seeded_v1", "1")
+    seed_repo.set_meta("seeded_catalog_rev", "3")
+    seed_repo.set_meta(
+        "known_builtin_ids",
+        json.dumps({"models": [m.id for m in build_default_models()], "tools": [t.id for t in tools]}),
+    )
+    seed_repo.set_meta("excluded_ids", json.dumps({"models": ["deep-research-preview-04-2026"], "tools": []}))
+    seed_repo.close()
+
+    sanitized = BrainRepository(SqliteBrainExecutor(rev3_db))
+    assert sanitized.get_meta("seeded_catalog_rev") == "4"
+    deep_seq = sanitized.get_sequence(BrainTier.DEEP)
+    assert "deep-research-preview-04-2026" not in deep_seq.paid_model_sequence
+    assert deep_seq.paid_use_deep_agent is False
+    assert "deep-research-preview-04-2026" not in deep_seq.optimization_rationale
+    sanitized.close()
+
+    # Auch direktes remove_model() bereinigt deep_agent-Flags & Rationale sofort
+    live_brain = KIWebsearchBrain.for_dashboard(create_brain_repository(sqlite_path=tmp_path / "live_prune.db"))
+    assert live_brain.get_sequence(BrainTier.DEEP).paid_use_deep_agent is True
+    assert live_brain.remove_model("deep-research-preview-04-2026") is True
+    deep_after = live_brain.get_sequence(BrainTier.DEEP)
+    assert "deep-research-preview-04-2026" not in deep_after.paid_model_sequence
+    assert deep_after.paid_use_deep_agent is False
+    assert "deep-research-preview-04-2026" not in deep_after.optimization_rationale
+    live_brain.close()
 
 
+def test_probe_model_minimal_thinking_fallback_and_quick_verify_single_model(tmp_path: Path) -> None:
+    calls: list[dict[str, Any]] = []
+
+    class _FakeGenAIClient:
+        def __init__(self) -> None:
+            self.interactions = SimpleNamespace(create=self._create)
+            self.models = SimpleNamespace(list=lambda: [])
+
+        def _create(self, **kwargs: Any) -> SimpleNamespace:
+            calls.append(dict(kwargs))
+            gc = kwargs.get("generation_config") or {}
+            # Erstaufruf lehnt thinking_level mit HTTP 400 ab -> Runner muss sauber ohne thinking_level wiederholen
+            if len(calls) == 1 and "thinking_level" in gc:
+                raise RuntimeError("400 INVALID_ARGUMENT: thinking_level is not supported for this model")
+            return SimpleNamespace(status="completed", output_text="OK", steps=[])
+
+    fake_client = _FakeGenAIClient()
+    repo = create_brain_repository(sqlite_path=tmp_path / "quick_verify.db")
+    brain = KIWebsearchBrain.for_dashboard(repo, BrainSecrets(), genai_client=fake_client)
+
+    # Unkonfigurierter Legacy GEMINI_API_KEY wird im Vault ausgeblendet
+    names_before = {s.env_name for s in brain.list_secret_statuses()}
+    assert "GEMINI_API_KEY" not in names_before
+    assert "GEMINI_FREE_API_KEY" in names_before
+
+    brain.set_secret("GEMINI_FREE_API_KEY", "AIzaSyQuickVerifyKey123")
+    entries = brain.probe_items_for_secret("GEMINI_FREE_API_KEY", quick_verify=True)
+
+    # quick_verify testet nur 1 schnelles Referenzmodell (Flash-Lite) und 0 Grounding-Tools
+    assert len(entries) == 1
+    assert entries[0].item_type == "model"
+    assert "lite" in entries[0].item_id
+    assert entries[0].status == ProbeStatus.OK
+    # 1. Versuch schickte thinking_level='minimal', 2. Fallback-Versuch ohne thinking_level war OK
+    assert len(calls) == 2
+    assert calls[0]["generation_config"] == {"max_output_tokens": 32, "thinking_level": "minimal"}
+    assert "thinking_level" not in (calls[1].get("generation_config") or {})
+    brain.close()

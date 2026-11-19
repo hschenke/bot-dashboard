@@ -40,7 +40,7 @@ def _render_secret_table_rows(entries: list[SecretStatusEntry], *, is_admin: boo
                     help="Klicken zum Eintragen, Überschreiben & Testen",
                     on_click=queue_secret_dialog_on_click,
                     args=(s.env_name, None, s.model_dump()),
-                    use_container_width=True,
+                    width="stretch",
                 )
             else:
                 st.caption("🟢 Set (••••••••)" if s.is_configured else "🔑 Missing Key")
@@ -54,22 +54,23 @@ def _render_secret_table_rows(entries: list[SecretStatusEntry], *, is_admin: boo
 def _render_ai_keys_section(ai_entries: list[SecretStatusEntry], *, is_admin: bool) -> None:
     st.subheader("🧠 KI-Modelle API-Keys (Free-Tier & Paid-Tier)")
     st.caption(
-        "Strikte Kostentrennung: Im 0%-Standard (`allow_paid=False`) wird ausschließlich der **Free-Tier-Key** genutzt. "
-        "Der **Paid-Tier-Key** wird erst bei explizitem Opt-In (`allow_paid=True`) oder Paid-Only-Modellen aktiv. "
-        "Ein bestehender `GEMINI_API_KEY` dient bis zur Umstellung als Fallback."
+        "Strikte Kostentrennung: Standardmäßig kostenlos (`allow_paid=False`) über den **Free-Tier-Key**. "
+        "Der **Paid-Tier-Key** wird erst bei explizitem Opt-In (`allow_paid=True`) oder Paid-Only-Modellen aktiv."
     )
     has_vault_gemini = any(
         s.env_name in {"GEMINI_FREE_API_KEY", "GEMINI_PAID_API_KEY", "GEMINI_API_KEY"} and "Vault" in s.source
         for s in ai_entries
     )
     has_env_gemini = any(
-        s.env_name == "GEMINI_API_KEY" and "ENV / Streamlit Secrets" in s.source or (s.env_name == "GEMINI_API_KEY" and "überschreibt" in s.source)
+        s.env_name == "GEMINI_API_KEY"
+        and ("ENV / Streamlit Secrets" in s.source or "überschreibt" in s.source)
         for s in ai_entries
     )
     if has_vault_gemini and has_env_gemini:
         st.info(
             "💡 Ein Gemini-Key ist bereits verschlüsselt im Vault hinterlegt. "
-            "`GEMINI_API_KEY` wird in den Streamlit Secrets nicht mehr benötigt und kann dort entfernt werden."
+            "`GEMINI_API_KEY` kann jetzt direkt in **Streamlit Cloud → App Settings → Secrets** gelöscht werden "
+            "(die App hat dort keinen Schreibzugriff; danach verschwindet der Legacy-Eintrag automatisch)."
         )
     _render_secret_table_rows(ai_entries, is_admin=is_admin)
 
@@ -128,15 +129,15 @@ def _render_app_access_section(
         with c_issue:
             if is_admin:
                 lbl = "🔄 Token rotieren" if client.has_token else "🔑 Token erzeugen"
-                if st.button(lbl, key=f"ki_app_issue_btn_{client.app_id}", use_container_width=True):
+                if st.button(lbl, key=f"ki_app_issue_btn_{client.app_id}", width="stretch"):
                     action_req = ("issue", client.app_id)
         with c_toggle:
             if is_admin and client.has_token:
                 if client.enabled:
-                    if st.button("⛔ Sperren", key=f"ki_app_revoke_btn_{client.app_id}", use_container_width=True):
+                    if st.button("⛔ Sperren", key=f"ki_app_revoke_btn_{client.app_id}", width="stretch"):
                         action_req = ("disable", client.app_id)
                 else:
-                    if st.button("✅ Freigeben", key=f"ki_app_enable_btn_{client.app_id}", use_container_width=True):
+                    if st.button("✅ Freigeben", key=f"ki_app_enable_btn_{client.app_id}", width="stretch"):
                         action_req = ("enable", client.app_id)
 
     if action_req is not None:
@@ -183,9 +184,9 @@ def _render_custom_secret_form(brain: KIWebsearchBrain, known_names: list[str]) 
             )
             b_save, b_del = st.columns([2, 1], vertical_alignment="bottom")
             with b_save:
-                save_clicked = st.form_submit_button("🔒 Secret sicher speichern / ersetzen", use_container_width=True)
+                save_clicked = st.form_submit_button("🔒 Secret sicher speichern / ersetzen", width="stretch")
             with b_del:
-                del_clicked = st.form_submit_button("🗑️ Aus Vault löschen", use_container_width=True)
+                del_clicked = st.form_submit_button("🗑️ Aus Vault löschen", width="stretch")
 
         if save_clicked:
             try:

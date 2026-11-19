@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import streamlit as st
-from ki_brain import BenchmarkEntry, BrainError, ProbeStatus, SecretStatusEntry
+from ki_brain import BenchmarkEntry, ProbeStatus, SecretStatusEntry
 
 from src.ai.brain_bridge import create_dashboard_brain
 from src.config.settings import AppSettings
@@ -24,7 +24,7 @@ _STATUS_SHORT: dict[ProbeStatus, str] = {
 }
 
 _TIER_BADGES: dict[str, str] = {
-    "free": "🆓 Free-Tier Key (0% Kosten Standard)",
+    "free": "🆓 Free-Tier Key (kostenloser Standard)",
     "paid": "💳 Paid-Tier Key (nur bei allow_paid=True / Paid-Modellen)",
     "legacy": "🔁 Legacy-Fallback Key (Fallback für Free & Paid)",
     "tool": "🔧 Websearch / Tool API-Key",
@@ -38,6 +38,13 @@ def _set_feedback(level: str, message: str) -> None:
 def _clear_active_dialog() -> None:
     st.session_state.pop(_DIALOG_STATE_KEY, None)
     st.session_state.pop(_DIALOG_META_KEY, None)
+
+
+def _rerun_app() -> None:
+    try:
+        st.rerun(scope="app")
+    except TypeError:
+        st.rerun()
 
 
 def queue_secret_dialog_on_click(
@@ -90,12 +97,12 @@ def _format_probe_summary(env_name: str, entries: list[BenchmarkEntry]) -> tuple
     ok_count = sum(1 for e in entries if e.status == ProbeStatus.OK)
     parts = [f"`{e.item_id}`: {_STATUS_SHORT.get(e.status, e.status.value)} ({e.latency_ms} ms)" for e in entries[:5]]
     level = "success" if ok_count == len(entries) else ("warning" if ok_count > 0 else "error")
-    return level, f"Secret `{env_name}` gespeichert & getestet ({ok_count}/{len(entries)} OK): {' · '.join(parts)}"
+    return level, f"Secret `{env_name}` gespeichert & Schnelltest ({ok_count}/{len(entries)} OK): {' · '.join(parts)}"
 
 
 @st.dialog("🔐 API-Key im Vault eintragen (Write-Only)", on_dismiss=_clear_active_dialog)
 def open_secret_dialog(env_name: str, settings: AppSettings) -> None:
-    """Öffnet ein GitHub-Secrets-ähnliches Write-Only-Modal inkl. sofortigem Testlauf."""
+    """Öffnet ein GitHub-Secrets-ähnliches Write-Only-Modal inkl. schnellem Live-Test."""
     clean_env = env_name.strip().upper()
     cur_status = _resolve_dialog_status(clean_env, settings)
 
@@ -121,9 +128,9 @@ def open_secret_dialog(env_name: str, settings: AppSettings) -> None:
 
     c_test, c_save = st.columns(2, vertical_alignment="bottom")
     with c_test:
-        save_and_test = st.button("🔒 Speichern & testen", key=f"ki_dlg_test_btn_{clean_env}", use_container_width=True)
+        save_and_test = st.button("🔒 Speichern & testen", key=f"ki_dlg_test_btn_{clean_env}", width="stretch")
     with c_save:
-        save_only = st.button("🔒 Nur speichern", key=f"ki_dlg_save_btn_{clean_env}", use_container_width=True)
+        save_only = st.button("🔒 Nur speichern", key=f"ki_dlg_save_btn_{clean_env}", width="stretch")
 
     # Spinner & Validierungsfehler strikt außerhalb schmaler Spalten rendern
     if save_and_test or save_only:
@@ -134,25 +141,36 @@ def open_secret_dialog(env_name: str, settings: AppSettings) -> None:
             with create_dashboard_brain(settings) as dlg_brain:
                 dlg_brain.set_secret(clean_env, secret_val)
                 if save_and_test:
-                    with st.spinner(f"Teste freigeschaltete Modelle/Tools für `{clean_env}`..."):
-                        entries = dlg_brain.probe_items_for_secret(clean_env)
+                    with st.spinner(f"Speichere & prüfe `{clean_env}` (Schnelltest mit Referenzmodell)..."):
+                        entries = dlg_brain.probe_items_for_secret(clean_env, quick_verify=True)
                     level, msg = _format_probe_summary(clean_env, entries)
                 else:
                     level, msg = "success", f"Secret `{clean_env}` verschlüsselt im Vault gespeichert (Write-Only)."
-            invalidate_ki_ui_cache()
-            _set_feedback(level, msg)
-            _clear_active_dialog()
-            st.rerun()
-        except BrainError as exc:
+        except Exception as exc:  # noqa: BLE001
             st.error(f"Fehler: {exc}")
             return
+        invalidate_ki_ui_cache()
+        _set_feedback(level, msg)
+        _clear_active_dialog()
+        _rerun_app()
 
-    if cur_status and cur_status.is_configured and "Vault" in cur_status.source:
+    if cur_status and cur_status.is_configured:
         st.divider()
-        if st.button("🗑️ Aus Vault löschen", key=f"ki_dlg_del_btn_{clean_env}", use_container_width=True):
-            with create_dashboard_brain(settings) as dlg_brain:
-                dlg_brain.delete_secret(clean_env)
-            invalidate_ki_ui_cache()
-            _clear_active_dialog()
-            _set_feedback("info", f"Secret `{clean_env}` aus dem Brain-Vault entfernt.")
-            st.rerun()
+        if "Vault" in cur_status.source:
+            if st.button("🗑️ Aus Vault löschen", key=f"ki_dlg_del_btn_{clean_env}", width="stretch"):
+                try:
+                    with create_dashboard_brain(settings) as dlg_brain:
+                        dlg_brain.delete_secret(clean_env)
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Löschen fehlgeschlagen: {exc}")
+                    return
+                invalidate_ki_ui_cache()
+                _clear_active_dialog()
+                _set_feedback("info", f"Secret `{clean_env}` aus dem Brain-Vault entfernt.")
+                _rerun_app()
+        else:
+            st.info(
+                f"ℹ️ `{clean_env}` stammt aktuell aus **Streamlit Secrets / Umgebungsvariablen** (schreibgeschützt für die App) "
+                "und liegt nicht im Vault. Zum Entfernen lösche den Eintrag direkt in **Streamlit Cloud → App Settings → Secrets** "
+                "(danach verschwindet dieser Eintrag hier automatisch)."
+            )

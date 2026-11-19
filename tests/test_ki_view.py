@@ -50,31 +50,33 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
     assert "🧠 KI-Brain" in headers
 
     metric_labels = [m.label for m in at.metric]
-    assert metric_labels == ["KI-Modelle", "Tools", "Tier-Profile", "Letzter Testlauf"]
+    assert metric_labels == ["KI-Modelle", "Tools", "Letzter Testlauf"]
+    assert not any("Speicher-Backend" in c.value for c in at.caption)
 
-    # 1 vereinter Ablauf-Button statt 4 Einzelbuttons + Optionen erhalten
+    # 1 vereinter Ablauf-Button statt 4 Einzelbuttons; Clean Previews & Retry Excluded entfernt
     btn_labels = [b.label for b in at.button]
     assert "🚀 Sync & Optimize" in btn_labels
     assert "🔎 Discover" not in btn_labels
     assert "🚀 Benchmark & Optimize" not in btn_labels
     assert "🧹 Prune Failing" not in btn_labels
     assert "🔓 Unblock Tools" not in btn_labels
-    assert "🧹 Clean Previews (0)" in btn_labels
-    assert "🔄 Retry Excluded (0)" in btn_labels
+    assert not any("Clean Previews" in lbl for lbl in btn_labels)
+    assert not any("Retry Excluded" in lbl for lbl in btn_labels)
 
     pipeline_btn = next(b for b in at.button if b.label == "🚀 Sync & Optimize")
     assert "ki_top_btn_pipeline" in pipeline_btn.proto.id
     assert pipeline_btn.proto.type == "secondary"
 
-    cb_labels = [c.label for c in at.checkbox]
-    assert "Preview- & Experimental-Modelle ausschließen" in cb_labels
-    assert any("Ausgeschlossene Modelle erneut prüfen (0)" in lbl for lbl in cb_labels)
-    assert "🔎 Discover" in cb_labels
-    assert "🚀 Benchmark" in cb_labels
-    assert "🔓 Unblock" in cb_labels
-    assert "🧹 Prune Failing" in cb_labels
-    retry_cb = next(c for c in at.checkbox if "Ausgeschlossene Modelle erneut prüfen (0)" in c.label)
-    assert retry_cb.disabled is True
+    # Ablauf-Optionen inkl. Preview-Ausschluss stecken im eingeklappten Expander
+    options_exp = next(e for e in at.expander if "Ablauf-Optionen" in e.label)
+    assert options_exp.proto.expanded is False
+    exp_cb_labels = [c.label for c in options_exp.checkbox]
+    assert "Preview- & Experimental-Modelle ausschließen" in exp_cb_labels
+    assert "🔎 Discover" in exp_cb_labels
+    assert "🚀 Benchmark" in exp_cb_labels
+    assert "🔓 Unblock" in exp_cb_labels
+    assert "🧹 Prune Failing" in exp_cb_labels
+    assert not any("Ausgeschlossene Modelle erneut prüfen" in c.label for c in at.checkbox)
 
     # 5 Tabs: Sequencing (0), KI (1), Tools (2), Vault (3), Check (4)
     assert len(at.tabs) == 5
@@ -82,7 +84,15 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
     assert ki_tc.proto.tab_container.id == ""
     assert "ki_brain_tabs" in ki_tc.proto.id
 
-    # Tab 1 (KI) & Tab 2 (Tools): Tabellen intakt & KEINE API-Key-Buttons außerhalb von Vault!
+    # Tab 0 (Sequencing): 3 Sequence-Boxen untereinander, standardmäßig zugeklappt & ohne '0% Kosten' im Titel
+    seq_exps = [e for e in at.tabs[0].expander if any(t in e.label for t in ("⚡ Fast", "⚖️ Standard", "🔬 Deep"))]
+    assert len(seq_exps) == 3
+    for exp in seq_exps:
+        assert exp.proto.expanded is False
+        assert "0% Kosten" not in exp.label
+
+    # Tab 1 (KI) & Tab 2 (Tools): Tabellen intakt, klare Formulierung & KEINE API-Key-Buttons außerhalb von Vault
+    assert not any("0%-Standard" in c.value for c in at.tabs[1].caption)
     models_df = at.tabs[1].dataframe[0].value
     tools_df = at.tabs[2].dataframe[0].value
     assert "Latenz (ms)" in models_df.columns
@@ -102,10 +112,11 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
     assert "Free-Tier API-Key Env" in model_inputs
     assert "Paid-Tier API-Key Env (optional)" in model_inputs
 
-    # Tab 3 (Vault): enthält Free-Tier-, Paid-Tier-, Tool-Keys & die 3 App-Zugriffstokens
+    # Tab 3 (Vault): enthält Free-Tier-, Paid-Tier-, Tool-Keys & die 3 App-Zugriffstokens (Legacy GEMINI_API_KEY ausgeblendet, wenn ungesetzt)
     vault_btn_keys = [b.key for b in at.tabs[3].button]
     assert "ki_vault_row_btn_GEMINI_FREE_API_KEY" in vault_btn_keys
     assert "ki_vault_row_btn_GEMINI_PAID_API_KEY" in vault_btn_keys
+    assert "ki_vault_row_btn_GEMINI_API_KEY" not in vault_btn_keys
     assert "ki_vault_row_btn_GROQ_API_KEY" in vault_btn_keys
     assert "ki_vault_row_btn_GROQ_PAID_API_KEY" in vault_btn_keys
     assert "ki_vault_row_btn_TAVILY_API_KEY" in vault_btn_keys
@@ -273,6 +284,7 @@ def test_ki_vault_tab_secret_dialog_and_three_app_token_management(
     save_and_test_btn = next(b for b in at.button if b.label == "🔒 Speichern & testen")
     at = save_and_test_btn.click().run()
     assert not at.exception
+    assert "ki_active_dialog_env" not in at.session_state
     assert any("BROWSERBASE_API_KEY" in s.value and "OK" in s.value for s in at.success)
 
     reopened = create_dashboard_brain(AppSettings(brain_sqlite_path=str(db_file)))
@@ -341,65 +353,17 @@ def test_app_sidebar_has_three_pages_ki_brain_and_divider_before_logout(
     assert active_ki_btn.proto.type == "primary"
 
 
-def test_ki_models_tab_clean_previews_and_retry_excluded(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from ki_brain import AIModelSpec, BrainTier, DiscoverySummary, ModelProvider
-    from src.ui.views.ki_task_overlay import (
-        filter_retryable_excluded_models,
-        format_discover_feedback,
-    )
-    from streamlit.testing.v1 import AppTest
+def test_no_deprecated_use_container_width_and_mobile_ki_kpi_css() -> None:
+    from src.ui.styles import _STATIC_CSS
 
-    excluded = ("gemini-3.6-flash", "gemini-4-argon", "deep-research-max-preview-04-2026")
-    reasons = {
-        "gemini-3.6-flash": "quota_limited",
-        "gemini-4-argon": "manual",
-        "deep-research-max-preview-04-2026": "preview",
-    }
-    assert filter_retryable_excluded_models(excluded, reasons, exclude_previews=True) == [
-        "gemini-3.6-flash",
-        "gemini-4-argon",
+    src_root = Path(__file__).resolve().parent.parent / "src"
+    offenders = [
+        str(p)
+        for p in src_root.rglob("*.py")
+        if "use_container_width" in p.read_text(encoding="utf-8")
     ]
-    lvl, msg = format_discover_feedback(
-        DiscoverySummary(
-            added_models=["gemini-4-argon"],
-            recovered_models=["gemini-3.5-flash-lite"],
-            checked_sources=["builtins", "gemini-models"],
-            existing_previews_count=1,
-        )
-    )
-    assert lvl == "success" and "Clean Previews" in msg
-
-    db_file = tmp_path / "ui_clean_prev.db"
-    monkeypatch.setenv("BRAIN_SQLITE_PATH", str(db_file))
-    brain = create_dashboard_brain(AppSettings(brain_sqlite_path=str(db_file)))
-    brain.add_or_update_model(
-        AIModelSpec(
-            id="gemini-legacy-exp",
-            name="Gemini Legacy Preview",
-            provider=ModelProvider.GOOGLE_GEMINI,
-            model_id="gemini-legacy-preview",
-            tier_hint=BrainTier.STANDARD,
-        )
-    )
-    brain.close()
-
-    def _app() -> None:
-        import os
-
-        from src.config.settings import AppSettings
-        from src.domain.enums import AuthRole
-        from src.ui.views.ki_view import render_ki_view
-
-        render_ki_view(AppSettings(brain_sqlite_path=os.environ["BRAIN_SQLITE_PATH"]), role=AuthRole.ADMIN)
-
-    at = AppTest.from_function(_app).run()
-    assert not at.exception
-    purge_btn = next(b for b in at.tabs[1].button if b.label == "🧹 Clean Previews (1)")
-    at = purge_btn.click().run()
-    assert not at.exception
-    assert "Gemini Legacy Preview" not in list(at.tabs[1].dataframe[0].value["Name"])
+    assert offenders == []
+    assert ".st-key-ki_kpi_row div[data-testid=\"stHorizontalBlock\"]" in _STATIC_CSS
 
 
 def test_ki_ui_cache_prevents_redundant_loads_and_invalidates_on_write(tmp_path: Path) -> None:
@@ -486,7 +450,7 @@ def test_ki_view_benchmark_report_in_check_tab_and_quota_reset_in_tools_tab(
     assert any("5000/5000/Mo" in str(v) for v in tools_df_after["Kontingent / Kosten"])
 
 
-def test_ki_vault_shows_gemini_env_redundancy_hint_when_in_vault(
+def test_ki_vault_shows_gemini_env_redundancy_and_readonly_dialog_hint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from streamlit.testing.v1 import AppTest
@@ -506,4 +470,11 @@ def test_ki_vault_shows_gemini_env_redundancy_hint_when_in_vault(
 
     at = AppTest.from_function(_app).run()
     assert not at.exception
-    assert any("Streamlit Secrets nicht mehr benötigt" in i.value for i in at.tabs[3].info)
+    assert any("App Settings → Secrets" in i.value for i in at.tabs[3].info)
+
+    # Klick auf Legacy GEMINI_API_KEY (stammt nur aus ENV/Secrets) zeigt klaren Hinweis statt Dialog-Lösch-Button
+    legacy_btn = next(b for b in at.tabs[3].button if b.key == "ki_vault_row_btn_GEMINI_API_KEY")
+    at = legacy_btn.click().run()
+    assert not at.exception
+    assert not any(b.key == "ki_dlg_del_btn_GEMINI_API_KEY" for b in at.button)
+    assert any("stammt aktuell aus **Streamlit Secrets" in i.value for i in at.info)

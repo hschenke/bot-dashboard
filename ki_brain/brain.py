@@ -259,10 +259,16 @@ class KIWebsearchBrain:
     def _prune_ids_from_sequences(
         self, *, model_ids: set[str] | None = None, tool_ids: set[str] | None = None
     ) -> None:
+        from ki_brain.optimizer import _format_rationale
+
         drop_m = model_ids or set()
         drop_t = tool_ids or set()
         if not drop_m and not drop_t:
             return
+        all_models = self._repo.list_models()
+        all_tools = self._repo.list_tools()
+        deep_ids = {m.id for m in all_models if m.is_deep_agent}
+        usage_state = self._repo.load_usage_quotas()
         for seq in self._repo.list_sequences().values():
             new_s = [tid for tid in seq.search_tool_sequence if tid not in drop_t]
             new_e = [tid for tid in seq.extractor_tool_sequence if tid not in drop_t]
@@ -270,6 +276,11 @@ class KIWebsearchBrain:
             new_ps = [tid for tid in seq.paid_search_tool_sequence if tid not in drop_t]
             new_pe = [tid for tid in seq.paid_extractor_tool_sequence if tid not in drop_t]
             new_pm = [mid for mid in seq.paid_model_sequence if mid not in drop_m]
+            new_use_deep = seq.tier == BrainTier.DEEP and any(mid in deep_ids for mid in new_m)
+            new_paid_deep = seq.tier == BrainTier.DEEP and any(mid in deep_ids for mid in new_pm)
+            rationale_stale = any(
+                dropped in (seq.optimization_rationale or "") for dropped in (*drop_m, *drop_t)
+            )
             if (
                 new_s != seq.search_tool_sequence
                 or new_e != seq.extractor_tool_sequence
@@ -277,7 +288,15 @@ class KIWebsearchBrain:
                 or new_ps != seq.paid_search_tool_sequence
                 or new_pe != seq.paid_extractor_tool_sequence
                 or new_pm != seq.paid_model_sequence
+                or new_use_deep != seq.use_deep_agent
+                or new_paid_deep != seq.paid_use_deep_agent
+                or rationale_stale
             ):
+                new_rationale = (
+                    seq.optimization_rationale
+                    if seq.manual_override and not rationale_stale
+                    else _format_rationale(seq.tier, new_s, new_m, all_tools, all_models, usage_state)
+                )
                 self._repo.upsert_sequence(
                     seq.model_copy(
                         update={
@@ -287,6 +306,9 @@ class KIWebsearchBrain:
                             "paid_search_tool_sequence": new_ps,
                             "paid_extractor_tool_sequence": new_pe,
                             "paid_model_sequence": new_pm,
+                            "use_deep_agent": new_use_deep,
+                            "paid_use_deep_agent": new_paid_deep,
+                            "optimization_rationale": new_rationale,
                         }
                     )
                 )
@@ -405,28 +427,6 @@ class KIWebsearchBrain:
         rem_m, rem_t = self.cleanup_unhealthy_items_with_status(statuses=statuses, include_http_202=include_http_202)
         return [mid for mid, _ in rem_m], [tid for tid, _ in rem_t]
 
-    def remove_preview_models(self) -> list[str]:
-        """Entfernt Preview-/Experimental-Modelle (ausgenommen kanonischer Deep Research Agent) dauerhaft."""
-        from ki_brain.discovery import is_preview_or_experimental_model
-
-        removed: list[str] = []
-        for m in self._repo.list_models():
-            if is_preview_or_experimental_model(m.model_id, m.name) and self._repo.delete_model(m.id):
-                removed.append(m.id)
-        if removed:
-            self._repo.add_excluded_ids(model_ids=removed, reason="preview")
-            self._prune_ids_from_sequences(model_ids=set(removed))
-            seqs = optimize_tier_sequences(
-                self._repo.list_models(),
-                self._repo.list_tools(),
-                self._repo.list_sequences(),
-                force_overwrite=False,
-                usage_state=self._repo.load_usage_quotas(),
-            )
-            for seq in seqs.values():
-                self._repo.upsert_sequence(seq)
-        return removed
-
     def resolve_blocked_tools(
         self,
         *,
@@ -455,16 +455,21 @@ class KIWebsearchBrain:
         self, clean_name: str, from_statuses: set[ProbeStatus], target_status: ProbeStatus, error_msg: str = ""
     ) -> None:
         is_paid_key = clean_name.endswith("_PAID_API_KEY")
+        models_to_save: list[AIModelSpec] = []
         for m in self._repo.list_models():
             if not _model_matches_secret_env(m, clean_name):
                 continue
             if is_paid_key and m.is_free and self._secrets.has_model_key(m, allow_paid=False):
                 continue
             if m.last_status in from_statuses:
-                self._repo.upsert_model(m.model_copy(update={"last_status": target_status, "last_error": error_msg}))
-        for t in self._repo.list_tools():
-            if _tool_matches_secret_env(t, clean_name) and t.last_status in from_statuses:
-                self._repo.upsert_tool(t.model_copy(update={"last_status": target_status, "last_error": error_msg}))
+                models_to_save.append(m.model_copy(update={"last_status": target_status, "last_error": error_msg}))
+        tools_to_save: list[ToolSpec] = [
+            t.model_copy(update={"last_status": target_status, "last_error": error_msg})
+            for t in self._repo.list_tools()
+            if _tool_matches_secret_env(t, clean_name) and t.last_status in from_statuses
+        ]
+        self._repo.upsert_models_batch(models_to_save)
+        self._repo.upsert_tools_batch(tools_to_save)
 
     def set_secret(self, env_name: str, new_secret_value: str) -> str:
         """Speichert oder überschreibt ein Secret komplett verschlüsselt (Write-Only) und entsperrt Key-/Quota-Einträge."""
@@ -487,26 +492,30 @@ class KIWebsearchBrain:
         removed = self._repo.delete_encrypted_secret(clean_name)
         self._refresh_runtime_secrets()
         if removed:
+            models_to_save: list[AIModelSpec] = []
             for m in self._repo.list_models():
                 if not _model_matches_secret_env(m, clean_name):
                     continue
                 has_key = self._secrets.has_model_key(m, allow_paid=not m.is_free)
                 if has_key and m.last_status in {ProbeStatus.OK, ProbeStatus.QUOTA_LIMITED, ProbeStatus.ERROR, ProbeStatus.AUTH_MISSING}:
-                    self._repo.upsert_model(m.model_copy(update={"last_status": ProbeStatus.UNTESTED, "last_error": ""}))
+                    models_to_save.append(m.model_copy(update={"last_status": ProbeStatus.UNTESTED, "last_error": ""}))
                 elif not has_key and m.last_status in {ProbeStatus.OK, ProbeStatus.QUOTA_LIMITED, ProbeStatus.ERROR, ProbeStatus.UNTESTED}:
-                    self._repo.upsert_model(
+                    models_to_save.append(
                         m.model_copy(update={"last_status": ProbeStatus.AUTH_MISSING, "last_error": f"Key {clean_name} fehlt."})
                     )
+            tools_to_save: list[ToolSpec] = []
             for t in self._repo.list_tools():
                 if not _tool_matches_secret_env(t, clean_name):
                     continue
                 has_key = self._secrets.has_tool_key(t, allow_paid=False)
                 if has_key and t.last_status in {ProbeStatus.OK, ProbeStatus.QUOTA_LIMITED, ProbeStatus.ERROR, ProbeStatus.AUTH_MISSING}:
-                    self._repo.upsert_tool(t.model_copy(update={"last_status": ProbeStatus.UNTESTED, "last_error": ""}))
+                    tools_to_save.append(t.model_copy(update={"last_status": ProbeStatus.UNTESTED, "last_error": ""}))
                 elif not has_key and t.last_status in {ProbeStatus.OK, ProbeStatus.QUOTA_LIMITED, ProbeStatus.ERROR, ProbeStatus.UNTESTED}:
-                    self._repo.upsert_tool(
+                    tools_to_save.append(
                         t.model_copy(update={"last_status": ProbeStatus.AUTH_MISSING, "last_error": f"Key {clean_name} fehlt."})
                     )
+            self._repo.upsert_models_batch(models_to_save)
+            self._repo.upsert_tools_batch(tools_to_save)
         return removed
 
     # --- App-Zugriffskontrolle (Whitelist: news_bot, research_bot, alert_bot) ---
@@ -534,8 +543,18 @@ class KIWebsearchBrain:
         self._require_admin()
         return self._repo.set_app_client_enabled(app_id, enabled)
 
-    def probe_items_for_secret(self, env_name: str) -> list[BenchmarkEntry]:
-        """Testet alle zu einem Secret gehörenden Modelle/Tools live und aktualisiert Tier-Sequenzen bei Erfolg."""
+    @staticmethod
+    def _select_quick_verify_model(models: list[AIModelSpec]) -> AIModelSpec:
+        def _rank(m: AIModelSpec) -> tuple[bool, int, int, float, str]:
+            mid = m.model_id.lower()
+            tier_rank = 0 if "lite" in mid else (1 if "flash" in mid else 2)
+            lat = m.last_latency_ms if m.last_latency_ms > 0 else 999_999
+            return (m.is_deep_agent, tier_rank, lat, -m.quality_score, m.id)
+
+        return min(models, key=_rank)
+
+    def probe_items_for_secret(self, env_name: str, *, quick_verify: bool = False) -> list[BenchmarkEntry]:
+        """Testet zu einem Secret gehörende Modelle/Tools live (`quick_verify=True` prüft 1 schnelles Referenzmodell)."""
         from ki_brain.quotas import select_grounding_model
 
         clean_name = validate_secret_env_name(env_name)
@@ -550,26 +569,35 @@ class KIWebsearchBrain:
             for m in self._repo.list_models(enabled_only=True)
             if _model_matches_secret_env(m, clean_name) and (is_paid_key or m.is_free)
         ]
+        if quick_verify and target_models:
+            target_models = [self._select_quick_verify_model(target_models)]
+
+        probe_timeout = 25.0 if quick_verify else 30.0
         for model in target_models:
-            um, entry = bench.probe_model(model, usage_state=usage_state, include_paid=is_paid_key)
+            um, entry = bench.probe_model(
+                model, usage_state=usage_state, include_paid=is_paid_key, timeout_seconds=probe_timeout
+            )
             if um != model:
                 self._repo.upsert_model(um)
             entries.append(entry)
 
-        all_models = self._repo.list_models(enabled_only=True)
-        target_tools = [
-            t for t in self._repo.list_tools(enabled_only=True) if _tool_matches_secret_env(t, clean_name)
-        ]
-        for tool in target_tools:
-            g_model = select_grounding_model(
-                all_models, self._secrets, executor_type=tool.executor_type, allow_paid=is_paid_key
-            )
-            ut, entry = bench.probe_tool(
-                tool, DEFAULT_TEST_QUERY, DEFAULT_TEST_URL, g_model, usage_state=usage_state, include_paid=is_paid_key
-            )
-            if ut != tool:
-                self._repo.upsert_tool(ut)
-            entries.append(entry)
+        target_tools = (
+            []
+            if (quick_verify and target_models)
+            else [t for t in self._repo.list_tools(enabled_only=True) if _tool_matches_secret_env(t, clean_name)]
+        )
+        if target_tools:
+            all_models = self._repo.list_models(enabled_only=True)
+            for tool in target_tools:
+                g_model = select_grounding_model(
+                    all_models, self._secrets, executor_type=tool.executor_type, allow_paid=is_paid_key
+                )
+                ut, entry = bench.probe_tool(
+                    tool, DEFAULT_TEST_QUERY, DEFAULT_TEST_URL, g_model, usage_state=usage_state, include_paid=is_paid_key
+                )
+                if ut != tool:
+                    self._repo.upsert_tool(ut)
+                entries.append(entry)
 
         updated_seqs = self._repo.list_sequences()
         if any(e.status == ProbeStatus.OK for e in entries):
@@ -625,6 +653,8 @@ class KIWebsearchBrain:
         for name in all_names:
             in_vault = name in vault_ts
             in_env = self._base_secrets.has_key(name)
+            if name == "GEMINI_API_KEY" and not in_vault and not in_env:
+                continue
             if in_vault and in_env:
                 source = "Brain Vault (verschlüsselt, überschreibt ENV/Secrets)"
             elif in_vault:
@@ -673,7 +703,6 @@ class KIWebsearchBrain:
         *,
         verify_discovered: bool = True,
         exclude_previews: bool = True,
-        retry_excluded: bool = False,
         on_progress: Callable[[float, str], None] | None = None,
     ) -> DiscoverySummary:
         return auto_sync_catalog(
@@ -684,7 +713,6 @@ class KIWebsearchBrain:
             runner=self._runner,
             verify_discovered=verify_discovered,
             exclude_previews=exclude_previews,
-            retry_excluded=retry_excluded,
             on_progress=on_progress,
         )
 
@@ -714,7 +742,6 @@ class KIWebsearchBrain:
         run_unblock: bool = True,
         run_prune: bool = True,
         exclude_previews: bool = True,
-        retry_excluded: bool = False,
         include_paid: bool = False,
         on_progress: Callable[[float, str], None] | None = None,
     ) -> PipelineSummary:
@@ -758,7 +785,6 @@ class KIWebsearchBrain:
                 discovery = self.auto_sync(
                     verify_discovered=True,
                     exclude_previews=exclude_previews,
-                    retry_excluded=retry_excluded,
                     on_progress=cb,
                 )
                 warnings.extend(discovery.warnings)

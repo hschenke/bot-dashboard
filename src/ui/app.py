@@ -89,12 +89,12 @@ def run_streamlit_app() -> None:
                     type="primary" if is_active else "secondary",
                     on_click=_select_nav_page,
                     args=(page_key,),
-                    use_container_width=True,
+                    width="stretch",
                 )
 
             if role == AuthRole.ADMIN and settings.app_password.strip():
                 st.divider()
-                if st.button("Abmelden", icon="🚪", key="nav_logout_btn", use_container_width=True):
+                if st.button("Abmelden", icon="🚪", key="nav_logout_btn", width="stretch"):
                     from src.ui.auth_view import clear_auth_cookie
 
                     clear_auth_cookie()

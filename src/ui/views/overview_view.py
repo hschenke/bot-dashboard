@@ -49,17 +49,26 @@ def _render_fleet_kpi_row(snapshots: list[AppFleetSnapshot]) -> None:
 
 def _render_action_buttons(snapshots: list[AppFleetSnapshot], role: AuthRole) -> str | None:
     has_sleeping = any(_has_waking_candidate(s) for s in snapshots)
-    show_wake_all = role == AuthRole.ADMIN and has_sleeping
+    can_wake_all = role == AuthRole.ADMIN and has_sleeping
     clicked: str | None = None
     with st.container(key="overview_action_row"):
         cols = st.columns(2, vertical_alignment="center")
         with cols[0]:
-            if st.button("⚡ Check All", key="overview_top_btn_check_all", use_container_width=True):
+            if st.button("⚡ Check All", key="overview_top_btn_check_all", width="stretch"):
                 clicked = "check_all"
-        if show_wake_all:
-            with cols[1]:
-                if st.button("☀️ Wake All", key="overview_top_btn_wake_all", use_container_width=True):
-                    clicked = "wake_all"
+        with cols[1]:
+            if st.button(
+                "☀️ Wake All",
+                key="overview_top_btn_wake_all",
+                disabled=not can_wake_all,
+                width="stretch",
+                help=(
+                    "Weckt alle schlafenden Streamlit-Apps automatisch auf."
+                    if can_wake_all
+                    else "Aktuell schlafen keine Apps (wird automatisch aktiv, sobald eine App schläft)."
+                ),
+            ):
+                clicked = "wake_all"
     return clicked
 
 
@@ -103,20 +112,20 @@ def _render_card_actions(
     clicked: str | None = None
     with cols[0]:
         if safe_app_url != "#":
-            st.link_button("🌐 Web-App öffnen", safe_app_url, use_container_width=True)
+            st.link_button("🌐 Web-App öffnen", safe_app_url, width="stretch")
     with cols[1]:
         if safe_run_url != "#":
-            st.link_button("📋 Action Log", safe_run_url, use_container_width=True)
+            st.link_button("📋 Action Log", safe_run_url, width="stretch")
     with cols[2]:
-        if st.button("🔄 App prüfen", key=f"refresh_single_{app_key}", use_container_width=True):
+        if st.button("🔄 App prüfen", key=f"refresh_single_{app_key}", width="stretch"):
             clicked = "check_single"
     if is_admin:
         with cols[3]:
-            if st.button("▶️ Worker starten", key=f"trigger_wf_{app_key}", use_container_width=True):
+            if st.button("▶️ Worker starten", key=f"trigger_wf_{app_key}", width="stretch"):
                 clicked = "trigger_worker"
         if can_wake:
             with cols[4]:
-                if st.button("☀️ App aufwecken", key=f"wake_app_{app_key}", use_container_width=True):
+                if st.button("☀️ App aufwecken", key=f"wake_app_{app_key}", width="stretch"):
                     clicked = "wake_single"
     run_card_action(clicked, snap, idx, coordinator, repository)
 

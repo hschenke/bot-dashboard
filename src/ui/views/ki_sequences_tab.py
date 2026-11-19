@@ -41,25 +41,36 @@ def _set_feedback(level: str, message: str) -> None:
     st.session_state["ki_brain_feedback"] = {"level": level, "message": message}
 
 
-def _render_sequence_card(seq: TierSequenceConfig) -> None:
+def _render_sequence_card(
+    seq: TierSequenceConfig,
+    *,
+    valid_model_ids: set[str] | None = None,
+    valid_tool_ids: set[str] | None = None,
+) -> None:
     title, subtitle = _TIER_TITLES[seq.tier]
     lock_badge = " · 🔒 Manual" if seq.manual_override else " · 🤖 Auto"
-    with st.expander(f"{title}{lock_badge} · 🆓 0% Kosten", expanded=True):
+    s_ids = [t for t in seq.search_tool_sequence if valid_tool_ids is None or t in valid_tool_ids]
+    e_ids = [t for t in seq.extractor_tool_sequence if valid_tool_ids is None or t in valid_tool_ids]
+    m_ids = [m for m in seq.model_sequence if valid_model_ids is None or m in valid_model_ids]
+    ps_ids = [t for t in (seq.paid_search_tool_sequence or seq.search_tool_sequence) if valid_tool_ids is None or t in valid_tool_ids]
+    pm_ids = [m for m in (seq.paid_model_sequence or seq.model_sequence) if valid_model_ids is None or m in valid_model_ids]
+
+    with st.expander(f"{title}{lock_badge}", expanded=False):
         st.caption(subtitle)
-        search_chain = " → ".join(seq.search_tool_sequence) or "–"
-        ext_chain = " → ".join(seq.extractor_tool_sequence) or "–"
-        model_chain = " → ".join(seq.model_sequence) or "Heuristik"
+        search_chain = " → ".join(s_ids) or "–"
+        ext_chain = " → ".join(e_ids) or "–"
+        model_chain = " → ".join(m_ids) or "Heuristik"
         st.markdown(f"**Such-Sequenz (`max={seq.max_search_tools}`):** `{search_chain}`")
         st.markdown(f"**Extraktoren (`scrape={seq.enable_page_scraping}`, `pages={seq.max_pages_to_scrape}`):** `{ext_chain}`")
         st.markdown(f"**KI-Modelle (`deep_agent={seq.use_deep_agent}`):** `{model_chain}`")
         paid_diff = (
-            (seq.paid_search_tool_sequence and seq.paid_search_tool_sequence != seq.search_tool_sequence)
-            or (seq.paid_model_sequence and seq.paid_model_sequence != seq.model_sequence)
+            (ps_ids and ps_ids != s_ids)
+            or (pm_ids and pm_ids != m_ids)
             or (seq.paid_use_deep_agent != seq.use_deep_agent)
         )
         if paid_diff:
-            paid_s = " → ".join(seq.paid_search_tool_sequence or seq.search_tool_sequence) or "–"
-            paid_m = " → ".join(seq.paid_model_sequence or seq.model_sequence) or "Heuristik"
+            paid_s = " → ".join(ps_ids or s_ids) or "–"
+            paid_m = " → ".join(pm_ids or m_ids) or "Heuristik"
             st.caption(f"💳 Paid-Opt-In (`allow_paid=True`): Suche `{paid_s}` · KI `{paid_m}` (`deep_agent={seq.paid_use_deep_agent}`)")
         if seq.optimization_rationale:
             st.caption(f"Logik: {seq.optimization_rationale}")
@@ -109,8 +120,8 @@ def _render_sequence_editor(
             with c4:
                 scrape_on = st.checkbox("Seiten-Scraping aktiv", value=cur.enable_page_scraping)
             with c5:
-                deep_agent_on = st.checkbox("Deep Agent aktiv (0%-Standard)", value=cur.use_deep_agent)
-            submitted = st.form_submit_button("💾 Sequenz speichern", use_container_width=True)
+                deep_agent_on = st.checkbox("Deep Agent aktiv (Standard / Free-Tier)", value=cur.use_deep_agent)
+            submitted = st.form_submit_button("💾 Sequenz speichern", width="stretch")
 
         if submitted:
             s_list = [x.strip() for x in raw_search.split(",") if x.strip() in all_tool_ids]
@@ -143,17 +154,20 @@ def render_sequences_tab(
     tools: list[ToolSpec] | None = None,
     sequences: dict[BrainTier, TierSequenceConfig] | None = None,
 ) -> None:
-    """Rendert Fast/Standard/Deep-Sequenzen & den manuellen Sequenz-Editor."""
+    """Rendert Fast/Standard/Deep-Sequenzen untereinander (standardmäßig zugeklappt) & den Sequenz-Editor."""
     seqs = sequences if sequences is not None else brain.list_sequences()
-    cols = st.columns(3)
-    for idx, tier in enumerate((BrainTier.FAST, BrainTier.STANDARD, BrainTier.DEEP)):
-        with cols[idx]:
-            _render_sequence_card(seqs[tier])
+    resolved_models = models if models is not None else brain.list_models()
+    resolved_tools = tools if tools is not None else brain.list_tools()
+    valid_m_ids = {m.id for m in resolved_models}
+    valid_t_ids = {t.id for t in resolved_tools}
+
+    for tier in (BrainTier.FAST, BrainTier.STANDARD, BrainTier.DEEP):
+        _render_sequence_card(seqs[tier], valid_model_ids=valid_m_ids, valid_tool_ids=valid_t_ids)
 
     if is_admin:
         _render_sequence_editor(
             brain,
             seqs,
-            models=models if models is not None else brain.list_models(),
-            tools=tools if tools is not None else brain.list_tools(),
+            models=resolved_models,
+            tools=resolved_tools,
         )

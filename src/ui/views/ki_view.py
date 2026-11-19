@@ -13,7 +13,6 @@ from src.ui.views.ki_playground_tab import render_playground_tab
 from src.ui.views.ki_secret_dialog import render_active_secret_dialog
 from src.ui.views.ki_sequences_tab import render_sequences_tab
 from src.ui.views.ki_task_overlay import (
-    filter_retryable_excluded_models,
     format_pipeline_feedback,
     invalidate_ki_ui_cache,
     load_cached_ui_state,
@@ -66,7 +65,6 @@ def _run_pipeline_action(
     run_unblock: bool,
     run_prune: bool,
     exclude_previews: bool,
-    retry_excluded: bool,
     include_paid: bool,
 ) -> None:
     if not any((run_discover, run_benchmark, run_unblock, run_prune)):
@@ -82,7 +80,6 @@ def _run_pipeline_action(
                 run_unblock=run_unblock,
                 run_prune=run_prune,
                 exclude_previews=exclude_previews,
-                retry_excluded=retry_excluded,
                 include_paid=include_paid,
                 on_progress=cb,
             ),
@@ -113,18 +110,16 @@ def render_ki_view(settings: AppSettings, role: AuthRole = AuthRole.ADMIN) -> No
             ui_state.latest_benchmark,
         )
         with st.container(key="ki_kpi_row"):
-            k1, k2, k3, k4 = st.columns(4)
+            k1, k2, k3 = st.columns(3)
             with k1:
                 st.metric("KI-Modelle", f"{sum(1 for m in models if m.enabled)} / {len(models)}")
             with k2:
                 st.metric("Tools", f"{sum(1 for t in tools if t.enabled)} / {len(tools)}")
             with k3:
-                st.metric("Tier-Profile", f"{len(seqs)} (Fast / Std / Deep)")
-            with k4:
                 bench_txt = (
                     f"{latest_bench.healthy_tools_count}T / {latest_bench.healthy_models_count}M OK"
                     if latest_bench
-                    else "Noch kein Testlauf"
+                    else "Kein Testlauf"
                 )
                 st.metric("Letzter Testlauf", bench_txt, help="Letztes Benchmark-Ergebnis (gesunde Tools / Modelle).")
 
@@ -132,32 +127,11 @@ def render_ki_view(settings: AppSettings, role: AuthRole = AuthRole.ADMIN) -> No
             "🚀 Sync & Optimize",
             key="ki_top_btn_pipeline",
             disabled=not is_admin,
-            use_container_width=True,
+            width="stretch",
             help="Führt den kompletten Ablauf aus: Discover → Benchmark & Optimize → Unblock Tools → Prune Failing.",
         )
 
-        c_prev, c_retry = st.columns(2)
-        with c_prev:
-            exclude_previews = st.checkbox(
-                "Preview- & Experimental-Modelle ausschließen",
-                value=True,
-                key="ki_exclude_previews",
-                disabled=not is_admin,
-                help="Ignoriert Preview-/Experimental-Modelle inkl. Deep-Research-Previews (kanonischer Deep Research Agent bleibt erhalten).",
-            )
-        with c_retry:
-            retry_targets = filter_retryable_excluded_models(
-                ui_state.excluded_model_ids, ui_state.excluded_model_reasons, exclude_previews=exclude_previews
-            )
-            retry_excluded = st.checkbox(
-                f"Ausgeschlossene Modelle erneut prüfen ({len(retry_targets)})",
-                value=False,
-                key="ki_retry_excluded",
-                disabled=(not is_admin or not retry_targets),
-                help="Prüft zuvor ausgeschlossene/Quota-429-Modelle beim Discover erneut.",
-            )
-
-        with st.expander("⚙️ Ablauf-Optionen (Schritte & Paid-Check)", expanded=False):
+        with st.expander("⚙️ Ablauf-Optionen (Schritte, Preview-Filter & Paid-Check)", expanded=False):
             s1, s2, s3, s4 = st.columns(4)
             with s1:
                 step_discover = st.checkbox("🔎 Discover", value=True, key="ki_opt_discover", disabled=not is_admin)
@@ -167,12 +141,19 @@ def render_ki_view(settings: AppSettings, role: AuthRole = AuthRole.ADMIN) -> No
                 step_unblock = st.checkbox("🔓 Unblock", value=True, key="ki_opt_unblock", disabled=not is_admin)
             with s4:
                 step_prune = st.checkbox("🧹 Prune Failing", value=True, key="ki_opt_prune", disabled=not is_admin)
+            exclude_previews = st.checkbox(
+                "Preview- & Experimental-Modelle ausschließen",
+                value=True,
+                key="ki_exclude_previews",
+                disabled=not is_admin,
+                help="Ignoriert Preview-/Experimental-Modelle beim Discover (kanonischer Deep Research Agent bleibt erhalten).",
+            )
             include_paid = st.checkbox(
                 "💳 Paid-Tier-Modelle im Benchmark mitprüfen (nur mit Paid-Key)",
                 value=False,
                 key="ki_opt_include_paid",
                 disabled=not is_admin,
-                help="Standard ist strikt 0% Kosten. Aktivieren, um Paid-Only-Modelle über den Paid-Tier-Key mit zu testen.",
+                help="Standardmäßig kostenlos über den Free-Tier-Key. Aktivieren, um Paid-Only-Modelle über den Paid-Tier-Key mit zu testen.",
             )
 
         if is_admin:
@@ -187,25 +168,18 @@ def render_ki_view(settings: AppSettings, role: AuthRole = AuthRole.ADMIN) -> No
                 run_unblock=step_unblock,
                 run_prune=step_prune,
                 exclude_previews=exclude_previews,
-                retry_excluded=retry_excluded,
                 include_paid=include_paid,
             )
 
         _render_feedback_banner()
-        st.caption(f"Speicher-Backend: `{brain.backend_name}`" + ("" if is_admin else " · Modus: Read-Only"))
+        if not is_admin:
+            st.caption("Modus: Read-Only")
 
         tab_seq, tab_mod, tab_tool, tab_vault, tab_check = _open_ki_tabs()
         with tab_seq:
             render_sequences_tab(brain, is_admin=is_admin, models=models, tools=tools, sequences=seqs)
         with tab_mod:
-            render_models_tab(
-                brain,
-                is_admin=is_admin,
-                models=models,
-                excluded_model_ids=ui_state.excluded_model_ids,
-                excluded_model_reasons=ui_state.excluded_model_reasons,
-                exclude_previews=exclude_previews,
-            )
+            render_models_tab(brain, is_admin=is_admin, models=models)
         with tab_tool:
             render_tools_tab(
                 brain,

@@ -29,7 +29,7 @@ def _render_single_bot_db_tab(snap: AppFleetSnapshot) -> None:
             {"Tabelle": m.table_name, "Anzahl Datensätze": m.row_count}
             for m in db.table_metrics
         ]
-        st.dataframe(table_rows, use_container_width=True, hide_index=True)
+        st.dataframe(table_rows, width="stretch", hide_index=True)
 
     st.markdown("#### 🕒 Jüngste Datensätze & Aktivitäten")
     if not db.recent_items:
@@ -48,7 +48,7 @@ def _render_single_bot_db_tab(snap: AppFleetSnapshot) -> None:
             with right:
                 safe_link = sanitize_display_url(item.url)
                 if safe_link != "#":
-                    st.link_button("🔗 Quelle", safe_link, use_container_width=True)
+                    st.link_button("🔗 Quelle", safe_link, width="stretch")
 
 
 def render_db_view(snapshots: list[AppFleetSnapshot]) -> None:

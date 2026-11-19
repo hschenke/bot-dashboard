@@ -235,7 +235,7 @@ class UnifiedLLMRunner:
         cached = self._genai_clients.get(key)
         if cached is not None:
             return cached
-        http_opts = {"timeout": max(60_000, int(timeout_seconds * 1000)), "retry_options": {"attempts": 2}}
+        http_opts = {"timeout": max(60_000, int(timeout_seconds * 1000)), "retry_options": {"attempts": 1}}
         try:
             client = genai.Client(api_key=key, http_options=http_opts)
         except TypeError:
@@ -280,6 +280,8 @@ class UnifiedLLMRunner:
         timeout_seconds: float = 40.0,
         tools: list[dict[str, Any]] | None = None,
         allow_paid: bool = False,
+        generation_config: dict[str, Any] | None = None,
+        max_attempts: int = 3,
         on_poll_tick: Callable[[], None] | None = None,
         cancel_check: Callable[[], None] | None = None,
     ) -> tuple[str, list[BrainCitation]]:
@@ -309,9 +311,25 @@ class UnifiedLLMRunner:
             kwargs["system_instruction"] = system_instruction
         if tools:
             kwargs["tools"] = tools
+        if generation_config:
+            kwargs["generation_config"] = dict(generation_config)
 
         def _invoke() -> tuple[str, list[BrainCitation]]:
-            interaction = client.interactions.create(**kwargs)
+            try:
+                interaction = client.interactions.create(**kwargs)
+            except Exception as exc:
+                gc = kwargs.get("generation_config")
+                msg_low = str(exc).lower()
+                if isinstance(gc, dict) and "thinking_level" in gc and any(
+                    tok in msg_low for tok in ("thinking", "400", "invalid_argument", "unsupported")
+                ):
+                    fb_gc = {k: v for k, v in gc.items() if k != "thinking_level"}
+                    fb_kwargs = {k: v for k, v in kwargs.items() if k != "generation_config"}
+                    if fb_gc:
+                        fb_kwargs["generation_config"] = fb_gc
+                    interaction = client.interactions.create(**fb_kwargs)
+                else:
+                    raise
             fail_reason = _describe_failed_interaction(interaction)
             if fail_reason:
                 raise BrainProviderError(f"Modell '{model.model_id}': {fail_reason}")
@@ -321,7 +339,9 @@ class UnifiedLLMRunner:
             _GROUNDING_LOCAL.counts = extract_grounding_tool_counts(interaction)
             return text, extract_citations_from_interaction(interaction)
 
-        return self._run_with_transient_retry(_invoke, cancel_check=cancel_check)
+        return self._run_with_transient_retry(
+            _invoke, cancel_check=cancel_check, max_attempts=max(1, int(max_attempts))
+        )
 
     def run_structured(
         self,

@@ -417,11 +417,8 @@ def _resolve_retry_model_ids(
     excluded_models: set[str],
     excluded_reasons: dict[str, str],
     *,
-    retry_excluded: bool,
     quota_recovered: bool,
 ) -> set[str]:
-    if retry_excluded:
-        return set(excluded_models)
     if quota_recovered:
         return {
             mid
@@ -475,7 +472,6 @@ def auto_sync_catalog(
     runner: UnifiedLLMRunner | None = None,
     verify_discovered: bool = True,
     exclude_previews: bool = True,
-    retry_excluded: bool = False,
     on_progress: ProgressCallback | None = None,
 ) -> DiscoverySummary:
     """Erkennt neue/reaktivierte Modelle & Tools, prüft Quota-Recovery und schließt defekte/Preview-IDs aus."""
@@ -499,7 +495,6 @@ def auto_sync_catalog(
     retry_ids = _resolve_retry_model_ids(
         excluded_models,
         excluded_m_reasons,
-        retry_excluded=retry_excluded,
         quota_recovered=quota_recovered,
     )
     added_models, added_tools, skipped_excluded = _sync_new_builtins(

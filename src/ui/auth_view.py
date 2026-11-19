@@ -130,7 +130,7 @@ def _render_login_form(settings: AppSettings) -> None:
     with st.form("dashboard_login_form", clear_on_submit=True):
         entered = st.text_input("Dashboard-Passwort", type="password")
         remember_me = st.checkbox("🍪 Auf diesem Gerät 30 Tage angemeldet bleiben", value=True)
-        submitted = st.form_submit_button("Anmelden", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("Anmelden", type="primary", width="stretch")
 
     if not submitted:
         return

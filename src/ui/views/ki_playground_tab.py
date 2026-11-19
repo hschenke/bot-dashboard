@@ -59,7 +59,7 @@ def _render_live_test_section(brain: KIWebsearchBrain, is_admin: bool) -> None:
                 value=False,
                 help="Standard ist strikt 0% Kosten. Erst mit Opt-In werden Paid-Only-Modelle (z. B. Deep Research / Argon / Pro) und erschöpfte Kontingente genutzt.",
             )
-        submitted = st.form_submit_button("▶️ Anfrage über Brain ausführen", disabled=not is_admin, use_container_width=True)
+        submitted = st.form_submit_button("▶️ Anfrage über Brain ausführen", disabled=not is_admin, width="stretch")
 
     if not submitted:
         return
@@ -117,7 +117,7 @@ def _render_latest_benchmark_section(brain: KIWebsearchBrain, ui_state: BrainDas
     ]
     st.dataframe(
         rows,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={"Score": st.column_config.NumberColumn("Score", format="%.1f", help="Qualitätsscore 0–100 (höher = besser) aus Antwortzeit, Ertrag & Modell-Tier.")},
     )
@@ -151,9 +151,9 @@ def _render_snapshot_controls(brain: KIWebsearchBrain, is_admin: bool, ui_state:
     snap_yaml = yaml.safe_dump(snapshot.model_dump(mode="json"), allow_unicode=True, sort_keys=False, default_flow_style=False)
     c1, c2 = st.columns(2, vertical_alignment="bottom")
     with c1:
-        st.download_button("⬇️ Brain-Snapshot (JSON)", data=snap_json, file_name="ki_brain_snapshot.json", mime="application/json", use_container_width=True)
+        st.download_button("⬇️ Brain-Snapshot (JSON)", data=snap_json, file_name="ki_brain_snapshot.json", mime="application/json", width="stretch")
     with c2:
-        st.download_button("⬇️ Brain-Snapshot (YAML)", data=snap_yaml, file_name="ki_brain_snapshot.yaml", mime="text/yaml", use_container_width=True)
+        st.download_button("⬇️ Brain-Snapshot (YAML)", data=snap_yaml, file_name="ki_brain_snapshot.yaml", mime="text/yaml", width="stretch")
     if not is_admin:
         return
     with st.expander("📥 Brain-Snapshot (JSON) importieren", expanded=False):

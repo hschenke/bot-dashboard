@@ -14,7 +14,6 @@ from ki_brain import (
     ProbeStatus,
     SecretStatusEntry,
     UnblockSummary,
-    is_preview_or_experimental_model,
 )
 
 from src.ui.task_overlay import (
@@ -25,7 +24,6 @@ from src.ui.task_overlay import (
 
 __all__ = [
     "INSTANT_OVERLAY_HTML",
-    "filter_retryable_excluded_models",
     "format_cleanup_message",
     "format_discover_feedback",
     "format_pipeline_feedback",
@@ -123,23 +121,8 @@ def format_cleanup_message(brain: KIWebsearchBrain) -> tuple[str, str]:
     )
 
 
-def filter_retryable_excluded_models(
-    excluded_model_ids: tuple[str, ...] | list[str],
-    excluded_reasons: dict[str, str] | None = None,
-    *,
-    exclude_previews: bool = True,
-) -> list[str]:
-    """Filtert wiederprüfbare ausgeschlossene Modelle (ignoriert Preview-Modelle, solange `exclude_previews=True`)."""
-    reasons = excluded_reasons or {}
-    return [
-        mid
-        for mid in excluded_model_ids
-        if not (exclude_previews and (reasons.get(mid) == "preview" or is_preview_or_experimental_model(mid)))
-    ]
-
-
 def format_discover_feedback(summary: DiscoverySummary, *, prefix: str = "Discover fertig") -> tuple[str, str]:
-    """Formatiert eine verständliche Zusammenfassung für `Discover` und `Retry Excluded`."""
+    """Formatiert eine verständliche Zusammenfassung für `Discover`."""
     parts = [f"+{len(summary.added_models)} Modelle", f"+{len(summary.added_tools)} Tools"]
     if summary.recovered_models:
         parts.append(f"{len(summary.recovered_models)} von Quota/Error auf OK")
@@ -153,14 +136,9 @@ def format_discover_feedback(summary: DiscoverySummary, *, prefix: str = "Discov
         if n
     ]
     note_txt = f" ({', '.join(notes)} übersprungen)" if notes else ""
-    preview_hint = (
-        f" · 🧹 {summary.existing_previews_count} vorhandene Preview-Modell(e) im Tab 'KI' über 'Clean Previews' entfernbar."
-        if summary.existing_previews_count
-        else ""
-    )
     warn_txt = f" · Hinweise: {'; '.join(summary.warnings[:2])}" if summary.warnings else ""
     level = "warning" if summary.warnings else "success"
-    return level, f"{prefix} ({', '.join(summary.checked_sources)}): {', '.join(parts)}{note_txt}.{preview_hint}{warn_txt}"
+    return level, f"{prefix} ({', '.join(summary.checked_sources)}): {', '.join(parts)}{note_txt}.{warn_txt}"
 
 
 def format_pipeline_feedback(summary: PipelineSummary) -> tuple[str, str]:
@@ -186,8 +164,6 @@ def format_pipeline_feedback(summary: PipelineSummary) -> tuple[str, str]:
         parts.append(f"Prune: -{len(summary.pruned_models)}M / -{len(summary.pruned_tools)}T")
 
     text = "Sync & Optimize abgeschlossen — " + " · ".join(parts) + "."
-    if summary.discovery and summary.discovery.existing_previews_count:
-        text += f" · 🧹 {summary.discovery.existing_previews_count} Preview-Modell(e) im Tab 'KI' entfernbar."
     if summary.warnings:
         text += f" · Hinweise: {'; '.join(summary.warnings[:2])}"
     has_warn = bool(summary.warnings) or bool(summary.unblock and summary.unblock.still_blocked)

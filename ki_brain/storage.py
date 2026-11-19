@@ -20,7 +20,7 @@ from ki_brain.security import validate_identifier
 
 _INITIALIZED_BACKENDS: set[str] = set()
 _INITIALIZED_LOCK = threading.Lock()
-_CATALOG_REV = "3"
+_CATALOG_REV = "4"
 
 
 @dataclass(frozen=True)
@@ -216,6 +216,7 @@ class BrainRepository:
             known_t.add(tool.id)
 
         self._append_rev3_metadata_upgrades(stmts, defaults_tools, now)
+        self._append_rev4_sequence_sanitization(stmts, now)
         stmts.append(("INSERT OR REPLACE INTO brain_meta (key, value) VALUES (?, ?)", ("known_builtin_ids", json.dumps({"models": sorted(known_m), "tools": sorted(known_t)}))))
         stmts.append(("INSERT OR REPLACE INTO brain_meta (key, value) VALUES (?, ?)", ("seeded_catalog_rev", _CATALOG_REV)))
         self._executor.execute_batch(stmts)
@@ -238,25 +239,47 @@ class BrainRepository:
                     "free_quota_unit": dt.free_quota_unit, "paid_cost_per_1k": dt.paid_cost_per_1k,
                 })
                 stmts.append(("UPDATE brain_tools SET payload_json = ?, updated_at = ? WHERE id = ?", (up_t.model_dump_json(), now, t.id)))
+
+    def _append_rev4_sequence_sanitization(
+        self, stmts: list[tuple[str, tuple[str, ...]]], now: str
+    ) -> None:
+        """Bereinigt veraltete/gelöschte Modell- & Tool-IDs, deep_agent-Flags & Rationale-Texte in brain_sequences."""
+        from ki_brain.optimizer import _format_rationale
+
+        all_models = self.list_models()
+        all_tools = self.list_tools()
+        valid_m_ids = {m.id for m in all_models}
+        valid_t_ids = {t.id for t in all_tools}
+        deep_agent_ids = {m.id for m in all_models if m.is_deep_agent}
         paid_model_ids = {
-            m.id for m in self.list_models()
-            if not m.is_free or not infer_model_is_free(m.model_id, m.name, provider=m.provider, input_cost_per_1m=m.input_cost_per_1m, output_cost_per_1m=m.output_cost_per_1m)
+            m.id for m in all_models
+            if not m.is_free or not infer_model_is_free(
+                m.model_id, m.name, provider=m.provider, input_cost_per_1m=m.input_cost_per_1m, output_cost_per_1m=m.output_cost_per_1m
+            )
         }
+        usage_state = self.load_usage_quotas()
         for seq in self.list_sequences().values():
             if seq.manual_override:
                 continue
-            free_m_seq = [mid for mid in seq.model_sequence if mid not in paid_model_ids]
-            paid_m_seq = seq.paid_model_sequence or list(seq.model_sequence)
-            paid_s_seq = seq.paid_search_tool_sequence or list(seq.search_tool_sequence)
-            paid_e_seq = seq.paid_extractor_tool_sequence or list(seq.extractor_tool_sequence)
-            has_paid_deep = any(mid == "deep-research-preview-04-2026" for mid in paid_m_seq)
+            free_s = [tid for tid in seq.search_tool_sequence if tid in valid_t_ids]
+            free_e = [tid for tid in seq.extractor_tool_sequence if tid in valid_t_ids]
+            free_m = [mid for mid in seq.model_sequence if mid in valid_m_ids and mid not in paid_model_ids]
+            paid_s = [tid for tid in (seq.paid_search_tool_sequence or seq.search_tool_sequence) if tid in valid_t_ids]
+            paid_e = [tid for tid in (seq.paid_extractor_tool_sequence or seq.extractor_tool_sequence) if tid in valid_t_ids]
+            paid_m = [mid for mid in (seq.paid_model_sequence or seq.model_sequence) if mid in valid_m_ids]
+            has_free_deep = seq.tier == BrainTier.DEEP and any(mid in deep_agent_ids for mid in free_m)
+            has_paid_deep = seq.tier == BrainTier.DEEP and any(mid in deep_agent_ids for mid in paid_m)
+            rationale = _format_rationale(seq.tier, free_s, free_m, all_tools, all_models, usage_state)
             up_s = seq.model_copy(update={
-                "model_sequence": free_m_seq,
-                "paid_model_sequence": paid_m_seq,
-                "paid_search_tool_sequence": paid_s_seq,
-                "paid_extractor_tool_sequence": paid_e_seq,
-                "use_deep_agent": False,
-                "paid_use_deep_agent": bool(seq.use_deep_agent or has_paid_deep) if seq.tier == BrainTier.DEEP else False,
+                "search_tool_sequence": free_s,
+                "extractor_tool_sequence": free_e,
+                "model_sequence": free_m,
+                "paid_search_tool_sequence": paid_s,
+                "paid_extractor_tool_sequence": paid_e,
+                "paid_model_sequence": paid_m,
+                "use_deep_agent": has_free_deep,
+                "paid_use_deep_agent": has_paid_deep,
+                "optimization_rationale": rationale,
             })
             stmts.append(("UPDATE brain_sequences SET payload_json = ?, updated_at = ? WHERE tier = ?", (up_s.model_dump_json(), now, seq.tier.value)))
 
@@ -373,6 +396,21 @@ class BrainRepository:
         )
         return normalized
 
+    def upsert_models_batch(self, specs: list[AIModelSpec]) -> None:
+        if not specs:
+            return
+        now = _utc_now_iso()
+        sql = """
+            INSERT INTO brain_models (id, payload_json, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET payload_json = excluded.payload_json, updated_at = excluded.updated_at
+        """
+        stmts = []
+        for spec in specs:
+            clean_id = validate_identifier(spec.id, "Modell-ID")
+            normalized = spec.model_copy(update={"id": clean_id})
+            stmts.append((sql, (clean_id, normalized.model_dump_json(), now)))
+        self._executor.execute_batch(stmts)
+
     def delete_model(self, model_id: str) -> bool:
         clean_id = validate_identifier(model_id, "Modell-ID")
         res = self._executor.execute("DELETE FROM brain_models WHERE id = ?", (clean_id,))
@@ -399,6 +437,21 @@ class BrainRepository:
             (clean_id, normalized.model_dump_json(), _utc_now_iso()),
         )
         return normalized
+
+    def upsert_tools_batch(self, specs: list[ToolSpec]) -> None:
+        if not specs:
+            return
+        now = _utc_now_iso()
+        sql = """
+            INSERT INTO brain_tools (id, payload_json, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET payload_json = excluded.payload_json, updated_at = excluded.updated_at
+        """
+        stmts = []
+        for spec in specs:
+            clean_id = validate_identifier(spec.id, "Tool-ID")
+            normalized = spec.model_copy(update={"id": clean_id})
+            stmts.append((sql, (clean_id, normalized.model_dump_json(), now)))
+        self._executor.execute_batch(stmts)
 
     def delete_tool(self, tool_id: str) -> bool:
         clean_id = validate_identifier(tool_id, "Tool-ID")

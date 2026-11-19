@@ -189,9 +189,11 @@ class BrainBenchmarkRunner:
         text, citations = self._runner.run_text(
             grounding_model,
             prompt,
-            timeout_seconds=min(15.0, tool.timeout_seconds),
+            timeout_seconds=max(25.0, min(30.0, tool.timeout_seconds)),
             tools=[{"type": t_type}],
             allow_paid=include_paid,
+            generation_config={"thinking_level": "minimal"},
+            max_attempts=1,
         )
         g_counts = pop_last_grounding_counts()
         used = _compute_grounding_usage(etype, g_counts, is_quota_capped=tool.free_quota_limit > 0)
@@ -243,6 +245,7 @@ class BrainBenchmarkRunner:
         *,
         usage_state: dict[str, Any] | None = None,
         include_paid: bool = False,
+        timeout_seconds: float = 30.0,
     ) -> tuple[AIModelSpec, BenchmarkEntry]:
         now = _utc_now_iso()
         effective_paid = bool(include_paid or not model.is_free)
@@ -266,14 +269,24 @@ class BrainBenchmarkRunner:
         t0 = time.monotonic()
         try:
             if model.is_deep_agent:
-                client = self._runner._get_genai_client(timeout_seconds=12.0, model=model, allow_paid=effective_paid)  # noqa: SLF001
+                client = self._runner._get_genai_client(timeout_seconds=min(15.0, timeout_seconds), model=model, allow_paid=effective_paid)  # noqa: SLF001
                 listed = list(client.models.list())
                 lat = int((time.monotonic() - t0) * 1000)
                 details = f"Deep-Research-Agent API erreichbar ({len(listed)} Modelle, {lat} ms)."
                 return self._record_model_result(model, ProbeStatus.OK, lat, details, now)
 
+            probe_gc: dict[str, Any] | None = (
+                {"max_output_tokens": 32, "thinking_level": "minimal"}
+                if model.provider.value == "google_gemini"
+                else None
+            )
             text, _ = self._runner.run_text(
-                model, "Antworte nur mit OK.", timeout_seconds=18.0, allow_paid=effective_paid
+                model,
+                "Antworte nur mit OK.",
+                timeout_seconds=timeout_seconds,
+                allow_paid=effective_paid,
+                generation_config=probe_gc,
+                max_attempts=1,
             )
             lat = int((time.monotonic() - t0) * 1000)
             return self._record_model_result(model, ProbeStatus.OK, lat, f"Antwort '{text[:30]}' ({lat} ms).", now)

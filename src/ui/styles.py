@@ -147,8 +147,9 @@ section[data-testid="stSidebar"] [class*="st-key-nav_page_"] div[data-testid="st
         padding-top: 2rem;
         padding-bottom: 1.5rem;
     }
-    /* Dashboard KPIs & Check All / Wake All bleiben mobil nebeneinander */
+    /* Dashboard & KI-Brain KPIs sowie Check All / Wake All bleiben mobil nebeneinander */
     .st-key-overview_kpi_row div[data-testid="stHorizontalBlock"],
+    .st-key-ki_kpi_row div[data-testid="stHorizontalBlock"],
     .st-key-overview_action_row div[data-testid="stHorizontalBlock"] {
         display: flex !important;
         flex-direction: row !important;
@@ -156,6 +157,7 @@ section[data-testid="stSidebar"] [class*="st-key-nav_page_"] div[data-testid="st
         gap: 0.45rem !important;
     }
     .st-key-overview_kpi_row :is([data-testid="stColumn"], [data-testid="column"]),
+    .st-key-ki_kpi_row :is([data-testid="stColumn"], [data-testid="column"]),
     .st-key-overview_action_row :is([data-testid="stColumn"], [data-testid="column"]) {
         width: auto !important;
         min-width: 0 !important;
@@ -163,19 +165,23 @@ section[data-testid="stSidebar"] [class*="st-key-nav_page_"] div[data-testid="st
         flex: 1 1 0 !important;
         flex-basis: 0 !important;
     }
-    .st-key-overview_kpi_row div[data-testid="stMetric"] {
+    .st-key-overview_kpi_row div[data-testid="stMetric"],
+    .st-key-ki_kpi_row div[data-testid="stMetric"] {
         padding: 4px 6px !important;
         border-radius: 8px !important;
     }
-    .st-key-overview_kpi_row div[data-testid="stMetric"] [data-testid="stMetricLabel"] {
+    .st-key-overview_kpi_row div[data-testid="stMetric"] [data-testid="stMetricLabel"],
+    .st-key-ki_kpi_row div[data-testid="stMetric"] [data-testid="stMetricLabel"] {
         min-height: 0 !important;
     }
-    .st-key-overview_kpi_row div[data-testid="stMetric"] [data-testid="stMetricLabel"] p {
+    .st-key-overview_kpi_row div[data-testid="stMetric"] [data-testid="stMetricLabel"] p,
+    .st-key-ki_kpi_row div[data-testid="stMetric"] [data-testid="stMetricLabel"] p {
         font-size: 0.66rem !important;
         overflow: hidden !important;
         text-overflow: ellipsis !important;
     }
-    .st-key-overview_kpi_row div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+    .st-key-overview_kpi_row div[data-testid="stMetric"] [data-testid="stMetricValue"],
+    .st-key-ki_kpi_row div[data-testid="stMetric"] [data-testid="stMetricValue"] {
         font-size: 0.94rem !important;
     }
     .st-key-overview_action_row div[data-testid="stButton"] > button {

@@ -77,7 +77,7 @@ def render_tools_tab(
         }
         for t in resolved
     ]
-    st.dataframe(rows, use_container_width=True, hide_index=True)
+    st.dataframe(rows, width="stretch", hide_index=True)
     st.caption(
         "ℹ️ **0%-Kosten & Free-Kontingente:** Gemini Search & Google Maps Grounding bieten je **5.000 Queries/Mo** im Paid Tier (ab Gemini 3+; Maps bei 2.5 sofort $25/1k, daher 0%-Schutz). "
         "Weitere Gratisfelder: Tavily (1.000/Mo), Brave (1.000/Mo), Serper (2.500 Starter), Browserbase (60/Mo) — nach Ausschöpfen nur mit `allow_paid=True`. "
@@ -111,9 +111,9 @@ def _render_tool_controls(brain: KIWebsearchBrain, tools: list[ToolSpec]) -> Non
         sel_id = st.selectbox("Tool wählen", options=tool_ids, key="ki_tool_quick_sel")
     cur = next(t for t in tools if t.id == sel_id)
     with c_tog:
-        do_tog = st.button("⛔ Deaktivieren" if cur.enabled else "✅ Aktivieren", key="ki_tool_tog_btn", use_container_width=True)
+        do_tog = st.button("⛔ Deaktivieren" if cur.enabled else "✅ Aktivieren", key="ki_tool_tog_btn", width="stretch")
     with c_del:
-        do_del = st.button("🗑️ Entfernen", key="ki_tool_del_btn", use_container_width=True)
+        do_del = st.button("🗑️ Entfernen", key="ki_tool_del_btn", width="stretch")
     if do_tog:
         brain.set_tool_enabled(sel_id, not cur.enabled)
         invalidate_ki_ui_cache()
@@ -173,7 +173,7 @@ def _render_tool_form(brain: KIWebsearchBrain, tools: list[ToolSpec]) -> None:
                 t_is_free = st.checkbox("Im Free-Tier nutzbar (ohne allow_paid)", value=existing.is_free if existing else True)
             with cf2:
                 t_enabled = st.checkbox("Aktiviert", value=existing.enabled if existing else True)
-            submitted = st.form_submit_button("💾 Tool speichern", use_container_width=True)
+            submitted = st.form_submit_button("💾 Tool speichern", width="stretch")
 
         if submitted:
             try:

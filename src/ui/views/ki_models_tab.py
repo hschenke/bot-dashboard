@@ -12,77 +12,14 @@ from ki_brain import (
     ProbeStatus,
     estimate_blended_cost_per_1m,
     format_model_budget_label,
-    is_preview_or_experimental_model,
 )
 
 from src.ui.views.ki_sequences_tab import format_probe_badge
-from src.ui.views.ki_task_overlay import (
-    filter_retryable_excluded_models,
-    format_discover_feedback,
-    invalidate_ki_ui_cache,
-    run_with_task_overlay,
-)
+from src.ui.views.ki_task_overlay import invalidate_ki_ui_cache
 
 
 def _set_feedback(level: str, message: str) -> None:
     st.session_state["ki_brain_feedback"] = {"level": level, "message": message}
-
-
-def _render_model_maintenance_bar(
-    brain: KIWebsearchBrain,
-    resolved: list[AIModelSpec],
-    *,
-    excluded_model_ids: tuple[str, ...],
-    excluded_model_reasons: dict[str, str] | None,
-    exclude_previews: bool,
-) -> None:
-    preview_models = [m for m in resolved if is_preview_or_experimental_model(m.model_id, m.name)]
-    retry_targets = filter_retryable_excluded_models(
-        excluded_model_ids, excluded_model_reasons, exclude_previews=exclude_previews
-    )
-    c_clean, c_retry = st.columns(2)
-    with c_clean:
-        do_clean = st.button(
-            f"🧹 Clean Previews ({len(preview_models)})",
-            key="ki_purge_previews_btn",
-            disabled=not preview_models,
-            use_container_width=True,
-            help=(
-                f"Entfernt {len(preview_models)} Preview-/Experimental-Modell(e) dauerhaft (Deep Research Agent bleibt erhalten)."
-                if preview_models
-                else "Keine Preview-/Experimental-Modelle vorhanden (Deep Research Agent bleibt erhalten)."
-            ),
-        )
-    with c_retry:
-        do_retry = st.button(
-            f"🔄 Retry Excluded ({len(retry_targets)})",
-            key="ki_retry_excluded_btn",
-            disabled=not retry_targets,
-            use_container_width=True,
-            help=(
-                f"Prüft {len(retry_targets)} ausgeschlossene Modell(e) inkl. früherer Quota-429-Einträge erneut und aktiviert funktionierende Modelle."
-                if retry_targets
-                else "Aktuell keine ausgeschlossenen Modelle zum erneuten Prüfen vorhanden."
-            ),
-        )
-    # Overlay, Cache-Invalidierung & Feedback strikt außerhalb schmaler Spalten
-    if do_clean:
-        removed = brain.remove_preview_models()
-        invalidate_ki_ui_cache()
-        _set_feedback("success" if removed else "info", f"Clean Previews: {len(removed)} Modell(e) entfernt ({', '.join(removed) or '–'}).")
-        st.rerun()
-    if do_retry:
-        try:
-            summary = run_with_task_overlay(
-                "🔄 Retry Excluded",
-                "Prüfe ausgeschlossene & Quota-429-Modelle erneut...",
-                lambda cb: brain.auto_sync(verify_discovered=True, exclude_previews=exclude_previews, retry_excluded=True, on_progress=cb),
-            )
-            _set_feedback(*format_discover_feedback(summary, prefix="Retry Excluded fertig"))
-        except BrainError as exc:
-            _set_feedback("error", f"Retry Excluded fehlgeschlagen: {exc}")
-        invalidate_ki_ui_cache()
-        st.rerun()
 
 
 def render_models_tab(
@@ -90,14 +27,11 @@ def render_models_tab(
     is_admin: bool,
     *,
     models: list[AIModelSpec] | None = None,
-    excluded_model_ids: tuple[str, ...] = (),
-    excluded_model_reasons: dict[str, str] | None = None,
-    exclude_previews: bool = True,
 ) -> None:
     """Zeigt alle registrierten KI-Modelle (Free-/Paid-Key-vorbereitet) und erlaubt dynamisches CRUD."""
     resolved = models if models is not None else brain.list_models()
     st.caption(
-        "Zentrale Modell-Liste (0%-Standard nutzt den Free-Tier-Key; `💳 Paid-Only` nutzt den Paid-Tier-Key erst bei `allow_paid=True`)."
+        "Zentrale Modell-Liste (Standardmäßig kostenlos über den Free-Tier-Key; `💳 Paid-Only` nutzt den Paid-Tier-Key erst bei `allow_paid=True`)."
     )
     rows = [
         {
@@ -115,14 +49,14 @@ def render_models_tab(
     ]
     st.dataframe(
         rows,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "Tier": st.column_config.TextColumn("Tier", width="small"),
             "Latenz (ms)": st.column_config.NumberColumn("Latenz", format="%d ms", width="small", help="Antwortzeit des letzten Live-Tests in Millisekunden."),
             "Score": st.column_config.NumberColumn("Score", format="%.1f", width="small", help="Qualitätsscore 0–100 (höher = besser)."),
             "Kosten (~$/1M)": st.column_config.NumberColumn("Kosten (~$/1M)", format="$%.2f", width="small", help="Geschätzte Mischkosten je 1 Mio. Tokens (USD, 75 % Input + 25 % Output)."),
-            "Budget": st.column_config.TextColumn("Budget", width="small", help="🆓 Free Tier / 🆓 $0 Forever im 0%-Standard aktiv; 💳 Paid-Only nur mit Opt-In (`allow_paid=True`)."),
+            "Budget": st.column_config.TextColumn("Budget", width="small", help="🆓 Free Tier / 🆓 $0 Forever standardmäßig kostenlos aktiv; 💳 Paid-Only nur bei Opt-In (`allow_paid=True`)."),
         },
     )
 
@@ -132,14 +66,6 @@ def render_models_tab(
     if not is_admin:
         return
 
-    _render_model_maintenance_bar(
-        brain,
-        resolved,
-        excluded_model_ids=excluded_model_ids,
-        excluded_model_reasons=excluded_model_reasons,
-        exclude_previews=exclude_previews,
-    )
-
     st.subheader("⚙️ Modell aktivieren, bearbeiten oder entfernen")
     model_ids = [m.id for m in resolved]
     if model_ids:
@@ -148,9 +74,9 @@ def render_models_tab(
             selected_id = st.selectbox("Modell wählen", options=model_ids, key="ki_model_quick_sel")
         selected_obj = next(m for m in resolved if m.id == selected_id)
         with toggle_col:
-            do_toggle = st.button("⛔ Deaktivieren" if selected_obj.enabled else "✅ Aktivieren", key="ki_model_toggle_btn", use_container_width=True)
+            do_toggle = st.button("⛔ Deaktivieren" if selected_obj.enabled else "✅ Aktivieren", key="ki_model_toggle_btn", width="stretch")
         with del_col:
-            do_delete = st.button("🗑️ Entfernen", key="ki_model_delete_btn", use_container_width=True)
+            do_delete = st.button("🗑️ Entfernen", key="ki_model_delete_btn", width="stretch")
 
         if do_toggle:
             brain.set_model_enabled(selected_id, not selected_obj.enabled)
@@ -189,10 +115,10 @@ def render_models_tab(
             with c3:
                 m_struct = st.checkbox("Structured JSON Output", value=existing.supports_structured_output if existing else True)
             with c4:
-                m_is_free = st.checkbox("Free-Tier / 0%-Kosten (ohne allow_paid)", value=existing.is_free if existing else True)
+                m_is_free = st.checkbox("Kostenlos im Free-Tier (ohne allow_paid)", value=existing.is_free if existing else True)
             with c5:
                 m_enabled = st.checkbox("Aktiviert", value=existing.enabled if existing else True)
-            submitted = st.form_submit_button("💾 Modell speichern", use_container_width=True)
+            submitted = st.form_submit_button("💾 Modell speichern", width="stretch")
 
         if submitted:
             try:
