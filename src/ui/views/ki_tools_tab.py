@@ -1,4 +1,4 @@
-"""KI-View Tab 3: Dynamische Tool-Verwaltung, Custom JSON/RSS Tools & Snapshot-Backup."""
+"""KI-Brain Tab 3 (Tools): Dynamische Tool-Verwaltung, Free-Kontingente & Custom JSON/RSS Tools."""
 
 from __future__ import annotations
 
@@ -8,14 +8,13 @@ import streamlit as st
 from ki_brain import (
     BrainError,
     KIWebsearchBrain,
-    SecretStatusEntry,
+    ProbeStatus,
     ToolCategory,
     ToolSpec,
     evaluate_tool_quota,
     format_quota_label,
 )
 
-from src.ui.views.ki_secret_dialog import render_missing_keys_action_bar
 from src.ui.views.ki_sequences_tab import format_probe_badge
 from src.ui.views.ki_task_overlay import invalidate_ki_ui_cache
 
@@ -55,8 +54,6 @@ def render_tools_tab(
     is_admin: bool,
     *,
     tools: list[ToolSpec] | None = None,
-    secret_statuses: list[SecretStatusEntry] | None = None,
-    active_tab_label: str | None = None,
     usage_quotas: dict[str, Any] | None = None,
 ) -> None:
     """Zeigt alle Websearch-, Grounding- & Extraktions-Tools inkl. Free-Kontingent & CRUD."""
@@ -87,15 +84,8 @@ def render_tools_tab(
         "**SearXNG (`searxng_public`)** nutzt `searx.space` inkl. HTML-Fallback."
     )
 
-    tool_envs = {t.api_key_env.strip().upper() for t in resolved if t.api_key_env.strip()}
-    render_missing_keys_action_bar(
-        brain,
-        is_admin=is_admin,
-        env_filter=tool_envs,
-        section_key="tools",
-        statuses=secret_statuses,
-        active_tab_label=active_tab_label,
-    )
+    if any(t.last_status == ProbeStatus.AUTH_MISSING for t in resolved):
+        st.caption("ℹ️ Fehlende Tool API-Keys werden zentral im Tab **🔐 Vault** verwaltet.")
 
     if is_admin:
         if st.button(
@@ -156,7 +146,7 @@ def _render_tool_form(brain: KIWebsearchBrain, tools: list[ToolSpec]) -> None:
                 t_url = st.text_input("Endpoint-URL (SSRF-geprüft)", value=existing.endpoint_url if existing else "", placeholder="https://www.tagesschau.de/infoservices/alle-meldungen-100~rss2.xml")
                 t_tmo = st.number_input("Timeout (Sek.)", min_value=1.0, max_value=60.0, value=float(existing.timeout_seconds if existing else 5.0))
                 t_max = st.number_input("Max Treffer", min_value=1, max_value=20, value=int(existing.max_results if existing else 5))
-                t_key_env = st.text_input("Optionaler Key-Env", value=existing.api_key_env if existing else "")
+                t_key_env = st.text_input("Optionaler Key-Env (Wert im Tab Vault)", value=existing.api_key_env if existing else "")
             cfg = existing.config if existing else {}
             c3, c4, c5 = st.columns(3)
             with c3:

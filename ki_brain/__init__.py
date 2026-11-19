@@ -1,9 +1,11 @@
-"""KI & Websearch Brain – Zentrales Framework für kostenfreie Modelle, Web-Tools & Tier-Sequenzen."""
+"""KI-Brain – Zentrales Framework für kostenfreie Modelle, Web-Tools & Tier-Sequenzen."""
 
-from ki_brain.brain import KIWebsearchBrain
+from ki_brain.access import ALLOWED_CLIENT_APPS, AppClientStatus
+from ki_brain.brain import KIWebsearchBrain, PipelineSummary
 from ki_brain.discovery import DiscoverySummary, is_preview_or_experimental_model
 from ki_brain.enums import BrainTier, ModelProvider, ProbeStatus, ToolCategory
 from ki_brain.exceptions import (
+    BrainAuthError,
     BrainError,
     BrainProviderError,
     BrainSSRFError,
@@ -23,6 +25,7 @@ from ki_brain.models import (
     SecretStatusEntry,
     TierSequenceConfig,
     ToolSpec,
+    derive_tier_key_envs,
 )
 from ki_brain.pricing import (
     compute_cost_score,
@@ -42,8 +45,11 @@ from ki_brain.unblock import UnblockSummary
 
 __all__ = [
     "AIModelSpec",
+    "ALLOWED_CLIENT_APPS",
+    "AppClientStatus",
     "BenchmarkEntry",
     "BenchmarkReport",
+    "BrainAuthError",
     "BrainCitation",
     "BrainConfigSnapshot",
     "BrainDashboardState",
@@ -61,6 +67,7 @@ __all__ = [
     "DiscoverySummary",
     "KIWebsearchBrain",
     "ModelProvider",
+    "PipelineSummary",
     "ProbeStatus",
     "QuotaSnapshot",
     "SecretStatusEntry",
@@ -70,6 +77,7 @@ __all__ = [
     "UnblockSummary",
     "compute_cost_score",
     "create_brain_repository",
+    "derive_tier_key_envs",
     "estimate_blended_cost_per_1m",
     "evaluate_model_quota",
     "evaluate_tool_quota",

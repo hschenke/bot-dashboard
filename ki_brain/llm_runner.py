@@ -214,20 +214,34 @@ class UnifiedLLMRunner:
     ) -> None:
         self._secrets = secrets
         self._genai_client = genai_client
+        self._genai_clients: dict[str, genai.Client] = {}
         self._rate_limiter = rate_limiter or get_global_rate_limiter()
 
-    def _get_genai_client(self, timeout_seconds: float = 60.0) -> genai.Client:
+    def _get_genai_client(
+        self,
+        timeout_seconds: float = 60.0,
+        *,
+        model: AIModelSpec | None = None,
+        allow_paid: bool = False,
+    ) -> genai.Client:
         if self._genai_client is not None:
             return self._genai_client
-        key = self._secrets.resolve_key("GEMINI_API_KEY")
+        if model is not None:
+            key, missing_env = self._secrets.resolve_model_key_with_env(model, allow_paid=allow_paid)
+        else:
+            key, missing_env = self._secrets.resolve_gemini_key(allow_paid=allow_paid)
         if not key:
-            raise BrainProviderError("Kein gültiger GEMINI_API_KEY konfiguriert.")
+            raise BrainProviderError(f"Kein gültiger {missing_env or 'GEMINI_API_KEY'} konfiguriert.")
+        cached = self._genai_clients.get(key)
+        if cached is not None:
+            return cached
         http_opts = {"timeout": max(60_000, int(timeout_seconds * 1000)), "retry_options": {"attempts": 2}}
         try:
-            self._genai_client = genai.Client(api_key=key, http_options=http_opts)
+            client = genai.Client(api_key=key, http_options=http_opts)
         except TypeError:
-            self._genai_client = genai.Client(api_key=key)
-        return self._genai_client
+            client = genai.Client(api_key=key)
+        self._genai_clients[key] = client
+        return client
 
     def _run_with_transient_retry(
         self,
@@ -265,22 +279,31 @@ class UnifiedLLMRunner:
         system_instruction: str = "",
         timeout_seconds: float = 40.0,
         tools: list[dict[str, Any]] | None = None,
+        allow_paid: bool = False,
         on_poll_tick: Callable[[], None] | None = None,
         cancel_check: Callable[[], None] | None = None,
     ) -> tuple[str, list[BrainCitation]]:
-        """Führt eine Text- oder Agenten-Anfrage gegen genau ein Modell aus."""
+        """Führt eine Text- oder Agenten-Anfrage gegen genau ein Modell aus (tier-getrennte Keys)."""
         _GROUNDING_LOCAL.counts = {}
+        effective_paid = bool(allow_paid or not model.is_free)
         if model.provider == ModelProvider.OPENAI_COMPATIBLE:
             if cancel_check is not None:
                 cancel_check()
-            text = self._call_openai_compat(model, prompt, system_instruction, timeout_seconds=timeout_seconds)
+            text = self._call_openai_compat(
+                model, prompt, system_instruction, timeout_seconds=timeout_seconds, allow_paid=effective_paid
+            )
             return text, []
         self._rate_limiter.acquire(cancel_check)
         if model.provider == ModelProvider.GEMINI_DEEP_AGENT or model.is_deep_agent:
             return self._call_gemini_deep_agent(
-                model, prompt, timeout_seconds=max(timeout_seconds, 120.0), on_poll_tick=on_poll_tick, cancel_check=cancel_check
+                model,
+                prompt,
+                timeout_seconds=max(timeout_seconds, 120.0),
+                allow_paid=effective_paid,
+                on_poll_tick=on_poll_tick,
+                cancel_check=cancel_check,
             )
-        client = self._get_genai_client(timeout_seconds=timeout_seconds)
+        client = self._get_genai_client(timeout_seconds=timeout_seconds, model=model, allow_paid=effective_paid)
         kwargs: dict[str, Any] = {"model": model.model_id, "input": prompt, "timeout": timeout_seconds}
         if system_instruction:
             kwargs["system_instruction"] = system_instruction
@@ -308,16 +331,20 @@ class UnifiedLLMRunner:
         *,
         system_instruction: str = "",
         timeout_seconds: float = 40.0,
+        allow_paid: bool = False,
     ) -> ModelT:
-        """Erzwingt gültiges Pydantic-JSON vom gewählten Modell."""
+        """Erzwingt gültiges Pydantic-JSON vom gewählten Modell (tier-getrennte Keys)."""
+        effective_paid = bool(allow_paid or not model.is_free)
         if model.provider == ModelProvider.OPENAI_COMPATIBLE:
             schema_hint = json.dumps(schema_cls.model_json_schema(), ensure_ascii=False)
             sys_txt = f"{system_instruction}\nGib ausschließlich valides JSON gemäß Schema zurück:\n{schema_hint}".strip()
-            raw = self._call_openai_compat(model, prompt, sys_txt, timeout_seconds=timeout_seconds, json_mode=True)
+            raw = self._call_openai_compat(
+                model, prompt, sys_txt, timeout_seconds=timeout_seconds, json_mode=True, allow_paid=effective_paid
+            )
             return schema_cls.model_validate_json(strip_json_fences(raw))
         self._rate_limiter.acquire()
 
-        client = self._get_genai_client(timeout_seconds=timeout_seconds)
+        client = self._get_genai_client(timeout_seconds=timeout_seconds, model=model, allow_paid=effective_paid)
 
         def _invoke() -> ModelT:
             interaction = client.interactions.create(
@@ -347,10 +374,11 @@ class UnifiedLLMRunner:
         prompt: str,
         *,
         timeout_seconds: float = 600.0,
+        allow_paid: bool = True,
         on_poll_tick: Callable[[], None] | None = None,
         cancel_check: Callable[[], None] | None = None,
     ) -> tuple[str, list[BrainCitation]]:
-        client = self._get_genai_client(timeout_seconds=40.0)
+        client = self._get_genai_client(timeout_seconds=40.0, model=model, allow_paid=allow_paid)
         started = client.interactions.create(agent=model.model_id, input=prompt, background=True, timeout=30.0)
         run_id = str(getattr(started, "id", "") or "")
         deadline = time.monotonic() + timeout_seconds
@@ -379,15 +407,16 @@ class UnifiedLLMRunner:
         *,
         timeout_seconds: float = 35.0,
         json_mode: bool = False,
+        allow_paid: bool = False,
     ) -> str:
         base = (model.base_url or _OPENAI_BASE_PRESETS.get(model.api_key_env.upper(), "")).rstrip("/")
         if not base:
             raise BrainProviderError(f"Keine base_url für OpenAI-Compat-Modell '{model.id}' definiert.")
         headers = {**API_HEADERS, "Content-Type": "application/json"}
         if model.requires_api_key:
-            key = self._secrets.resolve_key(model.api_key_env)
+            key, missing_env = self._secrets.resolve_model_key_with_env(model, allow_paid=allow_paid)
             if not key:
-                raise BrainProviderError(f"API-Key '{model.api_key_env}' fehlt.")
+                raise BrainProviderError(f"API-Key '{missing_env or model.api_key_env}' fehlt.")
             headers["Authorization"] = f"Bearer {key}"
         messages: list[dict[str, str]] = []
         if system_instruction:

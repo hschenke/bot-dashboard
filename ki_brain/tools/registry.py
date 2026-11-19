@@ -67,6 +67,7 @@ def _execute_ai_grounding_search(
     grounding_model: AIModelSpec | None = None,
     latitude: float | None = None,
     longitude: float | None = None,
+    allow_paid: bool = False,
 ) -> list[BrainCitation]:
     from ki_brain.llm_runner import UnifiedLLMRunner
 
@@ -86,7 +87,11 @@ def _execute_ai_grounding_search(
         prompt = f"Suche aktuell im Web nach: {query}"
 
     _, citations = active_runner.run_text(
-        model, prompt, timeout_seconds=min(20.0, max(5.0, tool.timeout_seconds)), tools=[tool_spec]
+        model,
+        prompt,
+        timeout_seconds=min(20.0, max(5.0, tool.timeout_seconds)),
+        tools=[tool_spec],
+        allow_paid=allow_paid,
     )
     return citations[:max_res]
 
@@ -102,6 +107,7 @@ def execute_search_tool(
     grounding_model: AIModelSpec | None = None,
     latitude: float | None = None,
     longitude: float | None = None,
+    allow_paid: bool = False,
 ) -> list[BrainCitation]:
     """Führt ein beliebiges konfiguriertes Such- oder Custom-Tool typsicher aus."""
     sec = secrets or BrainSecrets.from_env()
@@ -112,7 +118,7 @@ def execute_search_tool(
     if etype in _AI_SEARCH_EXECUTORS:
         return _execute_ai_grounding_search(
             tool, query, secrets=sec, max_res=max_res, runner=runner,
-            grounding_model=grounding_model, latitude=latitude, longitude=longitude,
+            grounding_model=grounding_model, latitude=latitude, longitude=longitude, allow_paid=allow_paid,
         )
     if etype == "brave_search":
         return search_brave(query, secrets=sec, endpoint_url=tool.endpoint_url, max_results=max_res, timeout_seconds=tmo)

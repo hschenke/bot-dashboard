@@ -108,7 +108,7 @@ class BrainBenchmarkRunner:
         include_paid: bool = False,
     ) -> tuple[ToolSpec, BenchmarkEntry, int]:
         now = _utc_now_iso()
-        if tool.requires_api_key and not self._secrets.has_key(tool.api_key_env):
+        if tool.requires_api_key and not self._secrets.has_tool_key(tool, allow_paid=include_paid):
             u, e = self._record_tool_result(tool, ProbeStatus.AUTH_MISSING, 0, 0, 0, f"Key {tool.api_key_env} fehlt.", now)
             return u, e, 0
 
@@ -187,7 +187,11 @@ class BrainBenchmarkRunner:
             t_type, prompt = "google_search", f"Suche aktuell nach: {query_to_use}"
 
         text, citations = self._runner.run_text(
-            grounding_model, prompt, timeout_seconds=min(15.0, tool.timeout_seconds), tools=[{"type": t_type}]
+            grounding_model,
+            prompt,
+            timeout_seconds=min(15.0, tool.timeout_seconds),
+            tools=[{"type": t_type}],
+            allow_paid=include_paid,
         )
         g_counts = pop_last_grounding_counts()
         used = _compute_grounding_usage(etype, g_counts, is_quota_capped=tool.free_quota_limit > 0)
@@ -241,8 +245,15 @@ class BrainBenchmarkRunner:
         include_paid: bool = False,
     ) -> tuple[AIModelSpec, BenchmarkEntry]:
         now = _utc_now_iso()
-        if model.requires_api_key and not self._secrets.has_key(model.api_key_env):
-            return self._record_model_result(model, ProbeStatus.AUTH_MISSING, 0, f"Key {model.api_key_env} fehlt.", now)
+        effective_paid = bool(include_paid or not model.is_free)
+        if model.requires_api_key:
+            resolved_key, missing_env = self._secrets.resolve_model_key_with_env(
+                model, allow_paid=effective_paid
+            )
+            if not resolved_key:
+                return self._record_model_result(
+                    model, ProbeStatus.AUTH_MISSING, 0, f"Key {missing_env or model.api_key_env} fehlt.", now
+                )
         if not include_paid and not model.is_deep_agent and usage_state is not None:
             m_snap = evaluate_model_quota(model, usage_state)
             if not m_snap.is_free_available:
@@ -255,13 +266,15 @@ class BrainBenchmarkRunner:
         t0 = time.monotonic()
         try:
             if model.is_deep_agent:
-                client = self._runner._get_genai_client(timeout_seconds=12.0)  # noqa: SLF001
+                client = self._runner._get_genai_client(timeout_seconds=12.0, model=model, allow_paid=effective_paid)  # noqa: SLF001
                 listed = list(client.models.list())
                 lat = int((time.monotonic() - t0) * 1000)
                 details = f"Deep-Research-Agent API erreichbar ({len(listed)} Modelle, {lat} ms)."
                 return self._record_model_result(model, ProbeStatus.OK, lat, details, now)
 
-            text, _ = self._runner.run_text(model, "Antworte nur mit OK.", timeout_seconds=18.0)
+            text, _ = self._runner.run_text(
+                model, "Antworte nur mit OK.", timeout_seconds=18.0, allow_paid=effective_paid
+            )
             lat = int((time.monotonic() - t0) * 1000)
             return self._record_model_result(model, ProbeStatus.OK, lat, f"Antwort '{text[:30]}' ({lat} ms).", now)
         except Exception as exc:

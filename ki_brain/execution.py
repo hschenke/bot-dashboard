@@ -156,7 +156,7 @@ def execute_tiered_search(
     for tool in candidates:
         if tools_with_hits >= seq.max_search_tools:
             break
-        if tool.requires_api_key and not secrets.has_key(tool.api_key_env):
+        if tool.requires_api_key and not secrets.has_tool_key(tool, allow_paid=allow_paid):
             continue
         etype = tool.executor_type.strip().lower()
         g_model: AIModelSpec | None = None
@@ -173,6 +173,7 @@ def execute_tiered_search(
                 hits = execute_search_tool(
                     tool, clean_q, language=language, secrets=secrets, limit=tool.max_results,
                     runner=runner, grounding_model=g_model, latitude=latitude, longitude=longitude,
+                    allow_paid=allow_paid,
                 )
             else:
                 hits = execute_search_tool(tool, clean_q, language=language, secrets=secrets, limit=tool.max_results)
@@ -285,12 +286,14 @@ def execute_tiered_text(
     usage_state = repo.load_usage_quotas()
     warnings: list[str] = []
     for model in _ordered_models(repo, tier, allow_paid=allow_paid, usage_state=usage_state):
-        if model.is_deep_agent or (model.requires_api_key and not secrets.has_key(model.api_key_env)):
+        if model.is_deep_agent or not secrets.has_model_key(model, allow_paid=allow_paid):
             continue
         if on_action:
             on_action(f"🤖 KI-Synthese via {model.name}...")
         try:
-            text, citations = runner.run_text(model, prompt, system_instruction=system_instruction)
+            text, citations = runner.run_text(
+                model, prompt, system_instruction=system_instruction, allow_paid=allow_paid
+            )
             if model.free_quota_limit > 0:
                 record_quota_usage(repo, model_counts={model.id: 1})
             return BrainGenerationResult(
@@ -321,10 +324,12 @@ def execute_tiered_structured(
     usage_state = repo.load_usage_quotas()
     warnings: list[str] = []
     for model in _ordered_models(repo, tier, allow_paid=allow_paid, usage_state=usage_state):
-        if not model.supports_structured_output or (model.requires_api_key and not secrets.has_key(model.api_key_env)):
+        if not model.supports_structured_output or not secrets.has_model_key(model, allow_paid=allow_paid):
             continue
         try:
-            parsed = runner.run_structured(model, prompt, schema_cls, system_instruction=system_instruction)
+            parsed = runner.run_structured(
+                model, prompt, schema_cls, system_instruction=system_instruction, allow_paid=allow_paid
+            )
             if model.free_quota_limit > 0:
                 record_quota_usage(repo, model_counts={model.id: 1})
             return parsed, model.id
@@ -392,14 +397,16 @@ def execute_tiered_ask(
     usage_state = repo.load_usage_quotas()
     warnings: list[str] = [f"{k}: {v}" for k, v in search_res.tool_errors.items()]
     for model in _ordered_models(repo, tier, allow_paid=allow_paid, usage_state=usage_state):
-        if model.requires_api_key and not secrets.has_key(model.api_key_env):
+        if not secrets.has_model_key(model, allow_paid=allow_paid):
             continue
         if model.is_deep_agent and tier != BrainTier.DEEP:
             continue
         if on_action:
             on_action(f"🤖 Synthese via {model.name}...")
         try:
-            text, extra_cites = runner.run_text(model, full_prompt, system_instruction=sys_msg)
+            text, extra_cites = runner.run_text(
+                model, full_prompt, system_instruction=sys_msg, allow_paid=allow_paid
+            )
             if model.free_quota_limit > 0:
                 record_quota_usage(repo, model_counts={model.id: 1})
             all_cites = list(search_res.citations)

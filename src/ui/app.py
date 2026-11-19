@@ -16,13 +16,11 @@ from src.ui.views.db_view import render_db_view
 from src.ui.views.ki_task_overlay import invalidate_ki_ui_cache
 from src.ui.views.ki_view import render_ki_view
 from src.ui.views.overview_view import render_overview_view
-from src.ui.views.settings_view import render_settings_view
 
 _NAV_PAGES: tuple[tuple[str, str, str], ...] = (
     ("dashboard", "📡", "Dashboard"),
     ("db", "🗄️", "DB-Inspektor"),
-    ("ki", "🤖", "KI-View"),
-    ("settings", "⚙️", "System & Historie"),
+    ("ki", "🧠", "KI-Brain"),
 )
 _NAV_VALID_KEYS: frozenset[str] = frozenset(k for k, _, _ in _NAV_PAGES)
 
@@ -95,7 +93,7 @@ def run_streamlit_app() -> None:
                 )
 
             if role == AuthRole.ADMIN and settings.app_password.strip():
-                st.markdown("<div style='height: 16px;'></div>", unsafe_allow_html=True)
+                st.divider()
                 if st.button("Abmelden", icon="🚪", key="nav_logout_btn", use_container_width=True):
                     from src.ui.auth_view import clear_auth_cookie
 
@@ -108,10 +106,8 @@ def run_streamlit_app() -> None:
             render_overview_view(snapshots, coordinator, _get_repository(), role)
         elif selected_page == "db":
             render_db_view(snapshots)
-        elif selected_page == "ki":
-            render_ki_view(settings, role=role)
         else:
-            render_settings_view(settings, _get_repository())
+            render_ki_view(settings, role=role)
     finally:
         if repo_holder["repo"] is not None:
             repo_holder["repo"].close()

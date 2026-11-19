@@ -6,15 +6,24 @@ import datetime
 import os
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeVar
 
 import yaml
 from pydantic import BaseModel
 
+from ki_brain.access import (
+    INTERNAL_DASHBOARD_APP,
+    AppClientStatus,
+    authorize_client_app,
+    build_app_client_statuses,
+    generate_app_access_token,
+)
 from ki_brain.benchmark import BrainBenchmarkRunner
 from ki_brain.discovery import DiscoverySummary, auto_sync_catalog
 from ki_brain.enums import BrainTier, ProbeStatus
+from ki_brain.exceptions import BrainAuthError
 from ki_brain.execution import (
     execute_tiered_ask,
     execute_tiered_fetch_page,
@@ -35,6 +44,7 @@ from ki_brain.models import (
     SecretStatusEntry,
     TierSequenceConfig,
     ToolSpec,
+    derive_tier_key_envs,
 )
 from ki_brain.optimizer import DEFAULT_TEST_QUERY, DEFAULT_TEST_URL, optimize_tier_sequences
 from ki_brain.rate_limiter import LlmRateLimiter, get_global_rate_limiter
@@ -46,24 +56,83 @@ from ki_brain.unblock import resolve_blocked_tools as _resolve_blocked_tools_imp
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
-_DEFAULT_SECRET_NAMES: tuple[str, ...] = (
-    "GEMINI_API_KEY",
-    "GROQ_API_KEY",
-    "OPENROUTER_API_KEY",
-    "CEREBRAS_API_KEY",
-    "MISTRAL_API_KEY",
+_DEFAULT_AI_SECRET_SPECS: tuple[tuple[str, str], ...] = (
+    ("GEMINI_FREE_API_KEY", "free"),
+    ("GEMINI_PAID_API_KEY", "paid"),
+    ("GEMINI_API_KEY", "legacy"),
+    ("GROQ_API_KEY", "free"),
+    ("GROQ_PAID_API_KEY", "paid"),
+    ("OPENROUTER_API_KEY", "free"),
+    ("OPENROUTER_PAID_API_KEY", "paid"),
+    ("CEREBRAS_API_KEY", "free"),
+    ("MISTRAL_API_KEY", "free"),
+)
+_DEFAULT_TOOL_SECRET_NAMES: tuple[str, ...] = (
     "BRAVE_SEARCH_API_KEY",
     "TAVILY_API_KEY",
     "SERPER_API_KEY",
     "BROWSERBASE_API_KEY",
 )
+_DEFAULT_SECRET_NAMES: tuple[str, ...] = (
+    *(name for name, _ in _DEFAULT_AI_SECRET_SPECS),
+    *_DEFAULT_TOOL_SECRET_NAMES,
+)
+_AI_SECRET_TIERS: dict[str, str] = dict(_DEFAULT_AI_SECRET_SPECS)
 _HTTP_202_RE = re.compile(r"(?:(?:http|status)\s*202\b|\b202\s*\(anti-bot)", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class PipelineSummary:
+    """Konsolidiertes Ergebnis des vereinten KI-Brain-Ablaufs (Discover → Benchmark → Unblock → Prune)."""
+
+    executed_steps: tuple[str, ...] = ()
+    discovery: DiscoverySummary | None = None
+    benchmark: BenchmarkReport | None = None
+    unblock: UnblockSummary | None = None
+    pruned_models: tuple[tuple[str, ProbeStatus], ...] = ()
+    pruned_tools: tuple[tuple[str, ProbeStatus], ...] = ()
+    warnings: tuple[str, ...] = ()
 
 
 def _should_clean_item(status: ProbeStatus, last_error: str, bad: set[ProbeStatus], include_http_202: bool) -> bool:
     if status in bad:
         return True
     return include_http_202 and status == ProbeStatus.BLOCKED and bool(_HTTP_202_RE.search(last_error or ""))
+
+
+def _model_matches_secret_env(model: AIModelSpec, clean_env: str) -> bool:
+    if not model.requires_api_key:
+        return False
+    free_envs, paid_envs = derive_tier_key_envs(model.api_key_env, model.paid_api_key_env)
+    return clean_env in free_envs or clean_env in paid_envs
+
+
+def _tool_matches_secret_env(tool: ToolSpec, clean_env: str) -> bool:
+    if not tool.requires_api_key:
+        return False
+    t_env = tool.api_key_env.strip().upper()
+    if t_env == clean_env:
+        return True
+    return t_env == "GEMINI_API_KEY" and clean_env in {"GEMINI_FREE_API_KEY", "GEMINI_PAID_API_KEY"}
+
+
+def _classify_secret_env(
+    env_name: str, models_list: list[AIModelSpec], tools_list: list[ToolSpec]
+) -> tuple[str, str]:
+    if env_name in _AI_SECRET_TIERS:
+        return "ai", _AI_SECRET_TIERS[env_name]
+    if env_name in _DEFAULT_TOOL_SECRET_NAMES:
+        return "tool", "tool"
+    if any(_model_matches_secret_env(m, env_name) for m in models_list):
+        tier = "paid" if env_name.endswith("_PAID_API_KEY") else "free"
+        return "ai", tier
+    if any(_tool_matches_secret_env(t, env_name) for t in tools_list):
+        return "tool", "tool"
+    if env_name.endswith("_PAID_API_KEY"):
+        return "ai", "paid"
+    if env_name.endswith("_FREE_API_KEY"):
+        return "ai", "free"
+    return "tool", "tool"
 
 
 class KIWebsearchBrain:
@@ -74,10 +143,19 @@ class KIWebsearchBrain:
         repository: BrainRepository,
         secrets: BrainSecrets | None = None,
         *,
+        app_id: str = "",
+        app_token: str = "",
         genai_client: Any = None,
         rate_limiter: LlmRateLimiter | None = None,
+        _internal_admin: bool = False,
     ) -> None:
         self._repo = repository
+        if _internal_admin:
+            self._client_app_id = INTERNAL_DASHBOARD_APP
+            self._is_admin_client = True
+        else:
+            self._client_app_id = authorize_client_app(repository, app_id, app_token)
+            self._is_admin_client = False
         self._base_secrets = secrets or BrainSecrets.from_env()
         self._secrets = self._base_secrets.with_extra_keys(self._repo.load_decrypted_secrets())
         self._genai_client = genai_client
@@ -87,16 +165,38 @@ class KIWebsearchBrain:
         )
 
     @classmethod
+    def for_dashboard(
+        cls,
+        repository: BrainRepository,
+        secrets: BrainSecrets | None = None,
+        *,
+        genai_client: Any = None,
+        rate_limiter: LlmRateLimiter | None = None,
+    ) -> KIWebsearchBrain:
+        """Erstellt die interne Admin-Instanz für das authentifizierte Holli Dashboard."""
+        return cls(
+            repository=repository,
+            secrets=secrets,
+            genai_client=genai_client,
+            rate_limiter=rate_limiter,
+            _internal_admin=True,
+        )
+
+    @classmethod
     def from_env(
         cls,
         *,
+        app_id: str = "",
+        app_token: str = "",
         turso_url: str = "",
         turso_auth_token: str = "",
         sqlite_path: str | Path = "data/ki_brain.db",
         base_dir: Path | None = None,
         secrets: BrainSecrets | None = None,
     ) -> KIWebsearchBrain:
-        """Initialisiert das Brain direkt aus Umgebungsvariablen (Turso Cloud oder SQLite)."""
+        """Initialisiert das Brain für eine autorisierte App (`news_bot`, `research_bot`, `alert_bot`)."""
+        resolved_app_id = app_id.strip() or os.getenv("BRAIN_APP_ID", "").strip()
+        resolved_app_token = app_token.strip() or os.getenv("BRAIN_APP_TOKEN", "").strip()
         resolved_url = turso_url or os.getenv("BRAIN_TURSO_URL") or os.getenv("TURSO_URL", "")
         resolved_tok = turso_auth_token or os.getenv("BRAIN_TURSO_KEY") or os.getenv("TURSO_KEY", "")
         repo = create_brain_repository(
@@ -105,7 +205,16 @@ class KIWebsearchBrain:
             sqlite_path=sqlite_path,
             base_dir=base_dir,
         )
-        return cls(repository=repo, secrets=secrets or BrainSecrets.from_env())
+        try:
+            return cls(
+                repository=repo,
+                secrets=secrets or BrainSecrets.from_env(),
+                app_id=resolved_app_id,
+                app_token=resolved_app_token,
+            )
+        except Exception:
+            repo.close()
+            raise
 
     @property
     def repository(self) -> BrainRepository:
@@ -114,6 +223,20 @@ class KIWebsearchBrain:
     @property
     def backend_name(self) -> str:
         return self._repo.backend_name
+
+    @property
+    def client_app_id(self) -> str:
+        return self._client_app_id
+
+    @property
+    def is_admin_client(self) -> bool:
+        return self._is_admin_client
+
+    def _require_admin(self) -> None:
+        if not self._is_admin_client:
+            raise BrainAuthError(
+                f"Zugriff verweigert: App '{self._client_app_id}' besitzt keine Admin-Rechte für diese Vault-Aktion."
+            )
 
     # --- Dynamische Verwaltung von Modellen, Tools & Sequenzen ---
     def list_models(self, enabled_only: bool = False) -> list[AIModelSpec]:
@@ -331,15 +454,21 @@ class KIWebsearchBrain:
     def _reset_items_for_secret(
         self, clean_name: str, from_statuses: set[ProbeStatus], target_status: ProbeStatus, error_msg: str = ""
     ) -> None:
+        is_paid_key = clean_name.endswith("_PAID_API_KEY")
         for m in self._repo.list_models():
-            if m.api_key_env.strip().upper() == clean_name and m.last_status in from_statuses:
+            if not _model_matches_secret_env(m, clean_name):
+                continue
+            if is_paid_key and m.is_free and self._secrets.has_model_key(m, allow_paid=False):
+                continue
+            if m.last_status in from_statuses:
                 self._repo.upsert_model(m.model_copy(update={"last_status": target_status, "last_error": error_msg}))
         for t in self._repo.list_tools():
-            if t.api_key_env.strip().upper() == clean_name and t.last_status in from_statuses:
+            if _tool_matches_secret_env(t, clean_name) and t.last_status in from_statuses:
                 self._repo.upsert_tool(t.model_copy(update={"last_status": target_status, "last_error": error_msg}))
 
     def set_secret(self, env_name: str, new_secret_value: str) -> str:
         """Speichert oder überschreibt ein Secret komplett verschlüsselt (Write-Only) und entsperrt Key-/Quota-Einträge."""
+        self._require_admin()
         clean_name = validate_secret_env_name(env_name)
         encrypted = encrypt_secret_value(new_secret_value)
         updated_at = self._repo.upsert_encrypted_secret(clean_name, encrypted)
@@ -353,49 +482,91 @@ class KIWebsearchBrain:
 
     def delete_secret(self, env_name: str) -> bool:
         """Entfernt ein im Brain-Vault gespeichertes Secret und aktualisiert abhängige Statuswerte."""
+        self._require_admin()
         clean_name = validate_secret_env_name(env_name)
         removed = self._repo.delete_encrypted_secret(clean_name)
         self._refresh_runtime_secrets()
         if removed:
-            if self._secrets.has_key(clean_name):
-                self._reset_items_for_secret(
-                    clean_name,
-                    {ProbeStatus.OK, ProbeStatus.QUOTA_LIMITED, ProbeStatus.ERROR, ProbeStatus.AUTH_MISSING},
-                    ProbeStatus.UNTESTED,
-                )
-            else:
-                self._reset_items_for_secret(
-                    clean_name,
-                    {ProbeStatus.OK, ProbeStatus.QUOTA_LIMITED, ProbeStatus.ERROR, ProbeStatus.UNTESTED},
-                    ProbeStatus.AUTH_MISSING,
-                    f"Key {clean_name} fehlt.",
-                )
+            for m in self._repo.list_models():
+                if not _model_matches_secret_env(m, clean_name):
+                    continue
+                has_key = self._secrets.has_model_key(m, allow_paid=not m.is_free)
+                if has_key and m.last_status in {ProbeStatus.OK, ProbeStatus.QUOTA_LIMITED, ProbeStatus.ERROR, ProbeStatus.AUTH_MISSING}:
+                    self._repo.upsert_model(m.model_copy(update={"last_status": ProbeStatus.UNTESTED, "last_error": ""}))
+                elif not has_key and m.last_status in {ProbeStatus.OK, ProbeStatus.QUOTA_LIMITED, ProbeStatus.ERROR, ProbeStatus.UNTESTED}:
+                    self._repo.upsert_model(
+                        m.model_copy(update={"last_status": ProbeStatus.AUTH_MISSING, "last_error": f"Key {clean_name} fehlt."})
+                    )
+            for t in self._repo.list_tools():
+                if not _tool_matches_secret_env(t, clean_name):
+                    continue
+                has_key = self._secrets.has_tool_key(t, allow_paid=False)
+                if has_key and t.last_status in {ProbeStatus.OK, ProbeStatus.QUOTA_LIMITED, ProbeStatus.ERROR, ProbeStatus.AUTH_MISSING}:
+                    self._repo.upsert_tool(t.model_copy(update={"last_status": ProbeStatus.UNTESTED, "last_error": ""}))
+                elif not has_key and t.last_status in {ProbeStatus.OK, ProbeStatus.QUOTA_LIMITED, ProbeStatus.ERROR, ProbeStatus.UNTESTED}:
+                    self._repo.upsert_tool(
+                        t.model_copy(update={"last_status": ProbeStatus.AUTH_MISSING, "last_error": f"Key {clean_name} fehlt."})
+                    )
         return removed
+
+    # --- App-Zugriffskontrolle (Whitelist: news_bot, research_bot, alert_bot) ---
+    def list_app_clients(
+        self, *, client_records: dict[str, dict[str, Any]] | None = None
+    ) -> list[AppClientStatus]:
+        """Liefert den sicheren Zugriffsstatus der 3 exklusiv zugelassenen Apps."""
+        recs = client_records if client_records is not None else self._repo.list_app_client_records()
+        return build_app_client_statuses(recs)
+
+    def issue_app_token(self, app_id: str) -> str:
+        """Generiert/rotiert ein 256-Bit-Access-Token für eine zugelassene App (Klartext nur 1× zurückgegeben!)."""
+        self._require_admin()
+        token, token_hash = generate_app_access_token(app_id)
+        self._repo.upsert_app_client(app_id, token_hash, enabled=True)
+        return token
+
+    def revoke_app_token(self, app_id: str) -> bool:
+        """Widerruft das Access-Token einer zugelassenen App sofort."""
+        self._require_admin()
+        return self._repo.revoke_app_client(app_id)
+
+    def set_app_enabled(self, app_id: str, enabled: bool) -> bool:
+        """Aktiviert oder sperrt den Zugriff einer bereits registrierten App."""
+        self._require_admin()
+        return self._repo.set_app_client_enabled(app_id, enabled)
 
     def probe_items_for_secret(self, env_name: str) -> list[BenchmarkEntry]:
         """Testet alle zu einem Secret gehörenden Modelle/Tools live und aktualisiert Tier-Sequenzen bei Erfolg."""
         from ki_brain.quotas import select_grounding_model
 
         clean_name = validate_secret_env_name(env_name)
+        is_paid_key = clean_name.endswith("_PAID_API_KEY")
         self._refresh_runtime_secrets()
         bench = BrainBenchmarkRunner(self._repo, self._secrets, self._runner)
         usage_state = self._repo.load_usage_quotas()
         entries: list[BenchmarkEntry] = []
 
-        target_models = [m for m in self._repo.list_models(enabled_only=True) if m.api_key_env.strip().upper() == clean_name]
+        target_models = [
+            m
+            for m in self._repo.list_models(enabled_only=True)
+            if _model_matches_secret_env(m, clean_name) and (is_paid_key or m.is_free)
+        ]
         for model in target_models:
-            um, entry = bench.probe_model(model, usage_state=usage_state)
+            um, entry = bench.probe_model(model, usage_state=usage_state, include_paid=is_paid_key)
             if um != model:
                 self._repo.upsert_model(um)
             entries.append(entry)
 
         all_models = self._repo.list_models(enabled_only=True)
-        target_tools = [t for t in self._repo.list_tools(enabled_only=True) if t.api_key_env.strip().upper() == clean_name]
+        target_tools = [
+            t for t in self._repo.list_tools(enabled_only=True) if _tool_matches_secret_env(t, clean_name)
+        ]
         for tool in target_tools:
             g_model = select_grounding_model(
-                all_models, self._secrets, executor_type=tool.executor_type, allow_paid=False
+                all_models, self._secrets, executor_type=tool.executor_type, allow_paid=is_paid_key
             )
-            ut, entry = bench.probe_tool(tool, DEFAULT_TEST_QUERY, DEFAULT_TEST_URL, g_model, usage_state=usage_state)
+            ut, entry = bench.probe_tool(
+                tool, DEFAULT_TEST_QUERY, DEFAULT_TEST_URL, g_model, usage_state=usage_state, include_paid=is_paid_key
+            )
             if ut != tool:
                 self._repo.upsert_tool(ut)
             entries.append(entry)
@@ -440,7 +611,13 @@ class KIWebsearchBrain:
         models_list = models if models is not None else self._repo.list_models()
         tools_list = tools if tools is not None else self._repo.list_tools()
         all_names = list(_DEFAULT_SECRET_NAMES)
-        for item_env in [*(m.api_key_env for m in models_list), *(t.api_key_env for t in tools_list), *vault_ts.keys()]:
+        extra_envs = [
+            *(m.api_key_env for m in models_list),
+            *(m.paid_api_key_env for m in models_list),
+            *(t.api_key_env for t in tools_list),
+            *vault_ts.keys(),
+        ]
+        for item_env in extra_envs:
             clean = item_env.strip().upper()
             if clean and clean not in all_names:
                 all_names.append(clean)
@@ -456,9 +633,15 @@ class KIWebsearchBrain:
                 source = "ENV / Streamlit Secrets"
             else:
                 source = "Nicht gesetzt"
+            cat, key_tier = _classify_secret_env(name, models_list, tools_list)
             affected = [
-                *[f"Model: {m.id}" for m in models_list if m.api_key_env.strip().upper() == name],
-                *[f"Tool: {t.id}" for t in tools_list if t.api_key_env.strip().upper() == name],
+                *[
+                    f"Model: {m.id}"
+                    for m in models_list
+                    if _model_matches_secret_env(m, name)
+                    and (key_tier != "free" or m.is_free)
+                ],
+                *[f"Tool: {t.id}" for t in tools_list if _tool_matches_secret_env(t, name)],
             ]
             entries.append(
                 SecretStatusEntry(
@@ -467,6 +650,8 @@ class KIWebsearchBrain:
                     source=source,
                     updated_at=vault_ts.get(name, ""),
                     affected_items=affected,
+                    category=cat,
+                    key_tier=key_tier,
                 )
             )
         return entries
@@ -481,7 +666,7 @@ class KIWebsearchBrain:
         )
         return state, statuses
 
-    # --- Auto-Discovery & Testlauf (Fast, Standard, Deep) ---
+    # --- Auto-Discovery, Testlauf & Vereinte Pipeline (Fast, Standard, Deep) ---
     def auto_sync(
         self,
         manifest_url: str = "",
@@ -519,6 +704,93 @@ class KIWebsearchBrain:
             force_overwrite_sequences=force_overwrite_sequences,
             include_paid=include_paid,
             on_progress=on_progress,
+        )
+
+    def run_full_pipeline(
+        self,
+        *,
+        run_discover: bool = True,
+        run_benchmark: bool = True,
+        run_unblock: bool = True,
+        run_prune: bool = True,
+        exclude_previews: bool = True,
+        retry_excluded: bool = False,
+        include_paid: bool = False,
+        on_progress: Callable[[float, str], None] | None = None,
+    ) -> PipelineSummary:
+        """Führt den kombinierten KI-Brain-Ablauf aus (Discover → Benchmark → Unblock → Prune)."""
+        steps: list[tuple[str, float]] = [
+            (name, weight)
+            for name, enabled, weight in (
+                ("discover", run_discover, 0.30),
+                ("benchmark", run_benchmark, 0.42),
+                ("unblock", run_unblock, 0.18),
+                ("prune", run_prune, 0.10),
+            )
+            if enabled
+        ]
+        if not steps:
+            return PipelineSummary()
+
+        total_w = sum(w for _, w in steps)
+        cursor = 0.0
+        executed: list[str] = []
+        warnings: list[str] = []
+        discovery: DiscoverySummary | None = None
+        benchmark: BenchmarkReport | None = None
+        unblock: UnblockSummary | None = None
+        pruned_models: list[tuple[str, ProbeStatus]] = []
+        pruned_tools: list[tuple[str, ProbeStatus]] = []
+
+        def _slice_cb(start: float, span: float, label: str) -> Callable[[float, str], None]:
+            def _inner(frac: float, msg: str) -> None:
+                if on_progress:
+                    clamped = max(0.0, min(1.0, float(frac)))
+                    on_progress(min(0.99, start + span * clamped), f"[{label}] {msg}")
+
+            return _inner
+
+        for step_name, weight in steps:
+            span = weight / total_w
+            if step_name == "discover":
+                cb = _slice_cb(cursor, span, "1/4 Discover")
+                cb(0.05, "Prüfe Quota-Recovery & neue Modelle/Tools...")
+                discovery = self.auto_sync(
+                    verify_discovered=True,
+                    exclude_previews=exclude_previews,
+                    retry_excluded=retry_excluded,
+                    on_progress=cb,
+                )
+                warnings.extend(discovery.warnings)
+                executed.append("discover")
+            elif step_name == "benchmark":
+                cb = _slice_cb(cursor, span, "2/4 Benchmark")
+                cb(0.05, "Teste aktive Modelle & Tools live...")
+                benchmark = self.run_benchmark(include_paid=include_paid, on_progress=cb)
+                executed.append("benchmark")
+            elif step_name == "unblock":
+                cb = _slice_cb(cursor, span, "3/4 Unblock")
+                cb(0.05, "Prüfe & entsperre Blocked-Tools...")
+                unblock = self.resolve_blocked_tools(on_progress=cb)
+                executed.append("unblock")
+            elif step_name == "prune":
+                cb = _slice_cb(cursor, span, "4/4 Prune")
+                cb(0.25, "Bereinige Error-, Quota-429- & HTTP-202-Einträge...")
+                pruned_models, pruned_tools = self.cleanup_unhealthy_items_with_status()
+                cb(1.0, "Bereinigung & Sequenz-Optimierung abgeschlossen.")
+                executed.append("prune")
+            cursor += span
+
+        if on_progress:
+            on_progress(1.0, "KI-Brain Ablauf abgeschlossen.")
+        return PipelineSummary(
+            executed_steps=tuple(executed),
+            discovery=discovery,
+            benchmark=benchmark,
+            unblock=unblock,
+            pruned_models=tuple(pruned_models),
+            pruned_tools=tuple(pruned_tools),
+            warnings=tuple(warnings),
         )
 
     def get_latest_benchmark(self) -> BenchmarkReport | None:

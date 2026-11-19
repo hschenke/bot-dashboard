@@ -316,6 +316,7 @@ def test_check_all_and_wake_all_buttons_run_task_overlay_outside_header_columns(
     spinner_depths: list[int] = []
     overlay_keys: list[str] = []
     md_calls: list[str] = []
+    empty_clears = {"count": 0}
 
     class _TrackedCol:
         def __enter__(self) -> _TrackedCol:
@@ -327,6 +328,9 @@ def test_check_all_and_wake_all_buttons_run_task_overlay_outside_header_columns(
             col_depth["current"] -= 1
             return False
 
+        def metric(self, *_a: object, **_kw: object) -> None:
+            return None
+
     class _TrackedSpinner:
         def __enter__(self) -> _TrackedSpinner:
             spinner_depths.append(col_depth["current"])
@@ -334,6 +338,21 @@ def test_check_all_and_wake_all_buttons_run_task_overlay_outside_header_columns(
 
         def __exit__(self, *args: object) -> bool:
             return False
+
+    class _TrackedEmpty:
+        def markdown(self, text: str, **_kw: object) -> None:
+            md_calls.append(str(text))
+
+        def info(self, *_a: object, **_kw: object) -> None:
+            return None
+
+        def container(self, **kwargs: Any) -> _DummyContext:
+            if "key" in kwargs:
+                overlay_keys.append(str(kwargs["key"]))
+            return _DummyContext()
+
+        def empty(self) -> None:
+            empty_clears["count"] += 1
 
     def _tracked_cols(spec: Any, **kwargs: Any) -> list[_TrackedCol]:
         count = spec if isinstance(spec, int) else len(spec)
@@ -348,6 +367,7 @@ def test_check_all_and_wake_all_buttons_run_task_overlay_outside_header_columns(
         patch("streamlit.session_state", session_state),
         patch("streamlit.columns", side_effect=_tracked_cols),
         patch("streamlit.container", side_effect=_tracked_container),
+        patch("streamlit.empty", side_effect=lambda: _TrackedEmpty()),
         patch("streamlit.markdown", side_effect=lambda text, **kw: md_calls.append(str(text))),
         patch("streamlit.spinner", return_value=_TrackedSpinner()),
         patch("streamlit.title"),
@@ -360,11 +380,71 @@ def test_check_all_and_wake_all_buttons_run_task_overlay_outside_header_columns(
     if trigger_label == "⚡ Check All":
         coordinator.check_all_apps.assert_called_once_with(repository=repository)
     else:
-        coordinator.wake_and_refresh_apps.assert_called_once_with([sleeping_snap], repository=repository)
+        coordinator.wake_and_refresh_apps.assert_called_once()
+        assert coordinator.wake_and_refresh_apps.call_args.args == ([sleeping_snap],)
+        assert coordinator.wake_and_refresh_apps.call_args.kwargs["repository"] is repository
+        assert callable(coordinator.wake_and_refresh_apps.call_args.kwargs["on_progress"])
     assert col_depth == {"current": 0, "max": 1}
     assert spinner_depths == [0]
+    assert "overview_kpi_row" in overlay_keys
+    assert "overview_action_row" in overlay_keys
     assert "ki_task_overlay" in overlay_keys
     assert any("ki-task-backdrop" in m for m in md_calls)
+    assert empty_clears["count"] >= 2
+
+
+def test_wake_all_releases_background_overlay_on_error_never_locks_permanently() -> None:
+    from src.ui.task_overlay import INSTANT_OVERLAY_HTML
+    from src.ui.views.overview_actions import run_wake_all_action
+
+    # JS-Brücke erkennt Fehler-Widget und Fail-Safe-Timeout
+    assert 'data-testid="stException"' in INSTANT_OVERLAY_HTML
+    assert "releaseBackdrop" in INSTANT_OVERLAY_HTML
+
+    snap = _create_mock_snapshot()
+    session_state: dict[str, Any] = {"fleet_snapshots": [snap]}
+    coordinator = MagicMock(spec=FleetCheckCoordinator)
+    coordinator.wake_and_refresh_apps.side_effect = RuntimeError("Streamlit Cloud timeout")
+    repository = MagicMock()
+    cleared_slots: list[str] = []
+
+    class _Slot:
+        def __init__(self, idx: int) -> None:
+            self._idx = idx
+
+        def markdown(self, *_a: object, **_kw: object) -> None:
+            return None
+
+        def info(self, *_a: object, **_kw: object) -> None:
+            return None
+
+        def container(self, **_kw: object) -> _DummyContext:
+            return _DummyContext()
+
+        def empty(self) -> None:
+            cleared_slots.append(f"slot_{self._idx}")
+
+    slot_counter = {"n": 0}
+
+    def _make_slot() -> _Slot:
+        slot_counter["n"] += 1
+        return _Slot(slot_counter["n"])
+
+    with (
+        patch("streamlit.session_state", session_state),
+        patch("streamlit.empty", side_effect=_make_slot),
+        patch("streamlit.spinner", return_value=_DummyContext()),
+        patch("streamlit.progress", return_value=MagicMock()),
+        patch("streamlit.markdown"),
+        patch("streamlit.rerun", side_effect=_RerunCalled),
+        pytest.raises(_RerunCalled),
+    ):
+        run_wake_all_action([snap], coordinator, repository)
+
+    # Backdrop und Overlay-Slot wurden im finally-Block garantiert geleert & Fehlerbanner gesetzt
+    assert len(cleared_slots) >= 2
+    assert session_state["overview_feedback"]["level"] == "error"
+    assert "Streamlit Cloud timeout" in session_state["overview_feedback"]["message"]
 
 
 def test_wake_all_action_and_single_wake_and_worker_feedback() -> None:
@@ -606,8 +686,13 @@ def test_alert_bot_icon_updated_and_no_yellow_bell_remains() -> None:
         assert "🔔" not in py_file.read_text(encoding="utf-8"), f"Veraltetes 🔔 in {py_file}"
 
 
-def test_apptest_overview_db_and_settings_views_render_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_apptest_overview_and_db_views_render_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.ui.styles import _STATIC_CSS
     from streamlit.testing.v1 import AppTest
+
+    assert ".st-key-overview_kpi_row" in _STATIC_CSS
+    assert ".st-key-overview_action_row" in _STATIC_CSS
+    assert "flex-wrap: nowrap !important" in _STATIC_CSS
 
     monkeypatch.setenv("NEWS_BOT_URL", "https://holli-news-bot.streamlit.app/")
     monkeypatch.setenv("RESEARCH_BOT_URL", "https://holli-research-bot.streamlit.app/")
@@ -632,7 +717,6 @@ def test_apptest_overview_db_and_settings_views_render_cleanly(monkeypatch: pyte
         )
         from src.ui.views.db_view import render_db_view
         from src.ui.views.overview_view import render_overview_view
-        from src.ui.views.settings_view import render_settings_view
 
         settings = load_app_settings(allow_sibling_env_fallback=False)
         snapshots = [
@@ -684,12 +768,11 @@ def test_apptest_overview_db_and_settings_views_render_cleanly(monkeypatch: pyte
 
         render_overview_view(snapshots, coord, repo, role=AuthRole.ADMIN)
         render_db_view(snapshots)
-        render_settings_view(settings, repo)
 
     at = AppTest.from_function(_app).run()
     assert not at.exception
 
-    # KPI-Reihe: DB-Einträge entfernt, nur 3 Overview-Metriken + 3x4 DB-Tab-Metriken
+    # KPI-Reihe: 3 kompakte Overview-Metriken + 3x4 DB-Tab-Metriken
     metric_labels = [m.label for m in at.metric]
     assert metric_labels[:3] == ["Apps Online", "Apps Awake", "DBs Online"]
     assert "DB-Einträge" not in metric_labels
@@ -705,7 +788,7 @@ def test_apptest_overview_db_and_settings_views_render_cleanly(monkeypatch: pyte
     assert any(":material/notifications_active: Alert-Bot" in exp.label for exp in at.expander)
 
     # Health-Tabelle enthält alle 3 App-Links + neues Alert-Bot-Icon
-    assert len(at.table) >= 3
+    assert len(at.table) >= 2
     health_df = at.table[0].value
     app_cells = list(health_df["App"])
     assert "📰 [News-Bot](https://holli-news-bot.streamlit.app/)" in app_cells

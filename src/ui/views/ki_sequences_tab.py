@@ -1,4 +1,4 @@
-"""KI-View Tab 1: Ausführungs-Sequenzen für Fast, Standard & Deep + Editor."""
+"""KI-Brain Tab 1 (Sequencing): Ausführungs-Sequenzen für Fast, Standard & Deep + Editor."""
 
 from __future__ import annotations
 
@@ -126,7 +126,7 @@ def _render_sequence_editor(
                     "max_pages_to_scrape": int(max_pages),
                     "use_deep_agent": bool(deep_agent_on),
                     "manual_override": bool(manual_lock),
-                    "optimization_rationale": "Manuell über KI-View angepasst.",
+                    "optimization_rationale": "Manuell über KI-Brain angepasst.",
                 }
             )
             brain.update_sequence(updated)

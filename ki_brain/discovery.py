@@ -153,7 +153,7 @@ def _sync_new_builtins(
             skipped.append(t.id)
         elif t.id not in known_tools and t.id not in existing_tools:
             to_save = t
-            if t.requires_api_key and t.api_key_env and not secrets.has_key(t.api_key_env):
+            if t.requires_api_key and t.api_key_env and not secrets.has_tool_key(t, allow_paid=False):
                 to_save = t.model_copy(
                     update={"last_status": ProbeStatus.AUTH_MISSING, "last_error": f"Key {t.api_key_env} fehlt."}
                 )
@@ -198,6 +198,7 @@ def _discover_gemini_models(client: genai.Client, *, exclude_previews: bool = Tr
                 tier_hint=tier,
                 is_free=is_free_flag,
                 free_quota_period="unlimited" if is_free_flag else "none",
+                paid_api_key_env="GEMINI_PAID_API_KEY",
                 supports_structured_output=not is_deep,
                 supports_google_search=not is_deep,
                 supports_url_context=not is_deep,
@@ -237,6 +238,7 @@ def _discover_groq_models(api_key: str) -> list[AIModelSpec]:
                 model_id=mid,
                 tier_hint=tier,
                 api_key_env="GROQ_API_KEY",
+                paid_api_key_env="GROQ_PAID_API_KEY",
                 base_url="https://api.groq.com/openai/v1",
                 supports_google_search=False,
                 supports_url_context=False,
@@ -282,6 +284,7 @@ def _discover_openrouter_free_models(api_key: str) -> list[AIModelSpec]:
                 model_id=mid,
                 tier_hint=BrainTier.STANDARD,
                 api_key_env="OPENROUTER_API_KEY",
+                paid_api_key_env="OPENROUTER_PAID_API_KEY",
                 base_url="https://openrouter.ai/api/v1",
                 supports_google_search=False,
                 supports_url_context=False,
@@ -365,7 +368,7 @@ def _recheck_unhealthy_existing(
         m
         for m in repo.list_models(enabled_only=True)
         if m.last_status in {ProbeStatus.QUOTA_LIMITED, ProbeStatus.ERROR}
-        and (not m.requires_api_key or secrets.has_key(m.api_key_env))
+        and secrets.has_model_key(m, allow_paid=not m.is_free)
         and not (exclude_previews and is_preview_or_experimental_model(m.model_id, m.name))
     ]
     recovered: list[str] = []
@@ -389,7 +392,7 @@ def _recheck_unhealthy_existing(
         for t in repo.list_tools(enabled_only=True)
         if t.category == ToolCategory.AI_GROUNDING
         and t.last_status in {ProbeStatus.QUOTA_LIMITED, ProbeStatus.ERROR}
-        and (not t.requires_api_key or secrets.has_key(t.api_key_env))
+        and secrets.has_tool_key(t, allow_paid=False)
     ]
     if ai_tools:
         healthy_models = repo.list_models(enabled_only=True)
@@ -545,7 +548,7 @@ def auto_sync_catalog(
             if limit > 0 and collected_here >= limit:
                 break
 
-    gem_key = secrets.resolve_key("GEMINI_API_KEY")
+    gem_key = secrets.resolve_any_gemini_key()
     if genai_client is not None or gem_key:
         sources.append("gemini-models")
         if on_progress:
@@ -566,11 +569,15 @@ def auto_sync_catalog(
             for m in build_default_models()
             if m.id in retry_ids
             and m.id not in existing_ids
-            and (not verify_discovered or not m.requires_api_key or genai_client is not None or secrets.has_key(m.api_key_env))
+            and (
+                not verify_discovered
+                or genai_client is not None
+                or secrets.has_model_key(m, allow_paid=not m.is_free)
+            )
         ]
         _collect(retry_builtins, limit=0)
 
-    groq_key = secrets.resolve_key("GROQ_API_KEY")
+    groq_key = secrets.resolve_key("GROQ_API_KEY") or secrets.resolve_key("GROQ_PAID_API_KEY")
     if groq_key:
         sources.append("groq-models")
         if on_progress:
@@ -580,7 +587,7 @@ def auto_sync_catalog(
         except Exception as exc:
             warnings.append(f"Groq Auto-Discovery: {exc}")
 
-    or_key = secrets.resolve_key("OPENROUTER_API_KEY")
+    or_key = secrets.resolve_key("OPENROUTER_API_KEY") or secrets.resolve_key("OPENROUTER_PAID_API_KEY")
     if or_key:
         sources.append("openrouter-free")
         if on_progress:

@@ -10,21 +10,18 @@ Zusätzlich stellt dieses Repository mit [`ki_brain`](ki_brain/__init__.py) ein 
 ## ✨ Kernfunktionen & Ansichten
 
 - **📡 Dashboard (Zentrale Flotten-Übersicht & Worker-Monitor)**:
-  - **KPI-Header & Sofort-Check**: Flotten-Kennzahlen (Online-Apps, Awake-Apps, DBs Online) und 1-Klick-Gesamtcheck.
+  - **Mobile-kompakte KPIs & Action-Buttons**: Flotten-Kennzahlen (`Apps Online`, `Apps Awake`, `DBs Online`) sowie `⚡ Check All` & `☀️ Wake All` direkt darunter nebeneinander (inkl. Fail-Safe Task-Overlay bis alle Apps wach sind).
   - **Health & Action**: Streamlit `/_stcore/health`-Check (`🟢 Awake` / `🌙 Sleeping`), GitHub Actions Status (`Queued`, `Running`, `Success`, `Failed`), Einzelprüfung, Aufwecken und `workflow_dispatch`.
 - **🗄️ Datenbank-Inspektor (`Turso Cloud` & `SQLite`)**:
   - Verbindet sich mit den 3 Bot-Datenbanken (Turso HTTPS Hrana v2 oder lokal per Read-Only-SQLite).
-- **🧠 KI-View (Zentrales KI & Websearch Brain)**:
-  - Vereint kostenfreie Modelle (Gemini Flash/Lite/Hydrogen, Gemma, Groq, OpenRouter `:free`) sowie Paid-Opt-In-Modelle (Deep Research Agent, Argon/Pro) und Websearch-/Grounding-/Extraktions-Tools (Yahoo, SearXNG, DuckDuckGo, Google News RSS, Wikipedia, Wikidata, Hacker News, Reddit, arXiv, Gemini Search & Maps Grounding mit 5.000 Free-Queries/Monat ab Gemini 3+, Jina Reader, Direct HTTP, Browserbase, Open-Meteo).
-  - **Strikte 0%-Kosten-Priorität & Kontingent-Tracking**: Sequencing und Ausführungs-Pipeline schließen kostenpflichtige Modelle sowie erschöpfte Free-Kontingente standardmäßig aus und beziehen sie erst über explizites Request-Opt-In (`allow_paid=True`) ein.
-  - **Dynamische Verwaltung**: Neue Modelle & Tools (`custom_json_api`, `custom_rss_feed`) manuell oder per **Auto-Sync** (`client.models.list()`, OpenRouter `:free`, Groq) hinzufügen, bearbeiten, aktivieren/deaktivieren oder entfernen.
-  - **Testlauf & Sequenz-Optimierung**: Ermittelt per 1-Klick-Benchmark die optimale Ausführungs-Sequenz für **3 Stufen: `Fast`, `Standard` und `Deep`** (0%-Standard + Paid-Opt-In-Kette).
-- **⚙️ System & Check-Historie**:
-  - Konfigurations-Matrix und persistiertes Prüfprotokoll (`fleet_check_logs`).
+- **🧠 KI-Brain (Zentrales KI & Websearch Brain)**:
+  - **Einheitlicher Ablauf (`🚀 Sync & Optimize`)**: Kombiniert Discover, Benchmark & Optimize, Unblock Tools und Prune Failing mit wählbaren Optionen.
+  - **5 strukturierte Tabs (`Sequencing | KI | Tools | Vault | Check`)**: Free- & Paid-Tier API-Keys sowie die **3-App-Zugriffskontrolle** (`news_bot`, `research_bot`, `alert_bot`) werden zentral & Write-Only im **Vault** verwaltet.
+  - **Strikte 0%-Kosten-Priorität & Free-/Paid-Key-Trennung**: Standardanfragen (`allow_paid=False`) nutzen ausschließlich den Free-Tier-Key (`GEMINI_FREE_API_KEY` bzw. Fallback `GEMINI_API_KEY`); der Paid-Tier-Key (`GEMINI_PAID_API_KEY`) und Paid-Only-Modelle werden erst bei explizitem `allow_paid=True` aktiv.
 
 ---
 
-## 🔌 Einbindung von `ki_brain` in andere Projekte (`Research-Bot`, `Alert-Bot`)
+## 🔌 Einbindung von `ki_brain` in deine 3 Apps (`News-Bot`, `Research-Bot`, `Alert-Bot`)
 
 ```bash
 pip install "git+https://github.com/hschenke/bot-dashboard.git"
@@ -33,7 +30,8 @@ pip install "git+https://github.com/hschenke/bot-dashboard.git"
 ```python
 from ki_brain import KIWebsearchBrain
 
-# Nutzt optional dieselbe Turso Cloud DB (BRAIN_TURSO_URL / TURSO_URL); standardmäßig strikt 0% Kosten.
+# Exklusiver Zugriff für news_bot, research_bot & alert_bot via BRAIN_APP_ID + BRAIN_APP_TOKEN (im Vault generierbar).
+# Fremde Apps oder fehlende/widerrufene Tokens werden strikt mit BrainAuthError abgelehnt.
 with KIWebsearchBrain.from_env() as brain:
     hits = brain.search("Aktuelle Entwicklungen KI", tier="fast")
     maps_hits = brain.search("Cafés am Alexanderplatz Berlin", tier="standard")  # Geo-Smart Maps Grounding

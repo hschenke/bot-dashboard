@@ -1,11 +1,11 @@
-"""KI-View: Interaktiver Write-Only Missing-Key-Dialog mit Direkt-Testlauf."""
+"""KI-Brain: Interaktiver Write-Only API-Key-Dialog mit Direkt-Testlauf."""
 
 from __future__ import annotations
 
 from typing import Any
 
 import streamlit as st
-from ki_brain import BenchmarkEntry, BrainError, KIWebsearchBrain, ProbeStatus, SecretStatusEntry
+from ki_brain import BenchmarkEntry, BrainError, ProbeStatus, SecretStatusEntry
 
 from src.ai.brain_bridge import create_dashboard_brain
 from src.config.settings import AppSettings
@@ -21,6 +21,13 @@ _STATUS_SHORT: dict[ProbeStatus, str] = {
     ProbeStatus.BLOCKED: "🔴 Blocked",
     ProbeStatus.ERROR: "🔴 Error",
     ProbeStatus.UNTESTED: "⚪ Untested",
+}
+
+_TIER_BADGES: dict[str, str] = {
+    "free": "🆓 Free-Tier Key (0% Kosten Standard)",
+    "paid": "💳 Paid-Tier Key (nur bei allow_paid=True / Paid-Modellen)",
+    "legacy": "🔁 Legacy-Fallback Key (Fallback für Free & Paid)",
+    "tool": "🔧 Websearch / Tool API-Key",
 }
 
 
@@ -86,20 +93,22 @@ def _format_probe_summary(env_name: str, entries: list[BenchmarkEntry]) -> tuple
     return level, f"Secret `{env_name}` gespeichert & getestet ({ok_count}/{len(entries)} OK): {' · '.join(parts)}"
 
 
-@st.dialog("🔑 API-Key sicher eintragen (Write-Only)", on_dismiss=_clear_active_dialog)
+@st.dialog("🔐 API-Key im Vault eintragen (Write-Only)", on_dismiss=_clear_active_dialog)
 def open_secret_dialog(env_name: str, settings: AppSettings) -> None:
     """Öffnet ein GitHub-Secrets-ähnliches Write-Only-Modal inkl. sofortigem Testlauf."""
     clean_env = env_name.strip().upper()
     cur_status = _resolve_dialog_status(clean_env, settings)
 
     st.markdown(f"### Secret `{clean_env}`")
-    if cur_status and cur_status.affected_items:
-        st.caption(f"Schaltet frei: **{', '.join(cur_status.affected_items)}**")
-    if cur_status and cur_status.is_configured:
-        st.caption(f"Aktive Quelle: **{cur_status.source}**")
+    if cur_status:
+        st.caption(f"Typ: **{_TIER_BADGES.get(cur_status.key_tier, '🔑 API-Key')}**")
+        if cur_status.affected_items:
+            st.caption(f"Schaltet frei: **{', '.join(cur_status.affected_items[:6])}**")
+        if cur_status.is_configured:
+            st.caption(f"Aktive Quelle: **{cur_status.source}**")
     st.caption(
-        "Sicherheitsmodus (Write-Only wie GitHub Secrets): Bestehende Keys werden "
-        "niemals im Klartext angezeigt und immer komplett neu verschlüsselt überschrieben."
+        "Write-Only Sicherheitsmodus: Bestehende Keys werden niemals im Klartext angezeigt "
+        "und immer komplett neu verschlüsselt im Vault überschrieben."
     )
 
     secret_val = st.text_input(
@@ -129,7 +138,7 @@ def open_secret_dialog(env_name: str, settings: AppSettings) -> None:
                         entries = dlg_brain.probe_items_for_secret(clean_env)
                     level, msg = _format_probe_summary(clean_env, entries)
                 else:
-                    level, msg = "success", f"Secret `{clean_env}` verschlüsselt gespeichert (Write-Only)."
+                    level, msg = "success", f"Secret `{clean_env}` verschlüsselt im Vault gespeichert (Write-Only)."
             invalidate_ki_ui_cache()
             _set_feedback(level, msg)
             _clear_active_dialog()
@@ -147,42 +156,3 @@ def open_secret_dialog(env_name: str, settings: AppSettings) -> None:
             _clear_active_dialog()
             _set_feedback("info", f"Secret `{clean_env}` aus dem Brain-Vault entfernt.")
             st.rerun()
-
-
-def render_missing_keys_action_bar(
-    brain: KIWebsearchBrain,
-    *,
-    is_admin: bool,
-    env_filter: set[str] | None = None,
-    section_key: str,
-    statuses: list[SecretStatusEntry] | None = None,
-    active_tab_label: str | None = None,
-) -> None:
-    """Zeigt direkt klickbare `Missing Key`-Buttons zum Eintragen & sofortigen Testen."""
-    resolved = statuses if statuses is not None else brain.list_secret_statuses()
-    missing = [
-        s
-        for s in resolved
-        if not s.is_configured and s.affected_items and (env_filter is None or s.env_name in env_filter)
-    ]
-    if not missing:
-        return
-    if not is_admin:
-        names = ", ".join(s.env_name for s in missing)
-        st.caption(f"🔑 Fehlende API-Keys (Read-Only): `{names}`")
-        return
-
-    st.caption("🔑 Fehlende API-Keys — direkt auf **Missing Key** klicken zum Eintragen & Testen:")
-    for idx in range(0, len(missing), 2):
-        chunk = missing[idx : idx + 2]
-        cols = st.columns(len(chunk), vertical_alignment="center")
-        for col, entry in zip(cols, chunk, strict=True):
-            with col:
-                st.button(
-                    f"🔑 Missing Key: {entry.env_name}",
-                    key=f"ki_missing_btn_{section_key}_{entry.env_name}",
-                    help=f"Klicken zum Eintragen & Testen · Verwendet von: {', '.join(entry.affected_items)}",
-                    on_click=queue_secret_dialog_on_click,
-                    args=(entry.env_name, active_tab_label, entry.model_dump()),
-                    use_container_width=True,
-                )

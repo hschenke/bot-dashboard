@@ -21,3 +21,8 @@ class BrainStorageError(BrainError):
 
 class BrainProviderError(BrainError):
     """Fehler bei der Kommunikation mit einem KI-Provider oder Such-Tool."""
+
+
+class BrainAuthError(BrainError):
+    """Wird ausgelöst, wenn eine App nicht für das KI-Brain autorisiert ist."""
+

@@ -18,9 +18,33 @@ div[data-testid="stMetric"] {
     padding: 8px 14px;
 }
 div[data-testid="stMetric"] [data-testid="stMetricValue"] { font-size: 1.45rem !important; }
-.st-key-ki_kpi_row div[data-testid="stMetric"] { padding: 4px 10px !important; border-radius: 8px !important; min-height: 0 !important; }
-.st-key-ki_kpi_row div[data-testid="stMetric"] [data-testid="stMetricLabel"] p { font-size: 0.74rem !important; line-height: 1.15 !important; }
-.st-key-ki_kpi_row div[data-testid="stMetric"] [data-testid="stMetricValue"] { font-size: 1.05rem !important; line-height: 1.2 !important; }
+
+/* Kompakte KPI-Kacheln (Dashboard & KI-Brain) */
+.st-key-overview_kpi_row div[data-testid="stMetric"],
+.st-key-ki_kpi_row div[data-testid="stMetric"] {
+    padding: 5px 10px !important;
+    border-radius: 9px !important;
+    min-height: 0 !important;
+}
+.st-key-overview_kpi_row div[data-testid="stMetric"] [data-testid="stMetricLabel"] p,
+.st-key-ki_kpi_row div[data-testid="stMetric"] [data-testid="stMetricLabel"] p {
+    font-size: 0.74rem !important;
+    line-height: 1.15 !important;
+    white-space: nowrap !important;
+}
+.st-key-overview_kpi_row div[data-testid="stMetric"] [data-testid="stMetricValue"],
+.st-key-ki_kpi_row div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+    font-size: 1.08rem !important;
+    line-height: 1.2 !important;
+}
+
+/* Dashboard Action-Buttons direkt unter den KPI-Boxen */
+.st-key-overview_action_row div[data-testid="stButton"] > button {
+    min-height: 36px !important;
+    height: 36px !important;
+    font-size: 0.88rem !important;
+    padding: 0.3rem 0.55rem !important;
+}
 
 /* Einheitliche Button-, Link- & Selectbox-Höhe für saubere horizontale Linien */
 div[data-testid="stButton"] > button,
@@ -44,41 +68,26 @@ div[data-testid="stSelectbox"] div[data-baseweb="select"] > div {
 }
 
 /* Kompakte Feedback-Banner ohne vertikales Aufblähen */
-div[data-testid="stAlert"] {
-    margin-bottom: 0.4rem !important;
-}
+div[data-testid="stAlert"] { margin-bottom: 0.4rem !important; }
 div[data-testid="stAlert"] > div {
     padding: 0.55rem 0.9rem !important;
     border-radius: 10px !important;
     min-height: 42px !important;
 }
-div[data-testid="stAlert"] p {
-    margin: 0 !important;
-    font-size: 0.92rem !important;
-    line-height: 1.35 !important;
-}
-div[data-testid="stSpinner"] {
-    margin: 0.25rem 0 !important;
-}
+div[data-testid="stAlert"] p { margin: 0 !important; font-size: 0.92rem !important; line-height: 1.35 !important; }
+div[data-testid="stSpinner"] { margin: 0.25rem 0 !important; }
 
 /* Kompakte App-Cards im Dashboard */
-div[data-testid="stVerticalBlockBorderWrapper"] {
-    border-radius: 12px;
-}
-div[data-testid="stVerticalBlockBorderWrapper"] > div {
-    padding: 0.9rem 1.1rem !important;
-}
-div[data-testid="stVerticalBlockBorderWrapper"] ul {
-    margin: 0.35rem 0 !important;
-    padding-left: 1.15rem !important;
-}
-div[data-testid="stVerticalBlockBorderWrapper"] li {
-    margin: 0.2rem 0 !important;
-    line-height: 1.45 !important;
-    font-size: 0.92rem !important;
-}
+div[data-testid="stVerticalBlockBorderWrapper"] { border-radius: 12px; }
+div[data-testid="stVerticalBlockBorderWrapper"] > div { padding: 0.9rem 1.1rem !important; }
+div[data-testid="stVerticalBlockBorderWrapper"] ul { margin: 0.35rem 0 !important; padding-left: 1.15rem !important; }
+div[data-testid="stVerticalBlockBorderWrapper"] li { margin: 0.2rem 0 !important; line-height: 1.45 !important; font-size: 0.92rem !important; }
 
-/* Sidebar Navigation: Exakte vertikale Ausrichtung aller Icons & Labels */
+/* Sidebar Navigation: Exakte vertikale Ausrichtung aller Icons & Labels + Trennlinie vor Logout */
+section[data-testid="stSidebar"] hr {
+    margin: 0.85rem 0 !important;
+    border-color: rgba(148, 163, 184, 0.24) !important;
+}
 section[data-testid="stSidebar"] :is([class*="st-key-nav_page_"], [class*="st-key-nav_logout_btn"]) div[data-testid="stButton"] > button {
     min-height: 48px !important;
     height: 48px !important;
@@ -138,6 +147,43 @@ section[data-testid="stSidebar"] [class*="st-key-nav_page_"] div[data-testid="st
         padding-top: 2rem;
         padding-bottom: 1.5rem;
     }
+    /* Dashboard KPIs & Check All / Wake All bleiben mobil nebeneinander */
+    .st-key-overview_kpi_row div[data-testid="stHorizontalBlock"],
+    .st-key-overview_action_row div[data-testid="stHorizontalBlock"] {
+        display: flex !important;
+        flex-direction: row !important;
+        flex-wrap: nowrap !important;
+        gap: 0.45rem !important;
+    }
+    .st-key-overview_kpi_row :is([data-testid="stColumn"], [data-testid="column"]),
+    .st-key-overview_action_row :is([data-testid="stColumn"], [data-testid="column"]) {
+        width: auto !important;
+        min-width: 0 !important;
+        max-width: none !important;
+        flex: 1 1 0 !important;
+        flex-basis: 0 !important;
+    }
+    .st-key-overview_kpi_row div[data-testid="stMetric"] {
+        padding: 4px 6px !important;
+        border-radius: 8px !important;
+    }
+    .st-key-overview_kpi_row div[data-testid="stMetric"] [data-testid="stMetricLabel"] {
+        min-height: 0 !important;
+    }
+    .st-key-overview_kpi_row div[data-testid="stMetric"] [data-testid="stMetricLabel"] p {
+        font-size: 0.66rem !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+    }
+    .st-key-overview_kpi_row div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+        font-size: 0.94rem !important;
+    }
+    .st-key-overview_action_row div[data-testid="stButton"] > button {
+        min-height: 34px !important;
+        height: 34px !important;
+        font-size: 0.80rem !important;
+        padding: 0.2rem 0.35rem !important;
+    }
     section[data-testid="stSidebar"] :is([class*="st-key-nav_page_"], [class*="st-key-nav_logout_btn"]) div[data-testid="stButton"] > button {
         min-height: 52px !important;
         height: 52px !important;
@@ -148,10 +194,7 @@ section[data-testid="stSidebar"] [class*="st-key-nav_page_"] div[data-testid="st
 
 /* Kompakte, horizontal scrollbare Markdown-Tabellen (z. B. Health-Übersicht) */
 div[data-testid="stTable"],
-div[data-testid="stTable"] > div {
-    overflow-x: auto !important;
-    max-width: 100% !important;
-}
+div[data-testid="stTable"] > div { overflow-x: auto !important; max-width: 100% !important; }
 div[data-testid="stElementContainer"]:has(.bot-dash-health-marker)
     + div[data-testid="stElementContainer"]
     table[data-testid="stTableStyledTable"] :is(th, td, [data-testid="stMarkdownContainer"] p) {
@@ -166,7 +209,7 @@ div[data-testid="stElementContainer"]:has(:is(.ki-task-backdrop, #ki-brain-insta
     height: 0 !important; margin: 0 !important; padding: 0 !important;
 }
 
-/* KI-View Task-Overlay: blockierter Hintergrund + lesbare Fortschritts-Box im Vordergrund */
+/* Task-Overlay: blockierter Hintergrund + lesbare Fortschritts-Box im Vordergrund */
 .ki-task-backdrop,
 #ki-brain-instant-backdrop.active {
     position: fixed; inset: 0; width: 100vw; height: 100vh;

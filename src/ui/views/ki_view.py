@@ -1,11 +1,9 @@
-"""KI-View: Zentrales KI & Websearch Brain Control Center."""
+"""KI-Brain: Zentrales KI & Websearch Brain Control Center."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
-
 import streamlit as st
-from ki_brain import BrainError, BrainTier, KIWebsearchBrain
+from ki_brain import BrainError, KIWebsearchBrain
 
 from src.ai.brain_bridge import create_dashboard_brain
 from src.config.settings import AppSettings
@@ -13,31 +11,36 @@ from src.domain.enums import AuthRole
 from src.ui.views.ki_models_tab import render_models_tab
 from src.ui.views.ki_playground_tab import render_playground_tab
 from src.ui.views.ki_secret_dialog import render_active_secret_dialog
-from src.ui.views.ki_secrets_section import render_secrets_manager_expander
 from src.ui.views.ki_sequences_tab import render_sequences_tab
 from src.ui.views.ki_task_overlay import (
     filter_retryable_excluded_models,
-    format_cleanup_message,
-    format_discover_feedback,
-    format_unblock_feedback,
+    format_pipeline_feedback,
     invalidate_ki_ui_cache,
     load_cached_ui_state,
     render_instant_overlay_bridge,
     run_with_task_overlay,
 )
 from src.ui.views.ki_tools_tab import render_tools_tab
+from src.ui.views.ki_vault_tab import render_vault_tab
 
-KI_TAB_SEQ = "🎯 Sequenzen (Fast / Standard / Deep)"
-KI_TAB_MODELS = "🧩 KI-Modelle"
-KI_TAB_TOOLS = "🔧 Websearch & Tools"
-KI_TAB_PLAY = "🧪 Live-Test & Bots-API"
-KI_TAB_LABELS: tuple[str, ...] = (KI_TAB_SEQ, KI_TAB_MODELS, KI_TAB_TOOLS, KI_TAB_PLAY)
+KI_TAB_SEQ = "🎯 Sequencing"
+KI_TAB_MODELS = "🧩 KI"
+KI_TAB_TOOLS = "🔧 Tools"
+KI_TAB_VAULT = "🔐 Vault"
+KI_TAB_CHECK = "🧪 Check"
+KI_TAB_LABELS: tuple[str, ...] = (
+    KI_TAB_SEQ,
+    KI_TAB_MODELS,
+    KI_TAB_TOOLS,
+    KI_TAB_VAULT,
+    KI_TAB_CHECK,
+)
 
 
 def _open_ki_tabs() -> tuple[object, ...]:
-    """Rendert Tabs mit stabiler ID ohne `on_change="rerun"` (0 ms Client-Wechsel, Tab bleibt erhalten)."""
+    """Rendert die 5 KI-Brain-Tabs mit stabiler Client-ID ohne Server-Reload beim Wechsel."""
     try:
-        return tuple(st.tabs(list(KI_TAB_LABELS), key="ki_view_tabs"))
+        return tuple(st.tabs(list(KI_TAB_LABELS), key="ki_brain_tabs"))
     except TypeError:
         return tuple(st.tabs(list(KI_TAB_LABELS)))
 
@@ -55,109 +58,91 @@ def _render_feedback_banner() -> None:
         getattr(st, level if level in {"success", "warning", "error"} else "info")(msg)
 
 
-def _handle_top_actions(
+def _run_pipeline_action(
     brain: KIWebsearchBrain,
     *,
-    run_sync: bool,
-    run_bench: bool,
-    run_clean: bool,
+    run_discover: bool,
+    run_benchmark: bool,
     run_unblock: bool,
+    run_prune: bool,
     exclude_previews: bool,
-    retry_excluded: bool = False,
+    retry_excluded: bool,
+    include_paid: bool,
 ) -> None:
-    if run_bench:
-        try:
-            report = run_with_task_overlay(
-                "🚀 Benchmark & Optimize",
-                "Teste aktive Tools & KI-Modelle live und optimiere Fast / Standard / Deep...",
-                lambda cb: brain.run_benchmark(on_progress=cb),
-            )
-            fast_top = " → ".join(report.sequences[BrainTier.FAST.value].search_tool_sequence[:3])
-            _flash("success", f"Benchmark & Optimize `{report.run_id}` abgeschlossen: {report.healthy_tools_count} Tools & {report.healthy_models_count} Modelle OK. Fast-Top: `{fast_top or '–'}`")
-        except BrainError as exc:
-            _flash("error", f"Benchmark & Optimize fehlgeschlagen: {exc}")
-        invalidate_ki_ui_cache()
+    if not any((run_discover, run_benchmark, run_unblock, run_prune)):
+        _flash("warning", "Kein Ablauf-Schritt ausgewählt — bitte unter 'Ablauf-Optionen' mindestens einen Schritt aktivieren.")
         st.rerun()
-    if run_sync:
-        try:
-            s = run_with_task_overlay(
-                "🔎 Discover",
-                "Prüfe Quota-Recovery sowie neue Gemini-/Groq-/OpenRouter-Modelle & searx.space...",
-                lambda cb: brain.auto_sync(
-                    verify_discovered=True,
-                    exclude_previews=exclude_previews,
-                    retry_excluded=retry_excluded,
-                    on_progress=cb,
-                ),
-            )
-            _flash(*format_discover_feedback(s))
-        except BrainError as exc:
-            _flash("error", f"Discover fehlgeschlagen: {exc}")
-        invalidate_ki_ui_cache()
-        st.rerun()
-    if run_clean:
-        try:
-            def _clean_task(cb: Callable[[float, str], None]) -> tuple[str, str]:
-                cb(0.35, "Bereinige Einträge mit Status Error, Quota 429 oder HTTP 202 (übrige Blocked bleiben erhalten)...")
-                res = format_cleanup_message(brain)
-                cb(1.0, "Bereinigung abgeschlossen.")
-                return res
-            _flash(*run_with_task_overlay("🧹 Prune Failing", "Prüfe Modelle & Tools auf Status Error, Quota 429 oder HTTP 202...", _clean_task))
-        except BrainError as exc:
-            _flash("error", f"Prune Failing fehlgeschlagen: {exc}")
-        invalidate_ki_ui_cache()
-        st.rerun()
-    if run_unblock:
-        try:
-            summary = run_with_task_overlay(
-                "🔓 Unblock Tools",
-                "Wende Rules an, prüfe searx.space-Instanzen & teste Blocked-Tools live...",
-                lambda cb: brain.resolve_blocked_tools(on_progress=cb),
-            )
-            _flash(*format_unblock_feedback(summary))
-        except BrainError as exc:
-            _flash("error", f"Unblock Tools fehlgeschlagen: {exc}")
-        invalidate_ki_ui_cache()
-        st.rerun()
+    try:
+        summary = run_with_task_overlay(
+            "🚀 Sync & Optimize",
+            "Starte kombinierten KI-Brain-Ablauf (Discover → Benchmark → Unblock → Prune)...",
+            lambda cb: brain.run_full_pipeline(
+                run_discover=run_discover,
+                run_benchmark=run_benchmark,
+                run_unblock=run_unblock,
+                run_prune=run_prune,
+                exclude_previews=exclude_previews,
+                retry_excluded=retry_excluded,
+                include_paid=include_paid,
+                on_progress=cb,
+            ),
+        )
+        _flash(*format_pipeline_feedback(summary))
+    except (BrainError, Exception) as exc:  # noqa: BLE001
+        _flash("error", f"Sync & Optimize fehlgeschlagen: {exc}")
+    invalidate_ki_ui_cache()
+    st.rerun()
 
 
 def render_ki_view(settings: AppSettings, role: AuthRole = AuthRole.ADMIN) -> None:
-    """Rendert das zentrale KI & Websearch Brain zur Modell-, Tool- & Sequenz-Steuerung."""
-    st.header("🧠 KI & Websearch Brain")
-    st.caption("Zentrale Schaltstelle für alle kostenfreien KI-Modelle & Websearch-Tools mit automatischem Benchmark-Sequencer für Fast, Standard & Deep.")
+    """Rendert das zentrale KI-Brain zur Modell-, Tool-, Vault- & Sequenz-Steuerung."""
+    st.header("🧠 KI-Brain")
+    st.caption(
+        "Zentrale Schaltstelle für kostenfreie & optionale Paid-KI-Modelle, Websearch-Tools, "
+        "API-Key-Vault und automatischen Benchmark-Sequencer (Fast, Standard & Deep)."
+    )
 
     is_admin = role == AuthRole.ADMIN
     brain = create_dashboard_brain(settings)
     try:
         ui_state, secret_statuses = load_cached_ui_state(brain)
-        models, tools, seqs, latest_bench = ui_state.models, ui_state.tools, ui_state.sequences, ui_state.latest_benchmark
+        models, tools, seqs, latest_bench = (
+            ui_state.models,
+            ui_state.tools,
+            ui_state.sequences,
+            ui_state.latest_benchmark,
+        )
         with st.container(key="ki_kpi_row"):
             k1, k2, k3, k4 = st.columns(4)
             with k1:
                 st.metric("KI-Modelle", f"{sum(1 for m in models if m.enabled)} / {len(models)}")
             with k2:
-                st.metric("Websearch & Tools", f"{sum(1 for t in tools if t.enabled)} / {len(tools)}")
+                st.metric("Tools", f"{sum(1 for t in tools if t.enabled)} / {len(tools)}")
             with k3:
                 st.metric("Tier-Profile", f"{len(seqs)} (Fast / Std / Deep)")
             with k4:
-                bench_txt = f"{latest_bench.healthy_tools_count}T / {latest_bench.healthy_models_count}M OK" if latest_bench else "Noch kein Testlauf"
+                bench_txt = (
+                    f"{latest_bench.healthy_tools_count}T / {latest_bench.healthy_models_count}M OK"
+                    if latest_bench
+                    else "Noch kein Testlauf"
+                )
                 st.metric("Letzter Testlauf", bench_txt, help="Letztes Benchmark-Ergebnis (gesunde Tools / Modelle).")
 
-        b1, b2, b3, b4 = st.columns(4, vertical_alignment="center")
-        with b1:
-            run_sync = st.button("🔎 Discover", key="ki_top_btn_sync", disabled=not is_admin, use_container_width=True, help="Prüft Quota-429-Recovery und sucht neue Modelle (Gemini, Groq, OpenRouter) & searx.space-Instanzen.")
-        with b2:
-            run_bench = st.button("🚀 Benchmark & Optimize", key="ki_top_btn_bench", disabled=not is_admin, use_container_width=True, help="Testet alle aktivierten Modelle & Tools live und optimiert Fast, Standard & Deep.")
-        with b3:
-            run_clean = st.button("🧹 Prune Failing", key="ki_top_btn_clean", disabled=not is_admin, use_container_width=True, help="Entfernt Modelle/Tools mit Status Error, Quota 429 oder HTTP 202 dauerhaft. Sonstige Blocked-Tools bleiben erhalten.")
-        with b4:
-            run_unblock = st.button("🔓 Unblock Tools", key="ki_top_btn_unblock", disabled=not is_admin, use_container_width=True, help="Wendet Rules an, prüft searx.space-Instanzen & testet Blocked-Tools live.")
+        run_pipeline = st.button(
+            "🚀 Sync & Optimize",
+            key="ki_top_btn_pipeline",
+            disabled=not is_admin,
+            use_container_width=True,
+            help="Führt den kompletten Ablauf aus: Discover → Benchmark & Optimize → Unblock Tools → Prune Failing.",
+        )
 
         c_prev, c_retry = st.columns(2)
         with c_prev:
             exclude_previews = st.checkbox(
-                "Preview- & Experimental-Modelle bei 'Discover' ausschließen",
-                value=True, key="ki_exclude_previews", disabled=not is_admin,
+                "Preview- & Experimental-Modelle ausschließen",
+                value=True,
+                key="ki_exclude_previews",
+                disabled=not is_admin,
                 help="Ignoriert Preview-/Experimental-Modelle inkl. Deep-Research-Previews (kanonischer Deep Research Agent bleibt erhalten).",
             )
         with c_retry:
@@ -165,38 +150,77 @@ def render_ki_view(settings: AppSettings, role: AuthRole = AuthRole.ADMIN) -> No
                 ui_state.excluded_model_ids, ui_state.excluded_model_reasons, exclude_previews=exclude_previews
             )
             retry_excluded = st.checkbox(
-                f"Ausgeschlossene Modelle bei 'Discover' erneut prüfen ({len(retry_targets)})",
-                value=False, key="ki_retry_excluded", disabled=(not is_admin or not retry_targets),
-                help="Prüft zuvor ausgeschlossene/Quota-429-Modelle beim Discover erneut (z. B. nach Bezahlkonto-Upgrade).",
+                f"Ausgeschlossene Modelle erneut prüfen ({len(retry_targets)})",
+                value=False,
+                key="ki_retry_excluded",
+                disabled=(not is_admin or not retry_targets),
+                help="Prüft zuvor ausgeschlossene/Quota-429-Modelle beim Discover erneut.",
             )
+
+        with st.expander("⚙️ Ablauf-Optionen (Schritte & Paid-Check)", expanded=False):
+            s1, s2, s3, s4 = st.columns(4)
+            with s1:
+                step_discover = st.checkbox("🔎 Discover", value=True, key="ki_opt_discover", disabled=not is_admin)
+            with s2:
+                step_bench = st.checkbox("🚀 Benchmark", value=True, key="ki_opt_benchmark", disabled=not is_admin)
+            with s3:
+                step_unblock = st.checkbox("🔓 Unblock", value=True, key="ki_opt_unblock", disabled=not is_admin)
+            with s4:
+                step_prune = st.checkbox("🧹 Prune Failing", value=True, key="ki_opt_prune", disabled=not is_admin)
+            include_paid = st.checkbox(
+                "💳 Paid-Tier-Modelle im Benchmark mitprüfen (nur mit Paid-Key)",
+                value=False,
+                key="ki_opt_include_paid",
+                disabled=not is_admin,
+                help="Standard ist strikt 0% Kosten. Aktivieren, um Paid-Only-Modelle über den Paid-Tier-Key mit zu testen.",
+            )
+
         if is_admin:
             render_instant_overlay_bridge()
 
         # Overlay, Spinner & Alerts strikt außerhalb schmaler Spalten rendern
-        _handle_top_actions(brain, run_sync=run_sync, run_bench=run_bench, run_clean=run_clean, run_unblock=run_unblock, exclude_previews=exclude_previews, retry_excluded=retry_excluded)
+        if run_pipeline:
+            _run_pipeline_action(
+                brain,
+                run_discover=step_discover,
+                run_benchmark=step_bench,
+                run_unblock=step_unblock,
+                run_prune=step_prune,
+                exclude_previews=exclude_previews,
+                retry_excluded=retry_excluded,
+                include_paid=include_paid,
+            )
+
         _render_feedback_banner()
-        render_secrets_manager_expander(brain, is_admin=is_admin, statuses=secret_statuses)
         st.caption(f"Speicher-Backend: `{brain.backend_name}`" + ("" if is_admin else " · Modus: Read-Only"))
 
-        tab_seq, tab_mod, tab_tool, tab_play = _open_ki_tabs()
+        tab_seq, tab_mod, tab_tool, tab_vault, tab_check = _open_ki_tabs()
         with tab_seq:
             render_sequences_tab(brain, is_admin=is_admin, models=models, tools=tools, sequences=seqs)
         with tab_mod:
             render_models_tab(
-                brain, is_admin=is_admin, models=models, secret_statuses=secret_statuses,
-                active_tab_label=KI_TAB_MODELS, excluded_model_ids=ui_state.excluded_model_ids,
-                excluded_model_reasons=ui_state.excluded_model_reasons, exclude_previews=exclude_previews,
+                brain,
+                is_admin=is_admin,
+                models=models,
+                excluded_model_ids=ui_state.excluded_model_ids,
+                excluded_model_reasons=ui_state.excluded_model_reasons,
+                exclude_previews=exclude_previews,
             )
         with tab_tool:
             render_tools_tab(
                 brain,
                 is_admin=is_admin,
                 tools=tools,
-                secret_statuses=secret_statuses,
-                active_tab_label=KI_TAB_TOOLS,
                 usage_quotas=ui_state.usage_quotas,
             )
-        with tab_play:
+        with tab_vault:
+            render_vault_tab(
+                brain,
+                is_admin=is_admin,
+                statuses=secret_statuses,
+                app_client_records=ui_state.app_clients,
+            )
+        with tab_check:
             render_playground_tab(brain, is_admin=is_admin, ui_state=ui_state)
     finally:
         brain.close()

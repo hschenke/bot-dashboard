@@ -35,32 +35,32 @@ def _has_waking_candidate(snap: AppFleetSnapshot) -> bool:
     )
 
 
-def _render_header(snapshots: list[AppFleetSnapshot], role: AuthRole) -> str | None:
-    has_sleeping = any(_has_waking_candidate(s) for s in snapshots)
-    show_wake_all = role == AuthRole.ADMIN and has_sleeping
-    cols = st.columns([2.4, 1.0, 1.1] if show_wake_all else [3.4, 1.1], vertical_alignment="center")
-    clicked: str | None = None
-    with cols[0]:
-        st.title("Holli Dashboard")
-    with cols[1]:
-        if st.button("⚡ Check All", key="overview_top_btn_check_all", use_container_width=True):
-            clicked = "check_all"
-    if show_wake_all:
-        with cols[2]:
-            if st.button("☀️ Wake All", key="overview_top_btn_wake_all", use_container_width=True):
-                clicked = "wake_all"
-    return clicked
-
-
 def _render_fleet_kpi_row(snapshots: list[AppFleetSnapshot]) -> None:
     online_apps = sum(1 for s in snapshots if s.overall_status == HealthStatus.ONLINE)
     awake_urls = sum(1 for s in snapshots if s.url_check.is_streamlit_awake)
     connected_dbs = sum(1 for s in snapshots if s.db_check.status != HealthStatus.OFFLINE)
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Apps Online", f"{online_apps} / {len(snapshots)}")
-    col2.metric("Apps Awake", f"{awake_urls} / {len(snapshots)}")
-    col3.metric("DBs Online", f"{connected_dbs} / {len(snapshots)}")
+    with st.container(key="overview_kpi_row"):
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Apps Online", f"{online_apps} / {len(snapshots)}")
+        col2.metric("Apps Awake", f"{awake_urls} / {len(snapshots)}")
+        col3.metric("DBs Online", f"{connected_dbs} / {len(snapshots)}")
+
+
+def _render_action_buttons(snapshots: list[AppFleetSnapshot], role: AuthRole) -> str | None:
+    has_sleeping = any(_has_waking_candidate(s) for s in snapshots)
+    show_wake_all = role == AuthRole.ADMIN and has_sleeping
+    clicked: str | None = None
+    with st.container(key="overview_action_row"):
+        cols = st.columns(2, vertical_alignment="center")
+        with cols[0]:
+            if st.button("⚡ Check All", key="overview_top_btn_check_all", use_container_width=True):
+                clicked = "check_all"
+        if show_wake_all:
+            with cols[1]:
+                if st.button("☀️ Wake All", key="overview_top_btn_wake_all", use_container_width=True):
+                    clicked = "wake_all"
+    return clicked
 
 
 def _format_app_table_cell(snap: AppFleetSnapshot) -> str:
@@ -181,16 +181,17 @@ def render_overview_view(
     repository: SqlDashboardRepository,
     role: AuthRole = AuthRole.READONLY,
 ) -> None:
-    """Rendert die zentrale Dashboard-Übersicht (KPIs, URL-Status & Cloud-Worker)."""
-    header_action = _render_header(snapshots, role)
+    """Rendert die zentrale Dashboard-Übersicht (kompakte KPIs, Action-Buttons, URL-Status & Worker)."""
+    st.title("Holli Dashboard")
+    _render_fleet_kpi_row(snapshots)
+    action = _render_action_buttons(snapshots, role)
     render_instant_overlay_bridge()
-    if header_action == "check_all":
+    if action == "check_all":
         run_check_all_action(coordinator, repository)
-    elif header_action == "wake_all":
+    elif action == "wake_all":
         run_wake_all_action(snapshots, coordinator, repository)
     render_feedback_banner()
 
-    _render_fleet_kpi_row(snapshots)
     st.divider()
     _render_url_table_section(snapshots)
     st.divider()

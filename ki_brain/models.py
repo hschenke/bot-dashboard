@@ -16,11 +16,55 @@ def _is_placeholder_secret(value: str) -> bool:
     return not clean or clean.startswith(("your_", "dein_")) or clean == "aizasy..."
 
 
+def derive_tier_key_envs(api_key_env: str, paid_api_key_env: str = "") -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Leitet `(free_key_envs, paid_key_envs)` konsistent für Free-Tier & Paid-Tier ab."""
+    base = (api_key_env or "").strip().upper()
+    explicit_paid = (paid_api_key_env or "").strip().upper()
+    if not base and not explicit_paid:
+        return (), ()
+
+    stem = base
+    for suffix in ("_FREE_API_KEY", "_PAID_API_KEY", "_API_KEY"):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    else:
+        stem = ""
+
+    free_list: list[str] = []
+    if stem:
+        free_list.append(f"{stem}_FREE_API_KEY")
+        if base and not base.endswith("_PAID_API_KEY") and base not in free_list:
+            free_list.append(base)
+        legacy = f"{stem}_API_KEY"
+        if legacy not in free_list:
+            free_list.append(legacy)
+    elif base and not base.endswith("_PAID_API_KEY"):
+        free_list.append(base)
+
+    paid_list: list[str] = []
+    if explicit_paid:
+        paid_list.append(explicit_paid)
+    if stem:
+        derived_paid = f"{stem}_PAID_API_KEY"
+        if derived_paid not in paid_list:
+            paid_list.append(derived_paid)
+        legacy = f"{stem}_API_KEY"
+        if legacy not in paid_list:
+            paid_list.append(legacy)
+    elif base and base not in paid_list:
+        paid_list.append(base)
+
+    return tuple(free_list), tuple(paid_list)
+
+
 @dataclass(frozen=True)
 class BrainSecrets:
     """Sicheres API-Key-Container-Objekt (`repr=False` auf allen Geheimnissen)."""
 
     gemini_api_key: str = field(default="", repr=False)
+    gemini_free_api_key: str = field(default="", repr=False)
+    gemini_paid_api_key: str = field(default="", repr=False)
     browserbase_api_key: str = field(default="", repr=False)
     browserbase_project_id: str = ""
     brave_search_api_key: str = field(default="", repr=False)
@@ -29,9 +73,13 @@ class BrainSecrets:
     reddit_client_id: str = field(default="", repr=False)
     reddit_client_secret: str = field(default="", repr=False)
     groq_api_key: str = field(default="", repr=False)
+    groq_paid_api_key: str = field(default="", repr=False)
     openrouter_api_key: str = field(default="", repr=False)
+    openrouter_paid_api_key: str = field(default="", repr=False)
     cerebras_api_key: str = field(default="", repr=False)
+    cerebras_paid_api_key: str = field(default="", repr=False)
     mistral_api_key: str = field(default="", repr=False)
+    mistral_paid_api_key: str = field(default="", repr=False)
     extra_keys: dict[str, str] = field(default_factory=dict, repr=False)
 
     def resolve_key(self, env_name: str) -> str:
@@ -41,6 +89,8 @@ class BrainSecrets:
             return ""
         mapping = {
             "GEMINI_API_KEY": self.gemini_api_key,
+            "GEMINI_FREE_API_KEY": self.gemini_free_api_key,
+            "GEMINI_PAID_API_KEY": self.gemini_paid_api_key,
             "BROWSERBASE_API_KEY": self.browserbase_api_key,
             "BRAVE_SEARCH_API_KEY": self.brave_search_api_key or os.getenv("BRAVE_API_KEY", ""),
             "TAVILY_API_KEY": self.tavily_api_key,
@@ -48,9 +98,13 @@ class BrainSecrets:
             "REDDIT_CLIENT_ID": self.reddit_client_id,
             "REDDIT_CLIENT_SECRET": self.reddit_client_secret,
             "GROQ_API_KEY": self.groq_api_key,
+            "GROQ_PAID_API_KEY": self.groq_paid_api_key,
             "OPENROUTER_API_KEY": self.openrouter_api_key,
+            "OPENROUTER_PAID_API_KEY": self.openrouter_paid_api_key,
             "CEREBRAS_API_KEY": self.cerebras_api_key,
+            "CEREBRAS_PAID_API_KEY": self.cerebras_paid_api_key,
             "MISTRAL_API_KEY": self.mistral_api_key,
+            "MISTRAL_PAID_API_KEY": self.mistral_paid_api_key,
         }
         val = self.extra_keys.get(clean) or mapping.get(clean) or os.getenv(clean, "")
         return "" if _is_placeholder_secret(val) else val.strip()
@@ -58,11 +112,84 @@ class BrainSecrets:
     def has_key(self, env_name: str) -> bool:
         return bool(self.resolve_key(env_name))
 
+    def resolve_any_gemini_key(self) -> str:
+        """Liefert den ersten verfügbaren Gemini-Key (Free -> Legacy -> Paid) für kostenfreie Metadaten."""
+        for env in ("GEMINI_FREE_API_KEY", "GEMINI_API_KEY", "GEMINI_PAID_API_KEY"):
+            val = self.resolve_key(env)
+            if val:
+                return val
+        return ""
+
+    def resolve_gemini_key(self, *, allow_paid: bool = False) -> tuple[str, str]:
+        """Löst Gemini-Key strikt tier-getrennt auf (0%-Modus nutzt niemals `GEMINI_PAID_API_KEY`)."""
+        candidates = (
+            ("GEMINI_PAID_API_KEY", "GEMINI_API_KEY", "GEMINI_FREE_API_KEY")
+            if allow_paid
+            else ("GEMINI_FREE_API_KEY", "GEMINI_API_KEY")
+        )
+        for env in candidates:
+            val = self.resolve_key(env)
+            if val:
+                return val, env
+        return "", candidates[0]
+
+    def resolve_model_key_with_env(
+        self, model: AIModelSpec, *, allow_paid: bool = False
+    ) -> tuple[str, str]:
+        """Löst den passenden Free-Tier- oder Paid-Tier-Key für ein KI-Modell auf."""
+        if not model.requires_api_key:
+            return "", ""
+        free_envs, paid_envs = derive_tier_key_envs(model.api_key_env, model.paid_api_key_env)
+        if allow_paid:
+            ordered = list(paid_envs)
+            if model.is_free:
+                for env in free_envs:
+                    if env not in ordered:
+                        ordered.append(env)
+        else:
+            if not model.is_free:
+                return "", (paid_envs[0] if paid_envs else model.api_key_env)
+            ordered = list(free_envs)
+        for env in ordered:
+            val = self.resolve_key(env)
+            if val:
+                return val, env
+        return "", (ordered[0] if ordered else model.api_key_env)
+
+    def resolve_model_key(self, model: AIModelSpec, *, allow_paid: bool = False) -> str:
+        val, _ = self.resolve_model_key_with_env(model, allow_paid=allow_paid)
+        return val
+
+    def has_model_key(self, model: AIModelSpec, *, allow_paid: bool = False) -> bool:
+        if not model.requires_api_key:
+            return True
+        return bool(self.resolve_model_key(model, allow_paid=allow_paid))
+
+    def resolve_tool_key(self, tool: ToolSpec, *, allow_paid: bool = False) -> str:
+        """Löst den API-Key eines Tools auf (inkl. Gemini Free-/Paid-Tier-Trennung)."""
+        if not tool.requires_api_key:
+            return ""
+        clean = (tool.api_key_env or "").strip().upper()
+        if clean in {"GEMINI_API_KEY", "GEMINI_FREE_API_KEY", "GEMINI_PAID_API_KEY"}:
+            val, _ = self.resolve_gemini_key(allow_paid=allow_paid)
+            return val
+        return self.resolve_key(clean)
+
+    def has_tool_key(self, tool: ToolSpec, *, allow_paid: bool = False) -> bool:
+        if not tool.requires_api_key:
+            return True
+        return bool(self.resolve_tool_key(tool, allow_paid=allow_paid))
+
     def with_extra_keys(self, overrides: dict[str, str]) -> BrainSecrets:
         """Erstellt eine neue `BrainSecrets`-Instanz mit zusammengeführten verschlüsselten DB-Keys."""
-        merged = {**self.extra_keys, **{k.strip().upper(): v.strip() for k, v in overrides.items() if v.strip()}}
+        merged = {
+            **self.extra_keys,
+            **{k.strip().upper(): v.strip() for k, v in overrides.items() if v.strip()},
+        }
         return BrainSecrets(
             gemini_api_key=self.gemini_api_key,
+            gemini_free_api_key=self.gemini_free_api_key,
+            gemini_paid_api_key=self.gemini_paid_api_key,
             browserbase_api_key=self.browserbase_api_key,
             browserbase_project_id=self.browserbase_project_id,
             brave_search_api_key=self.brave_search_api_key,
@@ -71,18 +198,24 @@ class BrainSecrets:
             reddit_client_id=self.reddit_client_id,
             reddit_client_secret=self.reddit_client_secret,
             groq_api_key=self.groq_api_key,
+            groq_paid_api_key=self.groq_paid_api_key,
             openrouter_api_key=self.openrouter_api_key,
+            openrouter_paid_api_key=self.openrouter_paid_api_key,
             cerebras_api_key=self.cerebras_api_key,
+            cerebras_paid_api_key=self.cerebras_paid_api_key,
             mistral_api_key=self.mistral_api_key,
+            mistral_paid_api_key=self.mistral_paid_api_key,
             extra_keys=merged,
         )
 
     @classmethod
     def from_env(cls) -> BrainSecrets:
-        """Lädt bekannte optionale Free-Tier-Keys sicher aus Umgebungsvariablen."""
+        """Lädt bekannte optionale Free-/Paid-Tier-Keys sicher aus Umgebungsvariablen."""
         brave_val = os.getenv("BRAVE_SEARCH_API_KEY", "").strip() or os.getenv("BRAVE_API_KEY", "").strip()
         return cls(
             gemini_api_key=os.getenv("GEMINI_API_KEY", "").strip(),
+            gemini_free_api_key=os.getenv("GEMINI_FREE_API_KEY", "").strip(),
+            gemini_paid_api_key=os.getenv("GEMINI_PAID_API_KEY", "").strip(),
             browserbase_api_key=os.getenv("BROWSERBASE_API_KEY", "").strip(),
             browserbase_project_id=os.getenv("BROWSERBASE_PROJECT_ID", "").strip(),
             brave_search_api_key=brave_val,
@@ -91,9 +224,13 @@ class BrainSecrets:
             reddit_client_id=os.getenv("REDDIT_CLIENT_ID", "").strip(),
             reddit_client_secret=os.getenv("REDDIT_CLIENT_SECRET", "").strip(),
             groq_api_key=os.getenv("GROQ_API_KEY", "").strip(),
+            groq_paid_api_key=os.getenv("GROQ_PAID_API_KEY", "").strip(),
             openrouter_api_key=os.getenv("OPENROUTER_API_KEY", "").strip(),
+            openrouter_paid_api_key=os.getenv("OPENROUTER_PAID_API_KEY", "").strip(),
             cerebras_api_key=os.getenv("CEREBRAS_API_KEY", "").strip(),
+            cerebras_paid_api_key=os.getenv("CEREBRAS_PAID_API_KEY", "").strip(),
             mistral_api_key=os.getenv("MISTRAL_API_KEY", "").strip(),
+            mistral_paid_api_key=os.getenv("MISTRAL_PAID_API_KEY", "").strip(),
         )
 
 
@@ -113,6 +250,7 @@ class AIModelSpec(BaseModel):
     free_quota_unit: str = Field(default="requests", max_length=32)
     requires_api_key: bool = True
     api_key_env: str = Field(default="GEMINI_API_KEY", max_length=64)
+    paid_api_key_env: str = Field(default="", max_length=64)
     base_url: str = Field(default="", max_length=300)
     supports_structured_output: bool = True
     supports_google_search: bool = True
@@ -296,4 +434,7 @@ class SecretStatusEntry(BaseModel):
     source: str = ""
     updated_at: str = ""
     affected_items: list[str] = Field(default_factory=list)
+    category: str = Field(default="tool")
+    key_tier: str = Field(default="tool")
+
 

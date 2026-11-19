@@ -97,33 +97,78 @@ class FleetCheckCoordinator:
         wait_timeout_seconds: float,
         poll_interval_seconds: float,
         sleep_fn: Callable[[float], None],
+        on_progress: Callable[[float, str], None] | None = None,
     ) -> None:
         if not specs or wait_timeout_seconds <= 0 or poll_interval_seconds <= 0:
             return
+        total = len(specs)
         pending, elapsed = list(specs), 0.0
         while pending and elapsed < wait_timeout_seconds:
             step = min(poll_interval_seconds, wait_timeout_seconds - elapsed)
             sleep_fn(step)
             elapsed += step
+            next_pending: list[ManagedAppSpec] = []
             with ThreadPoolExecutor(max_workers=len(pending)) as pool:
-                url_results = list(pool.map(self._url_probe.check_app_url, pending))
-            pending = [s for s, r in zip(pending, url_results, strict=True) if not r.is_streamlit_awake]
+                url_results = list(pool.map(self._safe_check_app_url, pending))
+            for spec, res in zip(pending, url_results, strict=True):
+                if res is None or not res.is_streamlit_awake:
+                    next_pending.append(spec)
+            pending = next_pending
+            if on_progress:
+                awake_cnt = total - len(pending)
+                time_ratio = min(1.0, elapsed / wait_timeout_seconds)
+                done_ratio = awake_cnt / total
+                frac = min(0.88, 0.20 + 0.68 * max(done_ratio, time_ratio * 0.75))
+                if pending:
+                    names = ", ".join(s.title for s in pending)
+                    on_progress(
+                        frac,
+                        f"Waking Apps ({awake_cnt}/{total} Awake) — Booting: {names} ({int(elapsed)}s / {int(wait_timeout_seconds)}s)...",
+                    )
+                else:
+                    on_progress(0.88, f"All {total} woken App(s) report Awake — verifying fleet status...")
+
+    def _safe_check_app_url(self, spec: ManagedAppSpec) -> UrlCheckResult | None:
+        try:
+            return self._url_probe.check_app_url(spec)
+        except Exception:  # noqa: BLE001
+            return None
 
     def wake_and_refresh_apps(
         self,
         snapshots: list[AppFleetSnapshot],
         repository: SqlDashboardRepository | None = None,
-        wait_timeout_seconds: float = 9.0,
+        wait_timeout_seconds: float = 90.0,
         poll_interval_seconds: float = 3.0,
         sleep_fn: Callable[[float], None] = time.sleep,
+        on_progress: Callable[[float, str], None] | None = None,
     ) -> tuple[list[tuple[str, bool, str]], list[AppFleetSnapshot]]:
-        """Weckt schlafende Apps, wartet kurz auf den Start und aktualisiert alle Snapshots."""
+        """Weckt schlafende Apps, wartet bis alle wach sind (mit Sicherheits-Timeout) und aktualisiert alle Snapshots."""
         targets = _wake_targets(snapshots)
+        if on_progress:
+            names = ", ".join(s.spec.title for s in targets)
+            msg = f"Sending wakeup signals ({names})..." if names else "Checking sleeping Apps..."
+            on_progress(0.10, msg)
         wake_results = self.wake_sleeping_apps(snapshots)
         ok_titles = {title for title, ok, _ in wake_results if ok}
         poll_specs = [snap.spec for snap in targets if snap.spec.title in ok_titles]
-        self._wait_until_specs_awake(poll_specs, wait_timeout_seconds, poll_interval_seconds, sleep_fn)
-        return wake_results, self.check_all_apps(repository=repository)
+        if poll_specs:
+            if on_progress:
+                names = ", ".join(s.title for s in poll_specs)
+                on_progress(0.20, f"Wakeup sent — waiting for Apps to come Online ({names})...")
+            self._wait_until_specs_awake(
+                poll_specs,
+                wait_timeout_seconds,
+                poll_interval_seconds,
+                sleep_fn,
+                on_progress=on_progress,
+            )
+        if on_progress:
+            on_progress(0.92, "Refreshing status of all Apps, Workers & DBs...")
+        refreshed = self.check_all_apps(repository=repository)
+        if on_progress:
+            on_progress(1.0, "Wake All completed.")
+        return wake_results, refreshed
 
     def wake_and_refresh_single_app(
         self,

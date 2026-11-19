@@ -181,11 +181,13 @@ def test_wake_and_refresh_apps_stops_early_and_refreshes_snapshots() -> None:
         github_probe=mock_gh,
         db_inspector=mock_db,
     )
+    progress_events: list[tuple[float, str]] = []
     wake_results, updated = coord.wake_and_refresh_apps(
         [online_snap, asleep_snap],
         wait_timeout_seconds=9.0,
         poll_interval_seconds=3.0,
         sleep_fn=sleep_calls.append,
+        on_progress=lambda f, m: progress_events.append((f, m)),
     )
 
     assert len(wake_results) == 1
@@ -193,6 +195,9 @@ def test_wake_and_refresh_apps_stops_early_and_refreshes_snapshots() -> None:
     assert sleep_calls == [3.0, 3.0]
     assert len(updated) == 3
     assert all(s.url_check.is_streamlit_awake for s in updated)
+    assert progress_events[0][0] <= 0.15
+    assert progress_events[-1][0] == 1.0
+    assert any("Booting" in msg or "Awake" in msg for _, msg in progress_events)
 
 
 def test_wake_and_refresh_apps_respects_timeout_and_single_app_wake() -> None:

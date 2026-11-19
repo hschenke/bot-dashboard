@@ -1,1 +1,1 @@
-"""Teilansichten des Bot-Dashboards (Dashboard/Übersicht, DB, KI-View, System)."""
+"""Teilansichten des Bot-Dashboards (Dashboard/Übersicht, DB-Inspektor, KI-Brain)."""

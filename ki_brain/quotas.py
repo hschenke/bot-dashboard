@@ -177,7 +177,7 @@ def select_grounding_model(
         if m.enabled
         and m.provider == ModelProvider.GOOGLE_GEMINI
         and not m.is_deep_agent
-        and (not m.requires_api_key or secrets.has_key(m.api_key_env))
+        and secrets.has_model_key(m, allow_paid=allow_paid)
         and (allow_paid or m.is_free)
         and (not need_gen3 or is_gemini_3_or_newer(m))
     ]

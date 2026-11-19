@@ -1,4 +1,4 @@
-"""KI-View Tab 4: Live-Test (Fast/Standard/Deep), Benchmark-Testlauf, Bots-API & Snapshot-Verwaltung."""
+"""KI-Brain Tab 5 (Check): Live-Test (Fast/Standard/Deep), Benchmark-Report, Bots-API & Snapshot."""
 
 from __future__ import annotations
 
@@ -96,7 +96,7 @@ def _render_latest_benchmark_section(brain: KIWebsearchBrain, ui_state: BrainDas
     st.subheader("📊 Letzter Benchmark-Testlauf")
     report: BenchmarkReport | None = ui_state.latest_benchmark if ui_state is not None else brain.get_latest_benchmark()
     if report is None:
-        st.caption("Noch kein Benchmark-Testlauf ausgeführt. Starte oben 'Benchmark & Optimize' zur automatischen Optimierung.")
+        st.caption("Noch kein Benchmark-Testlauf ausgeführt. Starte oben 'Sync & Optimize' zur automatischen Optimierung.")
         return
     st.caption(
         f"Lauf `{report.run_id}` · Zeit: {format_iso_timestamp(report.finished_at)} · "
@@ -124,13 +124,17 @@ def _render_latest_benchmark_section(brain: KIWebsearchBrain, ui_state: BrainDas
 
 
 def _render_bot_api_section() -> None:
-    st.subheader("🔌 Einbindung in Research-Bot, Alert-Bot & News-Bot")
-    st.caption("Installiere das eigenständige Paket `ki_brain` aus diesem Repository. Dank eigenem Top-Level-Paketnamen gibt es keine Kollision mit `src/` der Bot-Repos.")
+    st.subheader("🔌 Einbindung in News-Bot, Research-Bot & Alert-Bot")
+    st.caption(
+        "Zugriff ausschließlich für deine 3 freigegebenen Apps (`news_bot`, `research_bot`, `alert_bot`) "
+        "mit einem im Tab **🔐 Vault** generierten Access-Token (`BRAIN_APP_ID` + `BRAIN_APP_TOKEN`)."
+    )
     st.code('pip install "git+https://github.com/hschenke/bot-dashboard.git"', language="bash")
     st.code(
         "from ki_brain import KIWebsearchBrain\n\n"
-        "# Standardmäßig strikt 0% Kosten (nur Free-Tier & unverbrauchte Kontingente).\n"
-        "# Kostenpflichtige Modelle/Kontingent-Überschreitungen nur bei allow_paid=True.\n"
+        "# Liest BRAIN_APP_ID & BRAIN_APP_TOKEN (sowie BRAIN_TURSO_URL / BRAIN_TURSO_KEY) aus ENV/Secrets.\n"
+        "# Fremde Apps oder ungültige Tokens werden strikt mit BrainAuthError abgelehnt.\n"
+        "# Standardmäßig strikt 0% Kosten (Free-Tier-Key); Paid-Tier-Key erst bei allow_paid=True.\n"
         "with KIWebsearchBrain.from_env() as brain:\n"
         '    fast_hits = brain.search("Aktuelle KI-News", tier="fast")\n'
         '    local_places = brain.search("Cafés am Alexanderplatz Berlin", tier="standard")  # Geo-Smart Maps\n'

@@ -35,6 +35,7 @@ class BrainDashboardState:
     excluded_model_ids: tuple[str, ...] = ()
     excluded_model_reasons: dict[str, str] = field(default_factory=dict)
     usage_quotas: dict[str, dict[str, dict[str, Any]]] = field(default_factory=lambda: {"tools": {}, "models": {}})
+    app_clients: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 _SCHEMA_SQL: tuple[str, ...] = (
     """
@@ -76,6 +77,15 @@ _SCHEMA_SQL: tuple[str, ...] = (
         env_name TEXT PRIMARY KEY,
         encrypted_value TEXT NOT NULL,
         updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS brain_app_clients (
+        app_id TEXT PRIMARY KEY,
+        token_hash TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        last_used_at TEXT NOT NULL DEFAULT ''
     )
     """,
 )
@@ -481,6 +491,84 @@ class BrainRepository:
                 decrypted[str(row["env_name"])] = val
         return decrypted
 
+    def upsert_app_client(self, app_id: str, token_hash: str, *, enabled: bool = True) -> str:
+        from ki_brain.access import normalize_client_app_id
+
+        clean_app = normalize_client_app_id(app_id)
+        now = _utc_now_iso()
+        self._executor.execute(
+            """
+            INSERT INTO brain_app_clients (app_id, token_hash, enabled, created_at, last_used_at)
+            VALUES (?, ?, ?, ?, '')
+            ON CONFLICT(app_id) DO UPDATE SET
+                token_hash = excluded.token_hash,
+                enabled = excluded.enabled,
+                created_at = excluded.created_at
+            """,
+            (clean_app, token_hash, 1 if enabled else 0, now),
+        )
+        return now
+
+    def set_app_client_enabled(self, app_id: str, enabled: bool) -> bool:
+        from ki_brain.access import normalize_client_app_id
+
+        clean_app = normalize_client_app_id(app_id)
+        res = self._executor.execute(
+            "UPDATE brain_app_clients SET enabled = ? WHERE app_id = ?",
+            (1 if enabled else 0, clean_app),
+        )
+        return res.affected_rows > 0
+
+    def revoke_app_client(self, app_id: str) -> bool:
+        from ki_brain.access import normalize_client_app_id
+
+        clean_app = normalize_client_app_id(app_id)
+        res = self._executor.execute("DELETE FROM brain_app_clients WHERE app_id = ?", (clean_app,))
+        return res.affected_rows > 0
+
+    def get_app_client_record(self, app_id: str) -> dict[str, Any] | None:
+        from ki_brain.access import normalize_client_app_id
+
+        clean_app = normalize_client_app_id(app_id)
+        res = self._executor.execute(
+            "SELECT app_id, token_hash, enabled, created_at, last_used_at FROM brain_app_clients WHERE app_id = ?",
+            (clean_app,),
+        )
+        if not res.rows:
+            return None
+        r = res.rows[0]
+        return {
+            "app_id": str(r["app_id"]),
+            "token_hash": str(r["token_hash"]),
+            "enabled": bool(int(r["enabled"])),
+            "created_at": str(r["created_at"]),
+            "last_used_at": str(r["last_used_at"]),
+        }
+
+    def list_app_client_records(self) -> dict[str, dict[str, Any]]:
+        res = self._executor.execute(
+            "SELECT app_id, token_hash, enabled, created_at, last_used_at FROM brain_app_clients ORDER BY app_id ASC"
+        )
+        return {
+            str(r["app_id"]): {
+                "app_id": str(r["app_id"]),
+                "token_hash": str(r["token_hash"]),
+                "enabled": bool(int(r["enabled"])),
+                "created_at": str(r["created_at"]),
+                "last_used_at": str(r["last_used_at"]),
+            }
+            for r in res.rows
+        }
+
+    def touch_app_client_last_used(self, app_id: str) -> None:
+        from ki_brain.access import normalize_client_app_id
+
+        clean_app = normalize_client_app_id(app_id)
+        self._executor.execute(
+            "UPDATE brain_app_clients SET last_used_at = ? WHERE app_id = ?",
+            (_utc_now_iso(), clean_app),
+        )
+
     def load_usage_quotas(self) -> dict[str, dict[str, dict[str, Any]]]:
         """Lädt periodenbezogene Free-Kontingent-Zähler aus `brain_meta`."""
         return parse_usage_quotas(self.get_meta(USAGE_QUOTAS_META_KEY, "{}"))
@@ -490,7 +578,7 @@ class BrainRepository:
         self.set_meta(USAGE_QUOTAS_META_KEY, json.dumps({"tools": {}, "models": {}}))
 
     def load_dashboard_state(self) -> BrainDashboardState:
-        """Lädt Modelle, Tools, Sequenzen, Benchmark, Secrets & Kontingente in einem Batch."""
+        """Lädt Modelle, Tools, Sequenzen, Benchmark, Secrets, Kontingente & App-Clients in einem Batch."""
         stmts = [
             ("SELECT payload_json FROM brain_models ORDER BY id ASC", ()),
             ("SELECT payload_json FROM brain_tools ORDER BY id ASC", ()),
@@ -498,9 +586,10 @@ class BrainRepository:
             ("SELECT payload_json FROM brain_benchmark_runs ORDER BY started_at DESC LIMIT 1", ()),
             ("SELECT env_name, updated_at FROM brain_secrets ORDER BY env_name ASC", ()),
             ("SELECT key, value FROM brain_meta WHERE key IN (?, ?, ?)", ("excluded_ids", "excluded_reasons", USAGE_QUOTAS_META_KEY)),
+            ("SELECT app_id, token_hash, enabled, created_at, last_used_at FROM brain_app_clients ORDER BY app_id ASC", ()),
         ]
         try:
-            res_m, res_t, res_s, res_b, res_sec, res_meta = self._executor.execute_batch(stmts)
+            res_m, res_t, res_s, res_b, res_sec, res_meta, res_clients = self._executor.execute_batch(stmts)
         except BrainStorageError as exc:
             if "no such table" not in str(exc).lower():
                 raise
@@ -512,7 +601,7 @@ class BrainRepository:
             if self._cache_key:
                 with _INITIALIZED_LOCK:
                     _INITIALIZED_BACKENDS.add(self._cache_key)
-            res_m, res_t, res_s, res_b, res_sec, res_meta = self._executor.execute_batch(stmts)
+            res_m, res_t, res_s, res_b, res_sec, res_meta, res_clients = self._executor.execute_batch(stmts)
 
         models = [AIModelSpec.model_validate_json(str(r["payload_json"])) for r in res_m.rows]
         tools = [ToolSpec.model_validate_json(str(r["payload_json"])) for r in res_t.rows]
@@ -525,6 +614,16 @@ class BrainRepository:
         excl_m, _ = _parse_excluded_payload(meta_map.get("excluded_ids", "{}"))
         reasons_m, _ = _parse_reasons_payload(meta_map.get("excluded_reasons", "{}"))
         quotas = parse_usage_quotas(meta_map.get(USAGE_QUOTAS_META_KEY, "{}"))
+        app_clients = {
+            str(r["app_id"]): {
+                "app_id": str(r["app_id"]),
+                "token_hash": str(r["token_hash"]),
+                "enabled": bool(int(r["enabled"])),
+                "created_at": str(r["created_at"]),
+                "last_used_at": str(r["last_used_at"]),
+            }
+            for r in res_clients.rows
+        }
         return BrainDashboardState(
             models=models,
             tools=tools,
@@ -534,6 +633,7 @@ class BrainRepository:
             excluded_model_ids=tuple(sorted(excl_m)),
             excluded_model_reasons={mid: reasons_m[mid] for mid in excl_m if mid in reasons_m},
             usage_quotas=quotas,
+            app_clients=app_clients,
         )
 
     def close(self) -> None:

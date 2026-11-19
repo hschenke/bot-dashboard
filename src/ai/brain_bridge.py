@@ -10,9 +10,11 @@ from src.config.settings import PROJECT_ROOT, AppSettings
 
 
 def build_brain_secrets(settings: AppSettings) -> BrainSecrets:
-    """Überträgt alle optionalen Free-Tier API-Keys sicher (`repr=False`) an das Brain."""
+    """Überträgt alle optionalen Free-/Paid-Tier API-Keys sicher (`repr=False`) an das Brain."""
     return BrainSecrets(
         gemini_api_key=settings.gemini_api_key,
+        gemini_free_api_key=settings.gemini_free_api_key,
+        gemini_paid_api_key=settings.gemini_paid_api_key,
         browserbase_api_key=settings.browserbase_api_key,
         browserbase_project_id=settings.browserbase_project_id,
         brave_search_api_key=settings.brave_search_api_key,
@@ -21,9 +23,13 @@ def build_brain_secrets(settings: AppSettings) -> BrainSecrets:
         reddit_client_id=settings.reddit_client_id,
         reddit_client_secret=settings.reddit_client_secret,
         groq_api_key=settings.groq_api_key,
+        groq_paid_api_key=settings.groq_paid_api_key,
         openrouter_api_key=settings.openrouter_api_key,
+        openrouter_paid_api_key=settings.openrouter_paid_api_key,
         cerebras_api_key=settings.cerebras_api_key,
+        cerebras_paid_api_key=settings.cerebras_paid_api_key,
         mistral_api_key=settings.mistral_api_key,
+        mistral_paid_api_key=settings.mistral_paid_api_key,
     )
 
 
@@ -32,7 +38,7 @@ def create_dashboard_brain(
     *,
     genai_client: Any = None,
 ) -> KIWebsearchBrain:
-    """Erstellt eine `KIWebsearchBrain`-Instanz auf Basis von Turso Cloud oder SQLite."""
+    """Erstellt die authentifizierte Dashboard-Admin-Instanz auf Basis von Turso Cloud oder SQLite."""
     use_brain_turso = bool(settings.brain_turso_url.strip() and settings.brain_turso_auth_token.strip())
     use_shared_turso = bool(settings.has_turso_configured)
 
@@ -52,7 +58,7 @@ def create_dashboard_brain(
         sqlite_path=settings.brain_sqlite_path,
         base_dir=PROJECT_ROOT,
     )
-    return KIWebsearchBrain(
+    return KIWebsearchBrain.for_dashboard(
         repository=repo,
         secrets=build_brain_secrets(settings),
         genai_client=genai_client,

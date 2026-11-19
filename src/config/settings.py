@@ -129,6 +129,8 @@ class AppSettings:
     """Zentrales Konfigurationsobjekt (`repr=False` auf allen Geheimnissen)."""
 
     gemini_api_key: str = field(default="", repr=False)
+    gemini_free_api_key: str = field(default="", repr=False)
+    gemini_paid_api_key: str = field(default="", repr=False)
     browserbase_api_key: str = field(default="", repr=False)
     browserbase_project_id: str = ""
     brave_search_api_key: str = field(default="", repr=False)
@@ -137,9 +139,13 @@ class AppSettings:
     reddit_client_id: str = field(default="", repr=False)
     reddit_client_secret: str = field(default="", repr=False)
     groq_api_key: str = field(default="", repr=False)
+    groq_paid_api_key: str = field(default="", repr=False)
     openrouter_api_key: str = field(default="", repr=False)
+    openrouter_paid_api_key: str = field(default="", repr=False)
     cerebras_api_key: str = field(default="", repr=False)
+    cerebras_paid_api_key: str = field(default="", repr=False)
     mistral_api_key: str = field(default="", repr=False)
+    mistral_paid_api_key: str = field(default="", repr=False)
 
     github_token: str = field(default="", repr=False)
     turso_url: str = ""
@@ -147,6 +153,7 @@ class AppSettings:
     sqlite_path: str = DEFAULT_SQLITE_REL_PATH
     brain_turso_url: str = ""
     brain_turso_auth_token: str = field(default="", repr=False)
+    brain_secret_key: str = field(default="", repr=False)
     brain_sqlite_path: str = DEFAULT_BRAIN_SQLITE_REL_PATH
 
     app_password: str = field(default="", repr=False)
@@ -156,7 +163,10 @@ class AppSettings:
 
     @property
     def has_gemini_configured(self) -> bool:
-        return not _is_placeholder(self.gemini_api_key)
+        return any(
+            not _is_placeholder(k)
+            for k in (self.gemini_free_api_key, self.gemini_paid_api_key, self.gemini_api_key)
+        )
 
     @property
     def has_any_ai_key_configured(self) -> bool:
@@ -164,10 +174,16 @@ class AppSettings:
             not _is_placeholder(k)
             for k in (
                 self.gemini_api_key,
+                self.gemini_free_api_key,
+                self.gemini_paid_api_key,
                 self.groq_api_key,
+                self.groq_paid_api_key,
                 self.openrouter_api_key,
+                self.openrouter_paid_api_key,
                 self.cerebras_api_key,
+                self.cerebras_paid_api_key,
                 self.mistral_api_key,
+                self.mistral_paid_api_key,
             )
         )
 
@@ -251,6 +267,8 @@ def load_app_settings(
 
     return AppSettings(
         gemini_api_key=_clean_secret("GEMINI_API_KEY", local_secrets),
+        gemini_free_api_key=_clean_secret("GEMINI_FREE_API_KEY", local_secrets),
+        gemini_paid_api_key=_clean_secret("GEMINI_PAID_API_KEY", local_secrets),
         browserbase_api_key=_clean_secret("BROWSERBASE_API_KEY", local_secrets),
         browserbase_project_id=get_secret_or_env(
             "BROWSERBASE_PROJECT_ID", local_secrets=local_secrets
@@ -264,9 +282,13 @@ def load_app_settings(
         reddit_client_id=_clean_secret("REDDIT_CLIENT_ID", local_secrets),
         reddit_client_secret=_clean_secret("REDDIT_CLIENT_SECRET", local_secrets),
         groq_api_key=_clean_secret("GROQ_API_KEY", local_secrets),
+        groq_paid_api_key=_clean_secret("GROQ_PAID_API_KEY", local_secrets),
         openrouter_api_key=_clean_secret("OPENROUTER_API_KEY", local_secrets),
+        openrouter_paid_api_key=_clean_secret("OPENROUTER_PAID_API_KEY", local_secrets),
         cerebras_api_key=_clean_secret("CEREBRAS_API_KEY", local_secrets),
+        cerebras_paid_api_key=_clean_secret("CEREBRAS_PAID_API_KEY", local_secrets),
         mistral_api_key=_clean_secret("MISTRAL_API_KEY", local_secrets),
+        mistral_paid_api_key=_clean_secret("MISTRAL_PAID_API_KEY", local_secrets),
         github_token=_clean_secret("GITHUB_TOKEN", local_secrets),
         turso_url=get_secret_or_env("TURSO_URL", local_secrets=local_secrets),
         turso_auth_token=get_secret_or_env("TURSO_KEY", local_secrets=local_secrets),
@@ -275,6 +297,7 @@ def load_app_settings(
         ),
         brain_turso_url=get_secret_or_env("BRAIN_TURSO_URL", local_secrets=local_secrets),
         brain_turso_auth_token=get_secret_or_env("BRAIN_TURSO_KEY", local_secrets=local_secrets),
+        brain_secret_key=_clean_secret("BRAIN_SECRET_KEY", local_secrets),
         brain_sqlite_path=get_secret_or_env(
             "BRAIN_SQLITE_PATH", DEFAULT_BRAIN_SQLITE_REL_PATH, local_secrets=local_secrets
         ),

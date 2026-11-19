@@ -23,7 +23,7 @@
   5. `src/checks`: `SafeUrlProbe` (HTTP & Streamlit `/_stcore/health`), `GitHubWorkflowProbe` (Workflow-Status & `workflow_dispatch`), `BotDatabaseInspector` (Multi-DB-Inspektion) und `FleetCheckCoordinator`.
   6. `src/ai`: `DashboardAIGateway` auf Basis der modernen `google-genai` Interactions API (`>= 2.30.1`) mit Structured Output & deterministischem Heuristik-Fallback.
   7. `src/worker`: CLI-Healthcheck-Runner für GitHub Actions (`scheduled_healthcheck.yaml`).
-  8. `src/ui`: Reine Streamlit-Präsentationsschicht (`overview_view` [inkl. Running & URLs], `db_view`, `ki_view`, `settings_view`).
+  8. `src/ui`: Reine Streamlit-Präsentationsschicht (`overview_view` [inkl. Running & URLs], `db_view`, `ki_view` [KI-Brain inkl. Vault]).
 
 ## UI- & Benennungs-Konvention (Benutzer-Präferenz)
 - **Kurze englische Fachbegriffe**: Bei Status-Badges, Worker-Zuständen und technischen Labels konsequent kurze englische Originalbegriffe nutzen (`Online`, `Offline`, `Sleeping`, `Degraded`, `Queued`, `Running`, `Success`, `Failed`, `Cancelled`, `Awake`) statt umständlicher/langer deutscher Entsprechungen (z. B. **nur `Queued`**, niemals `"Warteschlange"`).

@@ -26,11 +26,11 @@ def _run_fleet_overlay(
     title: str,
     status_msg: str,
     done_msg: str,
-    action_fn: Callable[[], object],
+    action_fn: Callable[[Callable[[float, str], None]], object],
 ) -> object:
     def _task(cb: Callable[[float, str], None]) -> object:
-        cb(0.2, status_msg)
-        result = action_fn()
+        cb(0.10, status_msg)
+        result = action_fn(cb)
         cb(1.0, done_msg)
         return result
 
@@ -41,18 +41,26 @@ def run_check_all_action(
     coordinator: FleetCheckCoordinator,
     repository: SqlDashboardRepository,
 ) -> None:
-    """Prüft alle Apps im Task-Overlay (grauer Hintergrund + Statustext im Vordergrund)."""
-    snapshots = cast(
-        list[AppFleetSnapshot],
-        _run_fleet_overlay(
-            "⚡ Check All",
-            "Checking Apps, Workers & DBs...",
-            "All checks completed.",
-            lambda: coordinator.check_all_apps(repository=repository),
-        ),
-    )
-    st.session_state["fleet_snapshots"] = snapshots
-    st.session_state.pop("overview_feedback", None)
+    """Prüft alle Apps im Task-Overlay (gibt Hintergrund bei Abschluss oder Fehler garantiert frei)."""
+    try:
+        snapshots = cast(
+            list[AppFleetSnapshot],
+            _run_fleet_overlay(
+                "⚡ Check All",
+                "Checking Apps, Workers & DBs...",
+                "All checks completed.",
+                lambda _cb: coordinator.check_all_apps(repository=repository),
+            ),
+        )
+        st.session_state["fleet_snapshots"] = snapshots
+        st.session_state.pop("overview_feedback", None)
+    except Exception as exc:  # noqa: BLE001
+        st.session_state["overview_feedback"] = {
+            "level": "error",
+            "message": f"Check All failed: {exc}",
+            "wake_titles": [],
+            "worker_titles": [],
+        }
     st.rerun()
 
 
@@ -61,25 +69,37 @@ def run_wake_all_action(
     coordinator: FleetCheckCoordinator,
     repository: SqlDashboardRepository,
 ) -> None:
-    """Weckt schlafende Apps im Task-Overlay auf und setzt kompaktes Feedback."""
+    """Weckt schlafende Apps im Task-Overlay bis alle wach sind (oder Fehler/Timeout den Hintergrund freigibt)."""
     sleeping = [
         s.spec.title
         for s in snapshots
         if not s.url_check.is_streamlit_awake
         and s.url_check.status in {HealthStatus.ASLEEP, HealthStatus.DEGRADED}
     ]
-    status_msg = f"Waking sleeping Apps ({', '.join(sleeping)})..." if sleeping else "Waking sleeping Apps..."
-    wake_results, updated = cast(
-        tuple[list[tuple[str, bool, str]], list[AppFleetSnapshot]],
-        _run_fleet_overlay(
-            "☀️ Wake All",
-            status_msg,
-            "Wakeup & status refresh completed.",
-            lambda: coordinator.wake_and_refresh_apps(snapshots, repository=repository),
-        ),
+    status_msg = (
+        f"Waking sleeping Apps ({', '.join(sleeping)})..." if sleeping else "Waking sleeping Apps..."
     )
-    st.session_state["fleet_snapshots"] = updated
-    st.session_state["overview_feedback"] = build_wake_feedback(wake_results, updated)
+    try:
+        wake_results, updated = cast(
+            tuple[list[tuple[str, bool, str]], list[AppFleetSnapshot]],
+            _run_fleet_overlay(
+                "☀️ Wake All",
+                status_msg,
+                "Wakeup & status refresh completed.",
+                lambda cb: coordinator.wake_and_refresh_apps(
+                    snapshots, repository=repository, on_progress=cb
+                ),
+            ),
+        )
+        st.session_state["fleet_snapshots"] = updated
+        st.session_state["overview_feedback"] = build_wake_feedback(wake_results, updated)
+    except Exception as exc:  # noqa: BLE001
+        st.session_state["overview_feedback"] = {
+            "level": "error",
+            "message": f"Wake All failed: {exc}",
+            "wake_titles": [],
+            "worker_titles": [],
+        }
     st.rerun()
 
 

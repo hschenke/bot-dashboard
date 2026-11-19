@@ -59,7 +59,7 @@ def test_ki_brain_security_ssrf_and_path_traversal(tmp_path: Path) -> None:
 def test_default_catalog_contains_research_and_alert_bot_models_and_tools(tmp_path: Path) -> None:
     db_file = tmp_path / "ki_brain.db"
     repo = create_brain_repository(sqlite_path=db_file)
-    brain = KIWebsearchBrain(repo, BrainSecrets())
+    brain = KIWebsearchBrain.for_dashboard(repo, BrainSecrets())
 
     model_ids = {m.id for m in brain.list_models()}
     for expected in (
@@ -108,7 +108,7 @@ def test_default_catalog_contains_research_and_alert_bot_models_and_tools(tmp_pa
     brain.close()
 
     reopened_repo = create_brain_repository(sqlite_path=db_file)
-    reopened = KIWebsearchBrain(reopened_repo, BrainSecrets())
+    reopened = KIWebsearchBrain.for_dashboard(reopened_repo, BrainSecrets())
     assert "wikidata_api" not in {t.id for t in reopened.list_tools()}
     reopened.reset_defaults()
     assert "wikidata_api" in {t.id for t in reopened.list_tools()}
@@ -117,7 +117,7 @@ def test_default_catalog_contains_research_and_alert_bot_models_and_tools(tmp_pa
 
 def test_dynamic_crud_custom_tools_and_models(monkeypatch: pytest.MonkeyPatch) -> None:
     repo = create_brain_repository(sqlite_path=":memory:")
-    brain = KIWebsearchBrain(repo, BrainSecrets())
+    brain = KIWebsearchBrain.for_dashboard(repo, BrainSecrets())
 
     custom_tool = ToolSpec(
         id="custom_tech_api",
@@ -209,7 +209,7 @@ def test_auto_sync_discovers_gemini_groq_and_openrouter_models(monkeypatch: pyte
         groq_api_key="gsk_test_123",
         openrouter_api_key="sk-or-test-123",
     )
-    brain = KIWebsearchBrain(repo, secrets, genai_client=mock_client)
+    brain = KIWebsearchBrain.for_dashboard(repo, secrets, genai_client=mock_client)
 
     def _fake_http(_method: str, url: str, json_body: dict[str, object] | None = None, **_kw: object) -> tuple[int, str, str, bytes]:
         if url.endswith("/chat/completions"):
@@ -282,7 +282,7 @@ def test_benchmark_optimizes_fast_standard_deep_and_demotes_quota_429(monkeypatc
 
     mock_client.interactions.create.side_effect = _fake_create
     secrets = BrainSecrets(gemini_api_key="AIzaSyTestKey123")
-    brain = KIWebsearchBrain(repo, secrets, genai_client=mock_client)
+    brain = KIWebsearchBrain.for_dashboard(repo, secrets, genai_client=mock_client)
 
     # Probe_tool sauber simulieren (ohne echte Netzaufrufe)
     def _fake_search(tool: ToolSpec, *_args: object, **_kwargs: object) -> list[object]:
@@ -350,7 +350,7 @@ def test_brain_execution_search_ask_structured_and_snapshot(monkeypatch: pytest.
     mock_interaction.steps = []
     mock_client.interactions.create.return_value = mock_interaction
 
-    brain = KIWebsearchBrain(repo, BrainSecrets(gemini_api_key="AIzaSyTest123"), genai_client=mock_client)
+    brain = KIWebsearchBrain.for_dashboard(repo, BrainSecrets(gemini_api_key="AIzaSyTest123"), genai_client=mock_client)
 
     from ki_brain.models import BrainCitation, BrainFetchedPage
 
@@ -387,7 +387,7 @@ def test_brain_execution_search_ask_structured_and_snapshot(monkeypatch: pytest.
     assert brain.get_tool("arxiv_api") is not None
 
     # Heuristik-Fallback ohne API Keys
-    no_key_brain = KIWebsearchBrain(create_brain_repository(sqlite_path=":memory:"), BrainSecrets())
+    no_key_brain = KIWebsearchBrain.for_dashboard(create_brain_repository(sqlite_path=":memory:"), BrainSecrets())
     fb_res = no_key_brain.ask("Python", tier=BrainTier.FAST)
     assert fb_res.used_heuristic_fallback is True
     assert "Recherche-Ergebnis" in fb_res.text
@@ -402,7 +402,7 @@ def test_cleanup_unhealthy_items_and_write_only_secrets_vault(
 
     db_file = tmp_path / "vault_and_cleanup.db"
     repo = create_brain_repository(sqlite_path=db_file)
-    brain = KIWebsearchBrain(repo, BrainSecrets())
+    brain = KIWebsearchBrain.for_dashboard(repo, BrainSecrets())
 
     # 1. Modelle & Tools auf Error / Quota 429 / HTTP 202 / sonstige Blocked / Missing Key setzen und bereinigen
     m_err = brain.get_model("gemini-3.6-flash")
@@ -476,7 +476,7 @@ def test_cleanup_unhealthy_items_and_write_only_secrets_vault(
     assert raw_secret not in bb_status.model_dump_json()
 
     raw_db_row = repo._executor.execute("SELECT encrypted_value FROM brain_secrets WHERE env_name = ?", ("BROWSERBASE_API_KEY",)).rows[0]  # noqa: SLF001
-    assert str(raw_db_row["encrypted_value"]).startswith("enc_v1:")
+    assert str(raw_db_row["encrypted_value"]).startswith("enc_v2:")
     assert raw_secret not in str(raw_db_row["encrypted_value"])
 
     unlocked_tool = brain.get_tool("browserbase_fetch")
@@ -500,7 +500,7 @@ def test_cleanup_unhealthy_items_and_write_only_secrets_vault(
     brain.set_secret("BROWSERBASE_API_KEY", "bb_live_overwritten_token_111")
     brain.close()
 
-    reopened = KIWebsearchBrain(create_brain_repository(sqlite_path=db_file), BrainSecrets())
+    reopened = KIWebsearchBrain.for_dashboard(create_brain_repository(sqlite_path=db_file), BrainSecrets())
     assert reopened._secrets.resolve_key("BROWSERBASE_API_KEY") == "bb_live_overwritten_token_111"  # noqa: SLF001
     assert reopened.delete_secret("BROWSERBASE_API_KEY") is True
     assert not reopened._secrets.has_key("BROWSERBASE_API_KEY")  # noqa: SLF001
@@ -573,7 +573,7 @@ def test_keyless_reddit_fallbacks_and_no_reddit_missing_key(monkeypatch: pytest.
     from ki_brain.tools.search_knowledge import search_reddit
 
     repo = create_brain_repository(sqlite_path=":memory:")
-    brain = KIWebsearchBrain(repo, BrainSecrets())
+    brain = KIWebsearchBrain.for_dashboard(repo, BrainSecrets())
     secret_names = {s.env_name for s in brain.list_secret_statuses()}
     assert "REDDIT_CLIENT_ID" not in secret_names
     assert "REDDIT_CLIENT_SECRET" not in secret_names
@@ -633,7 +633,7 @@ def test_brave_tavily_serper_and_sync_new_builtins(tmp_path: Path, monkeypatch: 
     for tid in ("brave_search", "tavily_search", "serper_search", "openalex_api", "stackexchange_api", "tagesschau_rss", "gemini_google_maps"):
         repo.delete_tool(tid)
 
-    brain = KIWebsearchBrain(repo, BrainSecrets())
+    brain = KIWebsearchBrain.for_dashboard(repo, BrainSecrets())
     monkeypatch.setattr("ki_brain.discovery.safe_http_request", lambda *_a, **_kw: (404, "https://searx.space", "text/plain", b""))
     sync_sum = brain.auto_sync(verify_discovered=False)
     for new_tid in ("brave_search", "tavily_search", "serper_search", "openalex_api", "stackexchange_api", "tagesschau_rss", "gemini_google_maps"):
@@ -729,7 +729,7 @@ def test_resolve_blocked_tools_applies_rules_and_unblocks(monkeypatch: pytest.Mo
     from ki_brain.tools.http_utils import record_http_probe
 
     repo = create_brain_repository(sqlite_path=":memory:")
-    brain = KIWebsearchBrain(repo, BrainSecrets())
+    brain = KIWebsearchBrain.for_dashboard(repo, BrainSecrets())
 
     # Simuliere alte Blocked-Einträge ohne Rules + blockiertes DDG HTML + Yahoo Alternate
     ddg_inst = brain.get_tool("duckduckgo_instant")
@@ -937,7 +937,7 @@ def test_discover_recovers_quota_429_and_paid_models_without_readding_previews(
         lambda *_a, **_kw: (404, "https://searx.space", "text/plain", b""),
     )
 
-    brain = KIWebsearchBrain(repo, BrainSecrets(gemini_api_key="AIzaSyPaidKey999"), genai_client=mock_client)
+    brain = KIWebsearchBrain.for_dashboard(repo, BrainSecrets(gemini_api_key="AIzaSyPaidKey999"), genai_client=mock_client)
 
     # Ausgangszustand analog Nutzer-Screenshot: bestehende Quota-429-Modelle, Deep-Research-Previews & Excluded-IDs
     for mid in ("gemini-3.5-flash-lite", "gemini-4-hydrogen"):
@@ -1026,7 +1026,7 @@ def test_discover_recovers_quota_429_and_paid_models_without_readding_previews(
 
 def test_secret_rotation_resets_quota_429_and_reports_vault_override(tmp_path: Path) -> None:
     db_file = tmp_path / "secret_rotation.db"
-    brain = KIWebsearchBrain(
+    brain = KIWebsearchBrain.for_dashboard(
         create_brain_repository(sqlite_path=db_file),
         BrainSecrets(gemini_api_key="AIzaSyEnvFreeKey"),
     )
@@ -1391,7 +1391,7 @@ def test_google_maps_grounding_citations_geo_smart_and_gemini3_guard(monkeypatch
 
     mock_client = MagicMock()
     mock_client.interactions.create.side_effect = _fake_maps_create
-    brain = KIWebsearchBrain(repo, secrets, genai_client=mock_client)
+    brain = KIWebsearchBrain.for_dashboard(repo, secrets, genai_client=mock_client)
 
     def _fake_non_ai_search(tool: ToolSpec, q: str, **_kw: object) -> list[BrainCitation]:
         if tool.executor_type in {"gemini_google_search", "gemini_google_maps"}:
@@ -1466,7 +1466,7 @@ def test_strict_zero_cost_enforcement_quota_exhaustion_and_allow_paid_opt_in(
     )
     mock_client.models.list.return_value = [SimpleNamespace(name="models/gemini-3.5-flash-lite")]
 
-    brain = KIWebsearchBrain(repo, BrainSecrets(gemini_api_key="AIzaSyTestKey123"), genai_client=mock_client)
+    brain = KIWebsearchBrain.for_dashboard(repo, BrainSecrets(gemini_api_key="AIzaSyTestKey123"), genai_client=mock_client)
     paid_model = AIModelSpec(
         id="gemini-4-argon",
         name="Gemini 4 Argon",
@@ -1649,6 +1649,176 @@ def test_legacy_rev2_to_rev3_upgrade_preserves_customizations(tmp_path: Path) ->
     assert "deep-research-preview-04-2026" not in deep_seq.model_sequence
     assert "deep-research-preview-04-2026" in deep_seq.paid_model_sequence
     upgraded.close()
+
+
+def test_strict_three_app_access_control_and_admin_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ki_brain import ALLOWED_CLIENT_APPS, BrainAuthError
+
+    db_file = tmp_path / "access_guard.db"
+    assert ALLOWED_CLIENT_APPS == ("news_bot", "research_bot", "alert_bot")
+
+    # 1. Fremde oder unauthentifizierte Aufrufe schlagen fail-closed fehl
+    with pytest.raises(BrainAuthError):
+        KIWebsearchBrain(create_brain_repository(sqlite_path=db_file))
+    with pytest.raises(BrainAuthError):
+        KIWebsearchBrain.from_env(sqlite_path=db_file)
+    with pytest.raises(BrainAuthError):
+        KIWebsearchBrain.from_env(app_id="stranger_app", app_token="kib_stranger_123", sqlite_path=db_file)
+    with pytest.raises(BrainAuthError):
+        KIWebsearchBrain.from_env(app_id="news_bot", app_token="kib_news_bot_fake", sqlite_path=db_file)
+
+    # 2. Dashboard-Admin erzeugt Token exklusiv für die 3 Apps (Fremd-App wird auch beim Ausstellen geblockt)
+    admin = KIWebsearchBrain.for_dashboard(create_brain_repository(sqlite_path=db_file))
+    with pytest.raises(BrainAuthError):
+        admin.issue_app_token("evil_bot")
+
+    res_token = admin.issue_app_token("research_bot")
+    assert res_token.startswith("kib_research_bot_")
+    clients = {c.app_id: c for c in admin.list_app_clients()}
+    assert set(clients.keys()) == {"news_bot", "research_bot", "alert_bot"}
+    assert clients["research_bot"].has_token is True and clients["research_bot"].enabled is True
+    assert clients["news_bot"].has_token is False and clients["news_bot"].enabled is False
+    # Klartext-Token wird niemals in der DB gespeichert
+    raw_row = admin.repository.get_app_client_record("research_bot")
+    assert raw_row is not None and res_token not in raw_row["token_hash"]
+
+    # 3. Autorisierte App (research_bot, auch mit Bindestrich-Normalisierung) erhält Zugriff, aber keine Admin-Vault-Rechte
+    monkeypatch.setenv("BRAIN_APP_ID", "research-bot")
+    monkeypatch.setenv("BRAIN_APP_TOKEN", res_token)
+    with KIWebsearchBrain.from_env(sqlite_path=db_file) as bot_brain:
+        assert bot_brain.client_app_id == "research_bot"
+        assert bot_brain.is_admin_client is False
+        assert len(bot_brain.list_models()) >= 8
+        with pytest.raises(BrainAuthError):
+            bot_brain.set_secret("GEMINI_FREE_API_KEY", "unauthorized")
+        with pytest.raises(BrainAuthError):
+            bot_brain.issue_app_token("news_bot")
+
+    # 4. Token gilt nicht für andere App & Sperren/Widerrufen blockiert sofort
+    with pytest.raises(BrainAuthError):
+        KIWebsearchBrain.from_env(app_id="news_bot", app_token=res_token, sqlite_path=db_file)
+
+    assert admin.set_app_enabled("research_bot", False) is True
+    with pytest.raises(BrainAuthError):
+        KIWebsearchBrain.from_env(app_id="research_bot", app_token=res_token, sqlite_path=db_file)
+
+    assert admin.set_app_enabled("research_bot", True) is True
+    with KIWebsearchBrain.from_env(app_id="research_bot", app_token=res_token, sqlite_path=db_file) as bot_again:
+        assert bot_again.client_app_id == "research_bot"
+
+    assert admin.revoke_app_token("research_bot") is True
+    with pytest.raises(BrainAuthError):
+        KIWebsearchBrain.from_env(app_id="research_bot", app_token=res_token, sqlite_path=db_file)
+    admin.close()
+
+
+def test_free_and_paid_tier_keys_isolation_and_cross_app_vault_decryption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from ki_brain.llm_runner import UnifiedLLMRunner
+
+    # 1. Cross-App Vault-Entschlüsselung: Dashboard hat APP_PASSWORD + BRAIN_TURSO_KEY, Bot hat nur BRAIN_TURSO_KEY
+    db_file = tmp_path / "tier_keys_vault.db"
+    monkeypatch.setenv("APP_PASSWORD", "dashboard_only_admin_pw")
+    monkeypatch.setenv("BRAIN_TURSO_KEY", "shared_turso_secret_token_999")
+    monkeypatch.delenv("BRAIN_SECRET_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_FREE_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_PAID_API_KEY", raising=False)
+
+    admin = KIWebsearchBrain.for_dashboard(create_brain_repository(sqlite_path=db_file), BrainSecrets())
+    admin.set_secret("GEMINI_FREE_API_KEY", "AIzaSyFreeTierKey111")
+    admin.set_secret("GEMINI_PAID_API_KEY", "AIzaSyPaidTierKey222")
+    bot_token = admin.issue_app_token("alert_bot")
+    admin.close()
+
+    # Bot-Umgebung ohne Dashboard-APP_PASSWORD entschlüsselt beide Keys problemlos aus dem Vault
+    monkeypatch.delenv("APP_PASSWORD", raising=False)
+    with KIWebsearchBrain.from_env(app_id="alert_bot", app_token=bot_token, sqlite_path=db_file) as bot:
+        free_model = bot.get_model("gemini-3.5-flash-lite")
+        paid_model = bot.get_model("deep-research-preview-04-2026")
+        assert free_model is not None and paid_model is not None
+        assert bot._secrets.resolve_model_key(free_model, allow_paid=False) == "AIzaSyFreeTierKey111"  # noqa: SLF001
+        assert bot._secrets.resolve_model_key(free_model, allow_paid=True) == "AIzaSyPaidTierKey222"  # noqa: SLF001
+        assert bot._secrets.resolve_model_key(paid_model, allow_paid=False) == ""  # noqa: SLF001
+        assert bot._secrets.resolve_model_key(paid_model, allow_paid=True) == "AIzaSyPaidTierKey222"  # noqa: SLF001
+
+    # 2. Wenn NUR Paid-Tier-Key existiert, darf allow_paid=False ihn NIEMALS verwenden (0%-Schutz!)
+    paid_only_secrets = BrainSecrets(gemini_paid_api_key="AIzaSyOnlyPaid999")
+    free_spec = AIModelSpec(id="gemini-3.5-flash-lite", name="Flash Lite", model_id="gemini-3.5-flash-lite", paid_api_key_env="GEMINI_PAID_API_KEY")
+    assert paid_only_secrets.resolve_model_key(free_spec, allow_paid=False) == ""
+    assert paid_only_secrets.has_model_key(free_spec, allow_paid=False) is False
+    assert paid_only_secrets.resolve_model_key(free_spec, allow_paid=True) == "AIzaSyOnlyPaid999"
+
+    # 3. UnifiedLLMRunner isoliert genai.Client-Instanzen strikt nach aufgelöstem Free- vs Paid-Key
+    created_keys: list[str] = []
+
+    class _FakeGenAIClient:
+        def __init__(self, api_key: str, **_kw: object) -> None:
+            self.api_key = api_key
+            created_keys.append(api_key)
+            self.interactions = SimpleNamespace(
+                create=lambda **kw: SimpleNamespace(output_text=f"via:{api_key}", steps=[], status="completed")
+            )
+
+    monkeypatch.setattr("ki_brain.llm_runner.genai.Client", _FakeGenAIClient)
+    runner = UnifiedLLMRunner(
+        BrainSecrets(gemini_free_api_key="AIzaSyFreeA", gemini_paid_api_key="AIzaSyPaidB")
+    )
+    txt_free, _ = runner.run_text(free_spec, "Hi", allow_paid=False)
+    txt_paid, _ = runner.run_text(free_spec, "Hi", allow_paid=True)
+    assert txt_free == "via:AIzaSyFreeA"
+    assert txt_paid == "via:AIzaSyPaidB"
+    assert created_keys == ["AIzaSyFreeA", "AIzaSyPaidB"]
+
+
+def test_run_full_pipeline_executes_all_four_steps_with_progress_and_options(tmp_path: Path) -> None:
+    from unittest.mock import MagicMock
+
+    from ki_brain import BenchmarkReport, DiscoverySummary, UnblockSummary
+
+    brain = KIWebsearchBrain.for_dashboard(create_brain_repository(sqlite_path=tmp_path / "pipe.db"), BrainSecrets())
+    brain.auto_sync = MagicMock(  # type: ignore[method-assign]
+        return_value=DiscoverySummary(added_models=["m1"], checked_sources=["builtins"])
+    )
+    brain.run_benchmark = MagicMock(  # type: ignore[method-assign]
+        return_value=BenchmarkReport(
+            run_id="pipe01", started_at="2026-11-19T10:00:00+00:00", finished_at="2026-11-19T10:00:02+00:00",
+            test_query="Python", test_url="https://example.org", healthy_tools_count=8, healthy_models_count=4,
+        )
+    )
+    brain.resolve_blocked_tools = MagicMock(  # type: ignore[method-assign]
+        return_value=UnblockSummary(checked_blocked=["ddg"], unblocked_ids=["ddg"])
+    )
+    brain.cleanup_unhealthy_items_with_status = MagicMock(  # type: ignore[method-assign]
+        return_value=([("bad-m", ProbeStatus.ERROR)], [])
+    )
+
+    progress_events: list[tuple[float, str]] = []
+    summary = brain.run_full_pipeline(
+        exclude_previews=True,
+        retry_excluded=True,
+        include_paid=False,
+        on_progress=lambda f, m: progress_events.append((f, m)),
+    )
+    assert summary.executed_steps == ("discover", "benchmark", "unblock", "prune")
+    assert summary.discovery is not None and summary.discovery.added_models == ["m1"]
+    assert summary.benchmark is not None and summary.benchmark.run_id == "pipe01"
+    assert summary.unblock is not None and summary.unblock.unblocked_ids == ["ddg"]
+    assert summary.pruned_models == (("bad-m", ProbeStatus.ERROR),)
+    assert progress_events[-1][0] == 1.0
+    brain.auto_sync.assert_called_once()
+    assert brain.auto_sync.call_args.kwargs["retry_excluded"] is True
+    assert brain.run_benchmark.call_args.kwargs["include_paid"] is False
+
+    # Optionen erlauben gezieltes Abwählen einzelner Schritte
+    partial = brain.run_full_pipeline(run_discover=False, run_benchmark=True, run_unblock=False, run_prune=False)
+    assert partial.executed_steps == ("benchmark",)
+    assert partial.discovery is None and partial.unblock is None
+    brain.close()
+
 
 
 

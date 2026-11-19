@@ -30,7 +30,6 @@ jobs:
 
       - name: Flotten-Checks & Wakeup für alle Apps + Dashboard ausführen
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GH_FLEET_TOKEN }}
           TURSO_URL: ${{ secrets.TURSO_URL }}
           TURSO_KEY: ${{ secrets.TURSO_KEY }}
