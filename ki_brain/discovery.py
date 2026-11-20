@@ -213,17 +213,51 @@ def _discover_gemini_models(client: genai.Client, *, exclude_previews: bool = Tr
     return discovered[:32], skipped_previews
 
 
+_DATA_ARRAY_START_RE = re.compile(r'"data"\s*:\s*\[')
+
+
+def _parse_data_entries_resilient(body: bytes) -> list[dict[str, Any]]:
+    """Liest `{"data": [...]}` und rettet alle vollständigen Einträge, falls `max_bytes` das JSON am Ende abschneidet."""
+    text = body.decode("utf-8", errors="replace")
+    try:
+        payload = json.loads(text)
+        raw_items = payload.get("data", []) if isinstance(payload, dict) else []
+        return [item for item in raw_items if isinstance(item, dict)]
+    except json.JSONDecodeError:
+        pass
+    match = _DATA_ARRAY_START_RE.search(text)
+    if not match:
+        return []
+    decoder = json.JSONDecoder()
+    idx = match.end()
+    total_len = len(text)
+    items: list[dict[str, Any]] = []
+    while idx < total_len:
+        while idx < total_len and text[idx] in " \t\r\n,":
+            idx += 1
+        if idx >= total_len or text[idx] == "]":
+            break
+        try:
+            obj, next_idx = decoder.raw_decode(text, idx)
+        except json.JSONDecodeError:
+            break
+        if isinstance(obj, dict):
+            items.append(obj)
+        idx = next_idx
+    return items
+
+
 def _discover_groq_models(api_key: str) -> list[AIModelSpec]:
     status, _, _, body = safe_http_request(
         "GET",
         "https://api.groq.com/openai/v1/models",
         headers={**API_HEADERS, "Authorization": f"Bearer {api_key}"},
-        timeout_seconds=5.0,
-        max_bytes=200_000,
+        timeout_seconds=8.0,
+        max_bytes=1_000_000,
     )
     if status != 200 or not body:
         return []
-    items = json.loads(body.decode("utf-8", errors="replace")).get("data", [])
+    items = _parse_data_entries_resilient(body)
     specs: list[AIModelSpec] = []
     for entry in items:
         mid = str(entry.get("id") or "").strip()
@@ -263,13 +297,13 @@ def _discover_openrouter_free_models(api_key: str) -> list[AIModelSpec]:
         "GET",
         "https://openrouter.ai/api/v1/models",
         headers={**API_HEADERS, "Authorization": f"Bearer {api_key}"},
-        timeout_seconds=6.0,
-        max_bytes=500_000,
+        timeout_seconds=12.0,
+        max_bytes=5_000_000,
     )
     if status != 200 or not body:
         return []
     specs: list[AIModelSpec] = []
-    for entry in json.loads(body.decode("utf-8", errors="replace")).get("data", []):
+    for entry in _parse_data_entries_resilient(body):
         mid = str(entry.get("id") or "").strip()
         pricing = entry.get("pricing") or {}
         is_zero = str(pricing.get("prompt", "")) == "0" and str(pricing.get("completion", "")) == "0"

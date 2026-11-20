@@ -1897,3 +1897,34 @@ def test_probe_model_minimal_thinking_fallback_and_quick_verify_single_model(tmp
     assert calls[0]["generation_config"] == {"max_output_tokens": 32, "thinking_level": "minimal"}
     assert "thinking_level" not in (calls[1].get("generation_config") or {})
     brain.close()
+
+
+def test_openrouter_discovery_handles_large_and_truncated_json_payloads(monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
+
+    from ki_brain.discovery import _discover_openrouter_free_models
+
+    seen_max_bytes: list[int] = []
+    # Erzeuge >600 KB JSON, das mitten in einem String nach dem ersten gültigen :free-Modell abgeschnitten wird
+    valid_entry = {
+        "id": "meta-llama/llama-4-scout:free",
+        "name": "Llama 4 Scout (Free)",
+        "pricing": {"prompt": "0", "completion": "0"},
+        "description": "A" * 520_000,
+    }
+    truncated_tail = ', {"id": "broken/unterminated:free", "name": "Unterminated string...'
+    raw_truncated = (
+        '{"data": [' + json.dumps(valid_entry) + truncated_tail
+    ).encode("utf-8")
+
+    def _fake_http(_method: str, url: str, *, max_bytes: int = 0, **_kw: object) -> tuple[int, str, str, bytes]:
+        seen_max_bytes.append(max_bytes)
+        return 200, url, "application/json", raw_truncated
+
+    monkeypatch.setattr("ki_brain.discovery.safe_http_request", _fake_http)
+    found = _discover_openrouter_free_models("sk-or-test-key")
+    assert seen_max_bytes == [5_000_000]
+    assert len(found) == 1
+    assert found[0].id == "or/meta-llama/llama-4-scout-free"
+    assert found[0].model_id == "meta-llama/llama-4-scout:free"
+
