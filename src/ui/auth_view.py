@@ -1,4 +1,4 @@
-"""Authentifizierungs-View mit 30-Tage-Browser-Persistenz, Session-Token und Brute-Force-Schutz."""
+"""Authentifizierungs-View mit Geräte-PoP, Kontext-Bindung, Server-Sessions & Rate-Limiter."""
 
 from __future__ import annotations
 
@@ -14,10 +14,19 @@ from src.domain.enums import AuthRole
 from src.security.auth import (
     LoginRateLimiter,
     generate_admin_token,
-    resolve_credential_role,
+    parse_admin_token,
     verify_admin_token,
+    verify_password_secret,
+    verify_readonly_token,
 )
+from src.security.device_pop import compute_client_fingerprint
+from src.storage.auth_sessions import get_auth_session_store
 from src.ui.auth_storage import is_valid_admin_token_format, mount_auth_storage_bridge
+from src.ui.auth_sync import (
+    schedule_storage_sync,
+    sync_authenticated_storage,
+    sync_unauthenticated_storage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +34,16 @@ logger = logging.getLogger(__name__)
 @st.cache_resource
 def _get_rate_limiter() -> LoginRateLimiter:
     return LoginRateLimiter()
+
+
+def _current_client_fingerprint() -> str:
+    try:
+        ctx = getattr(st, "context", None)
+        headers = getattr(ctx, "headers", None) if ctx is not None else None
+        locale = getattr(ctx, "locale", None) if ctx is not None else None
+        return compute_client_fingerprint(headers, locale)
+    except Exception:  # noqa: BLE001
+        return "no_client_context"
 
 
 def _get_cookie_val() -> str:
@@ -38,82 +57,61 @@ def _get_cookie_val() -> str:
     return ""
 
 
-def _schedule_storage_sync(action: str) -> None:
-    st.session_state["_pending_storage_action"] = action
-    st.session_state["_storage_sync_nonce"] = secrets.token_hex(4)
+def clear_auth_cookie(settings: AppSettings | None = None) -> None:
+    """Entfernt das Token aus Session, URL & Browser und widerruft die Server-Session."""
+    old_token = str(st.session_state.pop("auth_token", "") or "")
+    if settings is not None and old_token:
+        parsed = parse_admin_token(old_token)
+        if parsed is not None:
+            get_auth_session_store(settings).revoke_session(parsed.session_id)
 
-
-def clear_auth_cookie() -> None:
-    """Entfernt das Authentifizierungs-Token aus Session, URL und Browser-Speicher."""
-    st.session_state.pop("auth_token", None)
-    st.session_state.pop("remember_me", None)
-    st.session_state.pop("_auth_restore_nonce", None)
+    for key in (
+        "remember_me",
+        "_auth_restore_nonce",
+        "_auth_restore_challenge",
+        "_auth_bind_challenge",
+        "_auth_bind_nonce",
+    ):
+        st.session_state.pop(key, None)
     st.session_state["_ignore_context_cookie"] = True
     if "token" in st.query_params:
         del st.query_params["token"]
-    _schedule_storage_sync("clear")
-
-
-def _sync_authenticated_storage(token: str) -> None:
-    pending = st.session_state.pop("_pending_storage_action", None)
-    sync_nonce = str(st.session_state.pop("_storage_sync_nonce", "") or "")
-    if pending == "save" and is_valid_admin_token_format(token):
-        mount_auth_storage_bridge(action="save", token=token, nonce=sync_nonce)
-    elif pending == "clear":
-        mount_auth_storage_bridge(action="clear", nonce=sync_nonce)
-    else:
-        mount_auth_storage_bridge(action="noop")
+    schedule_storage_sync("clear")
 
 
 def _try_authenticate_from_url(settings: AppSettings) -> AuthRole | None:
     url_token = str(st.query_params.get("token", "")).strip()
     if not url_token:
         return None
-    token_role = resolve_credential_role(url_token, settings.app_password)
-    if token_role == AuthRole.ADMIN:
-        admin_token = (
-            url_token
-            if is_valid_admin_token_format(url_token)
-            else generate_admin_token(settings.app_password)
-        )
-        st.session_state["auth_token"] = admin_token
-        st.session_state["remember_me"] = True
-        st.session_state.pop("_ignore_context_cookie", None)
-        mount_auth_storage_bridge(action="save", token=admin_token, nonce=secrets.token_hex(4))
-        return AuthRole.ADMIN
-    if token_role == AuthRole.READONLY:
+    if verify_readonly_token(url_token, settings.app_password):
         st.session_state["auth_token"] = url_token
         return AuthRole.READONLY
     del st.query_params["token"]
-    _schedule_storage_sync("clear")
+    st.session_state["_auth_notice"] = (
+        "URL-Anmeldung mit Admin-Tokens ist deaktiviert. Bitte melde dich direkt mit dem Passwort an."
+    )
     return None
 
 
-def _try_authenticate_from_context_cookie(settings: AppSettings) -> AuthRole | None:
-    if st.session_state.get("_ignore_context_cookie"):
-        return None
-    cookie_token = _get_cookie_val()
-    if not cookie_token or not verify_admin_token(cookie_token, settings.app_password):
-        return None
-    st.session_state["auth_token"] = cookie_token
-    st.session_state["remember_me"] = True
-    mount_auth_storage_bridge(action="save", token=cookie_token, nonce=secrets.token_hex(4))
-    return AuthRole.ADMIN
-
-
-def _complete_admin_login(settings: AppSettings, remember_me: bool) -> None:
-    st.session_state["auth_token"] = generate_admin_token(settings.app_password)
+def _complete_admin_login(settings: AppSettings, remember_me: bool, client_fp: str) -> None:
+    st.session_state["auth_token"] = generate_admin_token(
+        settings.app_password, client_fingerprint=client_fp
+    )
     st.session_state.pop("_auth_restore_nonce", None)
+    st.session_state.pop("_auth_restore_challenge", None)
+    st.session_state.pop("_auth_notice", None)
+    if "token" in st.query_params:
+        del st.query_params["token"]
     if remember_me:
         st.session_state["remember_me"] = True
         st.session_state.pop("_ignore_context_cookie", None)
-        _schedule_storage_sync("save")
+        st.session_state["_auth_bind_challenge"] = secrets.token_hex(16)
+        st.session_state["_auth_bind_nonce"] = secrets.token_hex(4)
+        st.session_state["_pending_storage_action"] = "bind"
     else:
         st.session_state["remember_me"] = False
         st.session_state["_ignore_context_cookie"] = True
-        if "token" in st.query_params:
-            del st.query_params["token"]
-        _schedule_storage_sync("clear")
+        schedule_storage_sync("clear")
     st.rerun()
 
 
@@ -121,6 +119,9 @@ def _render_login_form(settings: AppSettings) -> None:
     limiter = _get_rate_limiter()
     st.subheader("🔒 Bot-Dashboard Anmeldung")
     st.caption("Geschützter Zugriff – bitte Dashboard-Passwort eingeben.")
+    notice = st.session_state.pop("_auth_notice", None)
+    if notice:
+        st.warning(str(notice))
 
     locked, remaining_sec = limiter.is_locked_out("web")
     if locked:
@@ -134,42 +135,21 @@ def _render_login_form(settings: AppSettings) -> None:
 
     if not submitted:
         return
-    if resolve_credential_role(entered, settings.app_password) != AuthRole.ADMIN:
+    if not verify_password_secret(entered, settings.app_password):
         limiter.record_failure("web")
         st.error("Ungültiges Passwort.")
         return
     limiter.reset("web")
-    _complete_admin_login(settings, remember_me)
-
-
-def _sync_unauthenticated_storage(settings: AppSettings) -> None:
-    pending = st.session_state.pop("_pending_storage_action", None)
-    sync_nonce = str(st.session_state.pop("_storage_sync_nonce", "") or "")
-    if pending == "clear":
-        mount_auth_storage_bridge(action="clear", nonce=sync_nonce or secrets.token_hex(4))
-        return
-    restore_nonce = str(st.session_state.setdefault("_auth_restore_nonce", secrets.token_hex(4)))
-    restored = mount_auth_storage_bridge(action="restore", nonce=restore_nonce)
-    if not restored:
-        return
-    st.session_state.pop("_auth_restore_nonce", None)
-    if verify_admin_token(restored, settings.app_password):
-        st.session_state["auth_token"] = restored
-        st.session_state["remember_me"] = True
-        st.session_state.pop("_ignore_context_cookie", None)
-        _schedule_storage_sync("save")
-    else:
-        _schedule_storage_sync("clear")
-    st.rerun()
+    _complete_admin_login(settings, remember_me, _current_client_fingerprint())
 
 
 def enforce_authentication(settings: AppSettings) -> AuthRole:
-    """Prüft Session-State, URL-Token, Cookie und Browser-Storage und rendert Login bei Bedarf."""
+    """Prüft Session-State, Geräte-PoP und Server-Session-Status und rendert Login bei Bedarf."""
     if not settings.app_password.strip():
         return AuthRole.ADMIN
 
     if st.session_state.pop("just_logged_out", False):
-        clear_auth_cookie()
+        clear_auth_cookie(settings)
         st.session_state.pop("_pending_storage_action", None)
         clear_nonce = str(st.session_state.pop("_storage_sync_nonce", "") or secrets.token_hex(4))
         mount_auth_storage_bridge(action="clear", nonce=clear_nonce)
@@ -177,19 +157,35 @@ def enforce_authentication(settings: AppSettings) -> AuthRole:
         st.stop()
         return AuthRole.GUEST
 
+    client_fp = _current_client_fingerprint()
     session_token = str(st.session_state.get("auth_token", ""))
-    role = resolve_credential_role(session_token, settings.app_password)
-    if role == AuthRole.ADMIN:
-        _sync_authenticated_storage(session_token)
-        return AuthRole.ADMIN
-    if role == AuthRole.READONLY:
+    if verify_admin_token(
+        session_token, settings.app_password, client_fingerprint=client_fp, allow_session_only=True
+    ):
+        parsed = parse_admin_token(session_token)
+        store = get_auth_session_store(settings)
+        if parsed is not None and store.is_session_active(
+            parsed.session_id,
+            parsed.issued_at,
+            require_registered=parsed.is_persistent_device_bound and store.is_remote_persistent,
+        ):
+            if "token" in st.query_params:
+                del st.query_params["token"]
+            sync_authenticated_storage(settings, session_token, client_fp, mount_auth_storage_bridge)
+            return AuthRole.ADMIN
+        st.session_state.pop("auth_token", None)
+        schedule_storage_sync("clear")
+
+    if verify_readonly_token(session_token, settings.app_password):
         return AuthRole.READONLY
 
-    fallback_role = _try_authenticate_from_url(settings) or _try_authenticate_from_context_cookie(settings)
-    if fallback_role is not None:
-        return fallback_role
+    if _try_authenticate_from_url(settings) == AuthRole.READONLY:
+        return AuthRole.READONLY
 
-    _sync_unauthenticated_storage(settings)
+    cookie_cand = "" if st.session_state.get("_ignore_context_cookie") else _get_cookie_val()
+    if cookie_cand and not is_valid_admin_token_format(cookie_cand):
+        cookie_cand = ""
+    sync_unauthenticated_storage(settings, client_fp, cookie_cand, mount_auth_storage_bridge)
     _render_login_form(settings)
     st.stop()
     return AuthRole.GUEST

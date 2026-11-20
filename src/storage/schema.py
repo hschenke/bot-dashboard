@@ -26,3 +26,24 @@ DDL_STATEMENTS: tuple[str, ...] = (
     ON fleet_check_logs (app_id, created_at DESC)
     """,
 )
+
+AUTH_DDL_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS dashboard_auth_sessions (
+        session_id TEXT PRIMARY KEY,
+        fp_tag TEXT NOT NULL,
+        device_key_tag TEXT NOT NULL,
+        issued_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        revoked INTEGER NOT NULL DEFAULT 0,
+        revoked_at INTEGER NOT NULL DEFAULT 0,
+        last_seen_at INTEGER NOT NULL DEFAULT 0
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS dashboard_auth_policy (
+        policy_key TEXT PRIMARY KEY,
+        policy_value TEXT NOT NULL
+    )
+    """,
+)

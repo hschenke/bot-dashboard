@@ -97,7 +97,7 @@ def run_streamlit_app() -> None:
                 if st.button("Abmelden", icon="🚪", key="nav_logout_btn", width="stretch"):
                     from src.ui.auth_view import clear_auth_cookie
 
-                    clear_auth_cookie()
+                    clear_auth_cookie(settings)
                     st.session_state["just_logged_out"] = True
                     st.rerun()
 

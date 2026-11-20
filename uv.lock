@@ -87,10 +87,11 @@ wheels = [
 
 [[package]]
 name = "bot-dashboard"
-version = "0.15.0"
+version = "0.15.1"
 source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4" },
+    { name = "cryptography" },
     { name = "defusedxml" },
     { name = "google-genai" },
     { name = "pydantic" },
@@ -110,6 +111,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.12.3" },
+    { name = "cryptography", specifier = ">=42.0.0" },
     { name = "defusedxml", specifier = ">=0.7.1" },
     { name = "google-genai", specifier = ">=2.30.1" },
     { name = "pip-audit", marker = "extra == 'dev'", specifier = ">=2.7.3" },
