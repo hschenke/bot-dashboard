@@ -13,6 +13,7 @@ from ki_brain import (
     ToolSpec,
     evaluate_tool_quota,
     format_quota_label,
+    is_quota_limited_tool,
 )
 
 from src.ui.views.ki_sequences_tab import format_probe_badge
@@ -22,7 +23,6 @@ _EXECUTOR_OPTIONS: tuple[str, ...] = (
     "custom_json_api",
     "custom_rss_feed",
     "searxng_search",
-    "brave_search",
     "tavily_search",
     "serper_search",
     "yahoo_search",
@@ -80,8 +80,8 @@ def render_tools_tab(
     st.dataframe(rows, width="stretch", hide_index=True)
     st.caption(
         "ℹ️ **0%-Kosten & Free-Kontingente:** Gemini Search & Google Maps Grounding bieten je **5.000 Queries/Mo** im Paid Tier (ab Gemini 3+; Maps bei 2.5 sofort $25/1k, daher 0%-Schutz). "
-        "Weitere Gratisfelder: Tavily (1.000/Mo), Brave (1.000/Mo), Serper (2.500 Starter), Browserbase (60/Mo) — nach Ausschöpfen nur mit `allow_paid=True`. "
-        "**SearXNG (`searxng_public`)** nutzt `searx.space` inkl. HTML-Fallback."
+        "Weitere Gratisfelder: Tavily (1.000/Mo), Serper (2.500 Starter), Browserbase (60/Mo) — nach Ausschöpfen nur mit `allow_paid=True`. "
+        "Kontingent-Tools werden im Benchmark standardmäßig geschont (0 Verbrauch) und im Echtbetrieb passiv mitgemessen."
     )
 
     if any(t.last_status == ProbeStatus.AUTH_MISSING for t in resolved):
@@ -105,15 +105,38 @@ def _render_tool_controls(brain: KIWebsearchBrain, tools: list[ToolSpec]) -> Non
     tool_ids = [t.id for t in tools]
     if not tool_ids:
         return
-    st.subheader("🔧 Tool aktivieren, bearbeiten oder löschen")
-    c_sel, c_tog, c_del = st.columns([2, 1, 1], vertical_alignment="bottom")
+    st.subheader("🔧 Tool testen, aktivieren oder löschen")
+    c_sel, c_probe, c_tog, c_del = st.columns([2.2, 1, 1, 1], vertical_alignment="bottom")
     with c_sel:
         sel_id = st.selectbox("Tool wählen", options=tool_ids, key="ki_tool_quick_sel")
     cur = next(t for t in tools if t.id == sel_id)
+    probe_help = (
+        f"Testet gezielt nur `{sel_id}` live (verbraucht 1 Einheit vom Free-Kontingent)."
+        if is_quota_limited_tool(cur)
+        else f"Testet gezielt nur `{sel_id}` live (Unlimited · 0 Verbrauch)."
+    )
+    with c_probe:
+        do_probe = st.button("🧪 Testen", key="ki_tool_probe_btn", help=probe_help, width="stretch")
     with c_tog:
         do_tog = st.button("⛔ Deaktivieren" if cur.enabled else "✅ Aktivieren", key="ki_tool_tog_btn", width="stretch")
     with c_del:
         do_del = st.button("🗑️ Entfernen", key="ki_tool_del_btn", width="stretch")
+    # Spinner & Feedback strikt außerhalb schmaler Spalten rendern
+    if do_probe:
+        try:
+            with st.spinner(f"Teste Tool `{sel_id}` live..."):
+                entry = brain.probe_single_tool(sel_id)
+            invalidate_ki_ui_cache()
+            badge = format_probe_badge(entry.status)
+            lvl = (
+                "success"
+                if entry.status == ProbeStatus.OK
+                else ("warning" if entry.status in {ProbeStatus.QUOTA_LIMITED, ProbeStatus.AUTH_MISSING} else "error")
+            )
+            _set_feedback(lvl, f"Tool `{sel_id}` getestet: {badge} ({entry.latency_ms} ms) — {entry.details}")
+        except (BrainError, Exception) as exc:  # noqa: BLE001
+            _set_feedback("error", f"Einzel-Test für `{sel_id}` fehlgeschlagen: {exc}")
+        st.rerun()
     if do_tog:
         brain.set_tool_enabled(sel_id, not cur.enabled)
         invalidate_ki_ui_cache()

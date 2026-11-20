@@ -22,8 +22,8 @@ from ki_brain.access import (
 )
 from ki_brain.benchmark import BrainBenchmarkRunner
 from ki_brain.discovery import DiscoverySummary, auto_sync_catalog
-from ki_brain.enums import BrainTier, ProbeStatus
-from ki_brain.exceptions import BrainAuthError
+from ki_brain.enums import BrainTier, ProbeStatus, ToolCategory
+from ki_brain.exceptions import BrainAuthError, BrainValidationError
 from ki_brain.execution import (
     execute_tiered_ask,
     execute_tiered_fetch_page,
@@ -67,16 +67,12 @@ _DEFAULT_AI_SECRET_SPECS: tuple[tuple[str, str], ...] = (
     ("CEREBRAS_API_KEY", "free"),
     ("MISTRAL_API_KEY", "free"),
 )
-_DEFAULT_TOOL_SECRET_NAMES: tuple[str, ...] = (
-    "BRAVE_SEARCH_API_KEY",
+_KNOWN_TOOL_SECRET_ORDER: tuple[str, ...] = (
     "TAVILY_API_KEY",
     "SERPER_API_KEY",
     "BROWSERBASE_API_KEY",
 )
-_DEFAULT_SECRET_NAMES: tuple[str, ...] = (
-    *(name for name, _ in _DEFAULT_AI_SECRET_SPECS),
-    *_DEFAULT_TOOL_SECRET_NAMES,
-)
+_DEFAULT_AI_SECRET_NAMES: tuple[str, ...] = tuple(name for name, _ in _DEFAULT_AI_SECRET_SPECS)
 _AI_SECRET_TIERS: dict[str, str] = dict(_DEFAULT_AI_SECRET_SPECS)
 _HTTP_202_RE = re.compile(r"(?:(?:http|status)\s*202\b|\b202\s*\(anti-bot)", re.IGNORECASE)
 
@@ -121,7 +117,7 @@ def _classify_secret_env(
 ) -> tuple[str, str]:
     if env_name in _AI_SECRET_TIERS:
         return "ai", _AI_SECRET_TIERS[env_name]
-    if env_name in _DEFAULT_TOOL_SECRET_NAMES:
+    if env_name in _KNOWN_TOOL_SECRET_ORDER:
         return "tool", "tool"
     if any(_model_matches_secret_env(m, env_name) for m in models_list):
         tier = "paid" if env_name.endswith("_PAID_API_KEY") else "free"
@@ -553,6 +549,78 @@ class KIWebsearchBrain:
 
         return min(models, key=_rank)
 
+    def _merge_entries_into_latest_benchmark(
+        self,
+        entries: list[BenchmarkEntry],
+        updated_seqs: dict[BrainTier, TierSequenceConfig],
+    ) -> None:
+        latest = self._repo.get_latest_benchmark()
+        if latest is None or not entries:
+            return
+        by_key = {(e.item_type, e.item_id): e for e in latest.entries}
+        for new_entry in entries:
+            by_key[(new_entry.item_type, new_entry.item_id)] = new_entry
+        merged = list(by_key.values())
+        refreshed = latest.model_copy(
+            update={
+                "entries": merged,
+                "sequences": {t.value: cfg for t, cfg in updated_seqs.items()},
+                "healthy_tools_count": sum(1 for e in merged if e.item_type == "tool" and e.status == ProbeStatus.OK),
+                "healthy_models_count": sum(1 for e in merged if e.item_type == "model" and e.status == ProbeStatus.OK),
+            }
+        )
+        self._repo.save_benchmark_run(refreshed)
+
+    def probe_single_tool(
+        self,
+        tool_id: str,
+        *,
+        test_query: str = DEFAULT_TEST_QUERY,
+        test_url: str = DEFAULT_TEST_URL,
+    ) -> BenchmarkEntry:
+        """Testet gezielt genau ein Tool live (inkl. Kontingent-Tools, ohne Paid-Key-Routing)."""
+        from ki_brain.quotas import select_grounding_model
+
+        tool = self._repo.get_tool(tool_id)
+        if tool is None:
+            raise BrainValidationError(f"Tool '{tool_id}' nicht gefunden.")
+        self._refresh_runtime_secrets()
+        bench = BrainBenchmarkRunner(self._repo, self._secrets, self._runner)
+        usage_state = self._repo.load_usage_quotas()
+        g_model = (
+            select_grounding_model(
+                self._repo.list_models(enabled_only=True),
+                self._secrets,
+                executor_type=tool.executor_type,
+                allow_paid=False,
+            )
+            if tool.category == ToolCategory.AI_GROUNDING
+            else None
+        )
+        ut, entry = bench.probe_tool(
+            tool,
+            test_query=test_query,
+            test_url=test_url,
+            grounding_model=g_model,
+            usage_state=usage_state,
+            include_paid=False,
+            include_quota_tools=True,
+        )
+        if ut != tool:
+            self._repo.upsert_tool(ut)
+        updated_seqs = self._repo.list_sequences()
+        if ut.last_status != tool.last_status or entry.status == ProbeStatus.OK:
+            seqs = optimize_tier_sequences(
+                self._repo.list_models(),
+                self._repo.list_tools(),
+                updated_seqs,
+                force_overwrite=False,
+                usage_state=self._repo.load_usage_quotas(),
+            )
+            updated_seqs = {t: self._repo.upsert_sequence(seq) for t, seq in seqs.items()}
+        self._merge_entries_into_latest_benchmark([entry], updated_seqs)
+        return entry
+
     def probe_items_for_secret(self, env_name: str, *, quick_verify: bool = False) -> list[BenchmarkEntry]:
         """Testet zu einem Secret gehörende Modelle/Tools live (`quick_verify=True` prüft 1 schnelles Referenzmodell)."""
         from ki_brain.quotas import select_grounding_model
@@ -575,7 +643,11 @@ class KIWebsearchBrain:
         probe_timeout = 25.0 if quick_verify else 30.0
         for model in target_models:
             um, entry = bench.probe_model(
-                model, usage_state=usage_state, include_paid=is_paid_key, timeout_seconds=probe_timeout
+                model,
+                usage_state=usage_state,
+                include_paid=is_paid_key,
+                force_paid_key=is_paid_key,
+                timeout_seconds=probe_timeout,
             )
             if um != model:
                 self._repo.upsert_model(um)
@@ -593,7 +665,13 @@ class KIWebsearchBrain:
                     all_models, self._secrets, executor_type=tool.executor_type, allow_paid=is_paid_key
                 )
                 ut, entry = bench.probe_tool(
-                    tool, DEFAULT_TEST_QUERY, DEFAULT_TEST_URL, g_model, usage_state=usage_state, include_paid=is_paid_key
+                    tool,
+                    DEFAULT_TEST_QUERY,
+                    DEFAULT_TEST_URL,
+                    g_model,
+                    usage_state=usage_state,
+                    include_paid=is_paid_key,
+                    include_quota_tools=True,
                 )
                 if ut != tool:
                     self._repo.upsert_tool(ut)
@@ -610,21 +688,7 @@ class KIWebsearchBrain:
             )
             updated_seqs = {t: self._repo.upsert_sequence(seq) for t, seq in seqs.items()}
 
-        latest = self._repo.get_latest_benchmark()
-        if latest is not None and entries:
-            by_key = {(e.item_type, e.item_id): e for e in latest.entries}
-            for new_entry in entries:
-                by_key[(new_entry.item_type, new_entry.item_id)] = new_entry
-            merged = list(by_key.values())
-            refreshed = latest.model_copy(
-                update={
-                    "entries": merged,
-                    "sequences": {t.value: cfg for t, cfg in updated_seqs.items()},
-                    "healthy_tools_count": sum(1 for e in merged if e.item_type == "tool" and e.status == ProbeStatus.OK),
-                    "healthy_models_count": sum(1 for e in merged if e.item_type == "model" and e.status == ProbeStatus.OK),
-                }
-            )
-            self._repo.save_benchmark_run(refreshed)
+        self._merge_entries_into_latest_benchmark(entries, updated_seqs)
         return entries
 
     def list_secret_statuses(
@@ -634,11 +698,25 @@ class KIWebsearchBrain:
         tools: list[ToolSpec] | None = None,
         secret_timestamps: dict[str, str] | None = None,
     ) -> list[SecretStatusEntry]:
-        """Liefert Write-Only-Metadaten aller relevanten API-Keys (NIEMALS den Klartext-Wert!)."""
+        """Liefert Write-Only-Metadaten aller relevanten API-Keys (ungenutzte Tool-Keys werden ausgeblendet)."""
         vault_ts = secret_timestamps if secret_timestamps is not None else self._repo.list_secret_timestamps()
         models_list = models if models is not None else self._repo.list_models()
         tools_list = tools if tools is not None else self._repo.list_tools()
-        all_names = list(_DEFAULT_SECRET_NAMES)
+
+        all_names = list(_DEFAULT_AI_SECRET_NAMES)
+        active_tool_envs = {
+            t.api_key_env.strip().upper()
+            for t in tools_list
+            if t.requires_api_key and t.api_key_env.strip()
+        }
+        for known_tool_env in _KNOWN_TOOL_SECRET_ORDER:
+            if (
+                known_tool_env in active_tool_envs
+                or known_tool_env in vault_ts
+                or self._base_secrets.has_key(known_tool_env)
+            ) and known_tool_env not in all_names:
+                all_names.append(known_tool_env)
+
         extra_envs = [
             *(m.api_key_env for m in models_list),
             *(m.paid_api_key_env for m in models_list),
@@ -649,11 +727,16 @@ class KIWebsearchBrain:
             clean = item_env.strip().upper()
             if clean and clean not in all_names:
                 all_names.append(clean)
+
         entries: list[SecretStatusEntry] = []
         for name in all_names:
             in_vault = name in vault_ts
             in_env = self._base_secrets.has_key(name)
             if name == "GEMINI_API_KEY" and not in_vault and not in_env:
+                continue
+            cat, key_tier = _classify_secret_env(name, models_list, tools_list)
+            affected_tools = [f"Tool: {t.id}" for t in tools_list if _tool_matches_secret_env(t, name)]
+            if cat == "tool" and not in_vault and not in_env and not affected_tools:
                 continue
             if in_vault and in_env:
                 source = "Brain Vault (verschlüsselt, überschreibt ENV/Secrets)"
@@ -663,7 +746,6 @@ class KIWebsearchBrain:
                 source = "ENV / Streamlit Secrets"
             else:
                 source = "Nicht gesetzt"
-            cat, key_tier = _classify_secret_env(name, models_list, tools_list)
             affected = [
                 *[
                     f"Model: {m.id}"
@@ -671,7 +753,7 @@ class KIWebsearchBrain:
                     if _model_matches_secret_env(m, name)
                     and (key_tier != "free" or m.is_free)
                 ],
-                *[f"Tool: {t.id}" for t in tools_list if _tool_matches_secret_env(t, name)],
+                *affected_tools,
             ]
             entries.append(
                 SecretStatusEntry(
@@ -702,7 +784,7 @@ class KIWebsearchBrain:
         manifest_url: str = "",
         *,
         verify_discovered: bool = True,
-        exclude_previews: bool = True,
+        include_quota_tools: bool = False,
         on_progress: Callable[[float, str], None] | None = None,
     ) -> DiscoverySummary:
         return auto_sync_catalog(
@@ -712,7 +794,7 @@ class KIWebsearchBrain:
             manifest_url=manifest_url,
             runner=self._runner,
             verify_discovered=verify_discovered,
-            exclude_previews=exclude_previews,
+            include_quota_tools=include_quota_tools,
             on_progress=on_progress,
         )
 
@@ -723,6 +805,7 @@ class KIWebsearchBrain:
         test_url: str = DEFAULT_TEST_URL,
         force_overwrite_sequences: bool = False,
         include_paid: bool = False,
+        include_quota_tools: bool = False,
         on_progress: Callable[[float, str], None] | None = None,
     ) -> BenchmarkReport:
         runner = BrainBenchmarkRunner(self._repo, self._secrets, self._runner)
@@ -731,6 +814,7 @@ class KIWebsearchBrain:
             test_url=test_url,
             force_overwrite_sequences=force_overwrite_sequences,
             include_paid=include_paid,
+            include_quota_tools=include_quota_tools,
             on_progress=on_progress,
         )
 
@@ -741,8 +825,8 @@ class KIWebsearchBrain:
         run_benchmark: bool = True,
         run_unblock: bool = True,
         run_prune: bool = True,
-        exclude_previews: bool = True,
         include_paid: bool = False,
+        include_quota_tools: bool = False,
         on_progress: Callable[[float, str], None] | None = None,
     ) -> PipelineSummary:
         """Führt den kombinierten KI-Brain-Ablauf aus (Discover → Benchmark → Unblock → Prune)."""
@@ -784,7 +868,7 @@ class KIWebsearchBrain:
                 cb(0.05, "Prüfe Quota-Recovery & neue Modelle/Tools...")
                 discovery = self.auto_sync(
                     verify_discovered=True,
-                    exclude_previews=exclude_previews,
+                    include_quota_tools=include_quota_tools,
                     on_progress=cb,
                 )
                 warnings.extend(discovery.warnings)
@@ -792,7 +876,11 @@ class KIWebsearchBrain:
             elif step_name == "benchmark":
                 cb = _slice_cb(cursor, span, "2/4 Benchmark")
                 cb(0.05, "Teste aktive Modelle & Tools live...")
-                benchmark = self.run_benchmark(include_paid=include_paid, on_progress=cb)
+                benchmark = self.run_benchmark(
+                    include_paid=include_paid,
+                    include_quota_tools=include_quota_tools,
+                    on_progress=cb,
+                )
                 executed.append("benchmark")
             elif step_name == "unblock":
                 cb = _slice_cb(cursor, span, "3/4 Unblock")

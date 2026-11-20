@@ -20,7 +20,7 @@ from ki_brain.security import validate_identifier
 
 _INITIALIZED_BACKENDS: set[str] = set()
 _INITIALIZED_LOCK = threading.Lock()
-_CATALOG_REV = "4"
+_CATALOG_REV = "5"
 
 
 @dataclass(frozen=True)
@@ -215,23 +215,60 @@ class BrainRepository:
                 stmts.append(("INSERT OR IGNORE INTO brain_tools (id, payload_json, updated_at) VALUES (?, ?, ?)", (tool.id, tool.model_dump_json(), now)))
             known_t.add(tool.id)
 
-        self._append_rev3_metadata_upgrades(stmts, defaults_tools, now)
-        self._append_rev4_sequence_sanitization(stmts, now)
+        dropped_m, dropped_t = self._append_rev5_preview_and_brave_cleanup(stmts)
+        self._append_rev3_metadata_upgrades(
+            stmts, defaults_tools, now, skip_models=dropped_m, skip_tools=dropped_t
+        )
+        self._append_rev4_sequence_sanitization(
+            stmts, now, dropped_models=dropped_m, dropped_tools=dropped_t
+        )
         stmts.append(("INSERT OR REPLACE INTO brain_meta (key, value) VALUES (?, ?)", ("known_builtin_ids", json.dumps({"models": sorted(known_m), "tools": sorted(known_t)}))))
         stmts.append(("INSERT OR REPLACE INTO brain_meta (key, value) VALUES (?, ?)", ("seeded_catalog_rev", _CATALOG_REV)))
         self._executor.execute_batch(stmts)
 
+    def _append_rev5_preview_and_brave_cleanup(
+        self, stmts: list[tuple[str, tuple[str, ...]]]
+    ) -> tuple[set[str], set[str]]:
+        """Entfernt veraltete Preview-/Experimental-Modelle & unkonfiguriertes `brave_search` bei Katalog-Upgrade."""
+        from ki_brain.discovery import is_preview_or_experimental_model
+
+        dropped_m: set[str] = set()
+        for m in self.list_models():
+            if m.source != "custom" and is_preview_or_experimental_model(m.model_id, m.name):
+                stmts.append(("DELETE FROM brain_models WHERE id = ?", (m.id,)))
+                dropped_m.add(m.id)
+
+        dropped_t: set[str] = set()
+        vault_secrets = self.list_secret_timestamps()
+        for t in self.list_tools():
+            if t.id == "brave_search" and t.source != "custom" and "BRAVE_SEARCH_API_KEY" not in vault_secrets:
+                stmts.append(("DELETE FROM brain_tools WHERE id = ?", (t.id,)))
+                dropped_t.add(t.id)
+        return dropped_m, dropped_t
+
     def _append_rev3_metadata_upgrades(
-        self, stmts: list[tuple[str, tuple[str, ...]]], defaults_tools: list[ToolSpec], now: str
+        self,
+        stmts: list[tuple[str, tuple[str, ...]]],
+        defaults_tools: list[ToolSpec],
+        now: str,
+        *,
+        skip_models: set[str] | None = None,
+        skip_tools: set[str] | None = None,
     ) -> None:
         default_t_map = {t.id: t for t in defaults_tools}
+        ignored_m = skip_models or set()
+        ignored_t = skip_tools or set()
         for m in self.list_models():
+            if m.id in ignored_m:
+                continue
             if m.source != "custom" and not infer_model_is_free(
                 m.model_id, m.name, provider=m.provider, input_cost_per_1m=m.input_cost_per_1m, output_cost_per_1m=m.output_cost_per_1m
             ) and (m.is_free or m.free_quota_period != "none"):
                 up_m = m.model_copy(update={"is_free": False, "free_quota_period": "none"})
                 stmts.append(("UPDATE brain_models SET payload_json = ?, updated_at = ? WHERE id = ?", (up_m.model_dump_json(), now, m.id)))
         for t in self.list_tools():
+            if t.id in ignored_t:
+                continue
             dt = default_t_map.get(t.id)
             if dt and t.free_quota_limit == 0 and dt.free_quota_limit > 0:
                 up_t = t.model_copy(update={
@@ -241,13 +278,20 @@ class BrainRepository:
                 stmts.append(("UPDATE brain_tools SET payload_json = ?, updated_at = ? WHERE id = ?", (up_t.model_dump_json(), now, t.id)))
 
     def _append_rev4_sequence_sanitization(
-        self, stmts: list[tuple[str, tuple[str, ...]]], now: str
+        self,
+        stmts: list[tuple[str, tuple[str, ...]]],
+        now: str,
+        *,
+        dropped_models: set[str] | None = None,
+        dropped_tools: set[str] | None = None,
     ) -> None:
         """Bereinigt veraltete/gelöschte Modell- & Tool-IDs, deep_agent-Flags & Rationale-Texte in brain_sequences."""
         from ki_brain.optimizer import _format_rationale
 
-        all_models = self.list_models()
-        all_tools = self.list_tools()
+        drop_m = dropped_models or set()
+        drop_t = dropped_tools or set()
+        all_models = [m for m in self.list_models() if m.id not in drop_m]
+        all_tools = [t for t in self.list_tools() if t.id not in drop_t]
         valid_m_ids = {m.id for m in all_models}
         valid_t_ids = {t.id for t in all_tools}
         deep_agent_ids = {m.id for m in all_models if m.is_deep_agent}

@@ -19,7 +19,7 @@ from ki_brain.llm_runner import UnifiedLLMRunner
 from ki_brain.models import AIModelSpec, BrainSecrets, ToolSpec
 from ki_brain.optimizer import optimize_tier_sequences
 from ki_brain.pricing import infer_model_is_free
-from ki_brain.quotas import select_grounding_model
+from ki_brain.quotas import is_quota_limited_tool, select_grounding_model
 from ki_brain.security import validate_identifier
 from ki_brain.storage import BrainRepository
 from ki_brain.tools.http_utils import API_HEADERS, safe_http_request
@@ -49,7 +49,6 @@ _GEMINI_TEXT_SERIES_RE = re.compile(
     r"^(?:gemini-(?:2\.5|3(?:\.[0-9]+)?|4(?:\.[0-9]+)?|5(?:\.[0-9]+)?|[3-9]-)|gemma-(?:3|4)|deep-research|learnlm)",
     re.IGNORECASE,
 )
-_CANONICAL_DEEP_RESEARCH_ID = "deep-research-preview-04-2026"
 _PREVIEW_MARKERS = (
     "preview",
     "-exp",
@@ -68,13 +67,9 @@ _DATED_CLONE_RE = re.compile(r"-(?:00[1-9]|202\d|\d{2}-\d{2,4})$")
 
 
 def is_preview_or_experimental_model(model_id: str, display_name: str = "") -> bool:
-    """Erkennt Preview-/Experimental-Modelle (ausgenommen kanonischer Deep Research Agent)."""
+    """Erkennt sämtliche Preview-, Experimental-, Alpha-, Beta- und veralteten Modelle strikt."""
     clean_id = (model_id or "").strip().lower()
     name_low = (display_name or "").strip().lower()
-    if clean_id == _CANONICAL_DEEP_RESEARCH_ID and not any(
-        bad in name_low for bad in ("rerouted", "deprecated")
-    ):
-        return False
     low = f"{clean_id} {name_low}"
     return any(tok in low for tok in _PREVIEW_MARKERS) or clean_id.endswith("-exp")
 
@@ -168,7 +163,7 @@ def _sync_new_builtins(
     return added_m, added_t, skipped
 
 
-def _discover_gemini_models(client: genai.Client, *, exclude_previews: bool = True) -> tuple[list[AIModelSpec], list[str]]:
+def _discover_gemini_models(client: genai.Client) -> tuple[list[AIModelSpec], list[str]]:
     discovered: list[AIModelSpec] = []
     skipped_previews: list[str] = []
     for raw in client.models.list():
@@ -183,7 +178,7 @@ def _discover_gemini_models(client: genai.Client, *, exclude_previews: bool = Tr
         if actions and not any(act in actions for act in ("generateContent", "streamGenerateContent")) and "deep-research" not in low:
             continue
         display = str(getattr(raw, "display_name", "") or model_id).strip()[:120]
-        if exclude_previews and is_preview_or_experimental_model(model_id, display):
+        if is_preview_or_experimental_model(model_id, display):
             skipped_previews.append(model_id)
             continue
         tier, is_deep = _guess_gemini_tier(model_id)
@@ -365,6 +360,8 @@ def _sync_remote_manifest(
 def _probe_candidate_models(
     candidates: list[AIModelSpec],
     bench: BrainBenchmarkRunner,
+    *,
+    usage_state: dict[str, Any] | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> list[tuple[AIModelSpec, ProbeStatus]]:
     if not candidates:
@@ -376,7 +373,10 @@ def _probe_candidate_models(
     done = 0
     if openai_items:
         with ThreadPoolExecutor(max_workers=4) as pool:
-            for probed, entry in pool.map(bench.probe_model, openai_items):
+            for probed, entry in pool.map(
+                lambda m: bench.probe_model(m, usage_state=usage_state, include_paid=False),
+                openai_items,
+            ):
                 done += 1
                 if on_progress:
                     on_progress(0.55 + 0.40 * (done / total), f"Prüfe neues Modell ({done}/{total}): `{probed.id}`...")
@@ -385,7 +385,7 @@ def _probe_candidate_models(
         done += 1
         if on_progress:
             on_progress(0.55 + 0.40 * (done / total), f"Prüfe neues Gemini-Modell ({done}/{total}): `{spec.id}`...")
-        probed, entry = bench.probe_model(spec)
+        probed, entry = bench.probe_model(spec, usage_state=usage_state, include_paid=False)
         results.append((probed, entry.status))
     return results
 
@@ -395,15 +395,17 @@ def _recheck_unhealthy_existing(
     secrets: BrainSecrets,
     bench: BrainBenchmarkRunner,
     *,
-    exclude_previews: bool,
+    usage_state: dict[str, Any] | None = None,
+    include_quota_tools: bool = False,
     on_progress: ProgressCallback | None = None,
 ) -> tuple[list[str], int, bool]:
     targets = [
         m
         for m in repo.list_models(enabled_only=True)
         if m.last_status in {ProbeStatus.QUOTA_LIMITED, ProbeStatus.ERROR}
-        and secrets.has_model_key(m, allow_paid=not m.is_free)
-        and not (exclude_previews and is_preview_or_experimental_model(m.model_id, m.name))
+        and m.is_free
+        and secrets.has_model_key(m, allow_paid=False)
+        and not is_preview_or_experimental_model(m.model_id, m.name)
     ]
     recovered: list[str] = []
     quota_recovered = False
@@ -414,7 +416,7 @@ def _recheck_unhealthy_existing(
                 f"Prüfe bisher limitiertes Modell ({idx}/{len(targets)}): `{model.id}`...",
             )
         was_quota = model.last_status == ProbeStatus.QUOTA_LIMITED
-        probed, entry = bench.probe_model(model)
+        probed, entry = bench.probe_model(model, usage_state=usage_state, include_paid=False)
         repo.upsert_model(probed)
         if entry.status == ProbeStatus.OK:
             recovered.append(probed.id)
@@ -427,6 +429,7 @@ def _recheck_unhealthy_existing(
         if t.category == ToolCategory.AI_GROUNDING
         and t.last_status in {ProbeStatus.QUOTA_LIMITED, ProbeStatus.ERROR}
         and secrets.has_tool_key(t, allow_paid=False)
+        and (include_quota_tools or not is_quota_limited_tool(t))
     ]
     if ai_tools:
         healthy_models = repo.list_models(enabled_only=True)
@@ -440,7 +443,13 @@ def _recheck_unhealthy_existing(
             if grounding_model is None:
                 continue
             was_quota = tool.last_status == ProbeStatus.QUOTA_LIMITED
-            probed_t, entry_t = bench.probe_tool(tool, grounding_model=grounding_model)
+            probed_t, entry_t = bench.probe_tool(
+                tool,
+                grounding_model=grounding_model,
+                usage_state=usage_state,
+                include_paid=False,
+                include_quota_tools=include_quota_tools,
+            )
             repo.upsert_tool(probed_t)
             if was_quota and entry_t.status == ProbeStatus.OK:
                 quota_recovered = True
@@ -468,6 +477,7 @@ def _persist_discovered_candidates(
     bench: BrainBenchmarkRunner,
     *,
     verify_discovered: bool,
+    usage_state: dict[str, Any] | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> tuple[list[str], list[str]]:
     if not candidates:
@@ -482,7 +492,9 @@ def _persist_discovered_candidates(
             added.append(spec.id)
         return added, unhealthy
 
-    for probed, status in _probe_candidate_models(candidates, bench, on_progress=on_progress):
+    for probed, status in _probe_candidate_models(
+        candidates, bench, usage_state=usage_state, on_progress=on_progress
+    ):
         if status in {ProbeStatus.ERROR, ProbeStatus.QUOTA_LIMITED}:
             unhealthy.append(probed.id)
             unhealthy_reasons[probed.id] = (
@@ -505,21 +517,27 @@ def auto_sync_catalog(
     manifest_url: str = "",
     runner: UnifiedLLMRunner | None = None,
     verify_discovered: bool = True,
-    exclude_previews: bool = True,
+    include_quota_tools: bool = False,
     on_progress: ProgressCallback | None = None,
 ) -> DiscoverySummary:
-    """Erkennt neue/reaktivierte Modelle & Tools, prüft Quota-Recovery und schließt defekte/Preview-IDs aus."""
+    """Erkennt neue/reaktivierte stabile Modelle & Tools; schließt Preview-/Experimental-Modelle strikt aus."""
     from ki_brain.tools.searxng import build_searxng_tool, discover_verified_searxng_pool
 
     probe_runner = runner or UnifiedLLMRunner(secrets, genai_client=genai_client)
     bench = BrainBenchmarkRunner(repo, secrets, probe_runner)
+    usage_state = repo.load_usage_quotas()
 
     recovered_models: list[str] = []
     rechecked_models = 0
     quota_recovered = False
     if verify_discovered:
         recovered_models, rechecked_models, quota_recovered = _recheck_unhealthy_existing(
-            repo, secrets, bench, exclude_previews=exclude_previews, on_progress=on_progress
+            repo,
+            secrets,
+            bench,
+            usage_state=usage_state,
+            include_quota_tools=include_quota_tools,
+            on_progress=on_progress,
         )
 
     if on_progress:
@@ -566,7 +584,7 @@ def auto_sync_catalog(
             if spec.id in existing_ids or spec.id in seen_candidates:
                 continue
             seen_candidates.add(spec.id)
-            if exclude_previews and is_preview_or_experimental_model(spec.model_id, spec.name):
+            if is_preview_or_experimental_model(spec.model_id, spec.name):
                 skipped_previews.append(spec.id)
                 continue
             if spec.id in excluded_models and spec.id not in retry_ids:
@@ -584,7 +602,7 @@ def auto_sync_catalog(
             on_progress(0.36, "Frage aktuelle Gemini-Modelle über `models.list()` ab...")
         try:
             client = genai_client or genai.Client(api_key=gem_key)
-            gem_found, gem_previews = _discover_gemini_models(client, exclude_previews=exclude_previews)
+            gem_found, gem_previews = _discover_gemini_models(client)
             for pid in gem_previews:
                 if pid not in existing_ids and pid not in skipped_previews:
                     skipped_previews.append(pid)
@@ -638,7 +656,12 @@ def auto_sync_catalog(
             warnings.append(f"Manifest-Sync: {exc}")
 
     cand_added, skipped_unhealthy = _persist_discovered_candidates(
-        repo, candidates, bench, verify_discovered=verify_discovered, on_progress=on_progress
+        repo,
+        candidates,
+        bench,
+        verify_discovered=verify_discovered,
+        usage_state=usage_state,
+        on_progress=on_progress,
     )
     added_models.extend(cand_added)
 

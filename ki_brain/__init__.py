@@ -39,6 +39,7 @@ from ki_brain.quotas import (
     evaluate_tool_quota,
     format_quota_label,
     is_geo_or_maps_query,
+    is_quota_limited_tool,
 )
 from ki_brain.storage import BrainDashboardState, BrainRepository, create_brain_repository
 from ki_brain.unblock import UnblockSummary
@@ -86,4 +87,5 @@ __all__ = [
     "infer_model_is_free",
     "is_geo_or_maps_query",
     "is_preview_or_experimental_model",
+    "is_quota_limited_tool",
 ]

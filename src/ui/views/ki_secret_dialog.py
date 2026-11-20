@@ -128,9 +128,19 @@ def open_secret_dialog(env_name: str, settings: AppSettings) -> None:
 
     c_test, c_save = st.columns(2, vertical_alignment="bottom")
     with c_test:
-        save_and_test = st.button("🔒 Speichern & testen", key=f"ki_dlg_test_btn_{clean_env}", width="stretch")
+        save_and_test = st.button(
+            "🔒 Speichern & testen",
+            key=f"ki_dlg_test_btn_{clean_env}",
+            help="Speichert den Key und führt 1 Live-Schnelltest aus (verbraucht bei Kontingent-Tools 1 Einheit).",
+            width="stretch",
+        )
     with c_save:
-        save_only = st.button("🔒 Nur speichern", key=f"ki_dlg_save_btn_{clean_env}", width="stretch")
+        save_only = st.button(
+            "🔒 Nur speichern",
+            key=f"ki_dlg_save_btn_{clean_env}",
+            help="Speichert den Key ohne Live-Test (0 Verbrauch / $0).",
+            width="stretch",
+        )
 
     # Spinner & Validierungsfehler strikt außerhalb schmaler Spalten rendern
     if save_and_test or save_only:

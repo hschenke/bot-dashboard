@@ -28,6 +28,8 @@ from ki_brain.optimizer import (
 from ki_brain.quotas import (
     evaluate_model_quota,
     evaluate_tool_quota,
+    format_quota_label,
+    is_quota_limited_tool,
     record_quota_usage,
     select_grounding_model,
 )
@@ -84,6 +86,7 @@ class BrainBenchmarkRunner:
         *,
         usage_state: dict[str, Any] | None = None,
         include_paid: bool = False,
+        include_quota_tools: bool = True,
     ) -> tuple[ToolSpec, BenchmarkEntry]:
         updated, entry, used_units = self._probe_tool_with_usage(
             tool,
@@ -92,6 +95,7 @@ class BrainBenchmarkRunner:
             grounding_model=grounding_model,
             usage_state=usage_state,
             include_paid=include_paid,
+            include_quota_tools=include_quota_tools,
         )
         if used_units > 0:
             record_quota_usage(self._repo, tool_counts={tool.id: used_units})
@@ -106,16 +110,38 @@ class BrainBenchmarkRunner:
         grounding_model: AIModelSpec | None = None,
         usage_state: dict[str, Any] | None = None,
         include_paid: bool = False,
+        include_quota_tools: bool = False,
     ) -> tuple[ToolSpec, BenchmarkEntry, int]:
         now = _utc_now_iso()
         if tool.requires_api_key and not self._secrets.has_tool_key(tool, allow_paid=include_paid):
             u, e = self._record_tool_result(tool, ProbeStatus.AUTH_MISSING, 0, 0, 0, f"Key {tool.api_key_env} fehlt.", now)
             return u, e, 0
 
-        if not include_paid and usage_state is not None:
+        if not include_quota_tools and is_quota_limited_tool(tool):
+            q_snap = evaluate_tool_quota(tool, usage_state)
+            q_label = format_quota_label(q_snap, paid_cost_per_1k=tool.paid_cost_per_1k)
+            preserved = (
+                tool.model_copy(update={"last_status": ProbeStatus.UNTESTED, "last_error": ""})
+                if tool.last_status == ProbeStatus.AUTH_MISSING
+                else tool
+            )
+            note = f"Kontingent-Schutz ({q_label}): Live-Test übersprungen (0 Verbrauch)."
+            entry = BenchmarkEntry(
+                item_type="tool",
+                item_id=preserved.id,
+                name=preserved.name,
+                status=preserved.last_status,
+                latency_ms=preserved.last_latency_ms,
+                result_count=preserved.last_result_count,
+                quality_score=preserved.quality_score,
+                details=note,
+            )
+            return preserved, entry, 0
+
+        if not include_paid:
             q_snap = evaluate_tool_quota(tool, usage_state)
             if not q_snap.is_free_available:
-                note = "0%-Schutz: Free-Kontingent erschöpft oder Paid-Only (Opt-In für Live-Probe nötig)."
+                note = "0%-Schutz: Free-Kontingent erschöpft oder Paid-Only (kein kostenpflichtiger Live-Test)."
                 entry = BenchmarkEntry(
                     item_type="tool", item_id=tool.id, name=tool.name, status=tool.last_status,
                     latency_ms=tool.last_latency_ms, result_count=0, quality_score=tool.quality_score, details=note,
@@ -245,31 +271,32 @@ class BrainBenchmarkRunner:
         *,
         usage_state: dict[str, Any] | None = None,
         include_paid: bool = False,
+        force_paid_key: bool = False,
         timeout_seconds: float = 30.0,
     ) -> tuple[AIModelSpec, BenchmarkEntry]:
         now = _utc_now_iso()
-        effective_paid = bool(include_paid or not model.is_free)
+        m_snap = evaluate_model_quota(model, usage_state)
+        if not include_paid and not force_paid_key and not m_snap.is_free_available:
+            note = "0%-Schutz: Paid-Only / Free-Kontingent erschöpft (Test nur mit Paid-Opt-In)."
+            entry = BenchmarkEntry(
+                item_type="model", item_id=model.id, name=model.name, status=model.last_status,
+                latency_ms=model.last_latency_ms, result_count=0, quality_score=model.quality_score, details=note,
+            )
+            return model, entry
+
+        use_paid_key = bool(force_paid_key or not model.is_free or not m_snap.is_free_available)
         if model.requires_api_key:
             resolved_key, missing_env = self._secrets.resolve_model_key_with_env(
-                model, allow_paid=effective_paid
+                model, allow_paid=use_paid_key
             )
             if not resolved_key:
                 return self._record_model_result(
                     model, ProbeStatus.AUTH_MISSING, 0, f"Key {missing_env or model.api_key_env} fehlt.", now
                 )
-        if not include_paid and not model.is_deep_agent and usage_state is not None:
-            m_snap = evaluate_model_quota(model, usage_state)
-            if not m_snap.is_free_available:
-                note = "0%-Schutz: Paid-Only / Free-Kontingent erschöpft (Test nur mit Paid-Opt-In)."
-                entry = BenchmarkEntry(
-                    item_type="model", item_id=model.id, name=model.name, status=model.last_status,
-                    latency_ms=model.last_latency_ms, result_count=0, quality_score=model.quality_score, details=note,
-                )
-                return model, entry
         t0 = time.monotonic()
         try:
             if model.is_deep_agent:
-                client = self._runner._get_genai_client(timeout_seconds=min(15.0, timeout_seconds), model=model, allow_paid=effective_paid)  # noqa: SLF001
+                client = self._runner._get_genai_client(timeout_seconds=min(15.0, timeout_seconds), model=model, allow_paid=use_paid_key)  # noqa: SLF001
                 listed = list(client.models.list())
                 lat = int((time.monotonic() - t0) * 1000)
                 details = f"Deep-Research-Agent API erreichbar ({len(listed)} Modelle, {lat} ms)."
@@ -284,7 +311,7 @@ class BrainBenchmarkRunner:
                 model,
                 "Antworte nur mit OK.",
                 timeout_seconds=timeout_seconds,
-                allow_paid=effective_paid,
+                allow_paid=use_paid_key,
                 generation_config=probe_gc,
                 max_attempts=1,
             )
@@ -328,9 +355,10 @@ class BrainBenchmarkRunner:
         test_url: str = DEFAULT_TEST_URL,
         force_overwrite_sequences: bool = False,
         include_paid: bool = False,
+        include_quota_tools: bool = False,
         on_progress: Callable[[float, str], None] | None = None,
     ) -> BenchmarkReport:
-        """Testet alle aktivierten Tools & Modelle (Standard: strikt 0% Kosten) und optimiert Fast, Standard & Deep."""
+        """Testet aktive Modelle & Unlimited-Tools (Kontingent-Tools & Paid-Only-Modelle nur per Opt-In)."""
         started = _utc_now_iso()
         models = self._repo.list_models(enabled_only=True)
         tools = self._repo.list_tools(enabled_only=True)
@@ -355,7 +383,7 @@ class BrainBenchmarkRunner:
                 updated_models,
                 self._secrets,
                 executor_type=t.executor_type,
-                allow_paid=include_paid,
+                allow_paid=False,
             )
             for t in tools
             if t.category == ToolCategory.AI_GROUNDING
@@ -374,7 +402,8 @@ class BrainBenchmarkRunner:
                     test_url=test_url,
                     grounding_model=g_models.get(tool.id),
                     usage_state=usage_state,
-                    include_paid=include_paid,
+                    include_paid=False,
+                    include_quota_tools=include_quota_tools,
                 )
                 for tool in tools
             ]

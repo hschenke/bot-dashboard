@@ -158,6 +158,12 @@ def evaluate_model_quota(
     )
 
 
+def is_quota_limited_tool(tool: ToolSpec) -> bool:
+    """Erkennt Tools mit begrenztem Free-Kontingent (Monat/Tag/Lifetime statt Unlimited)."""
+    period = (tool.free_quota_period or "unlimited").strip().lower()
+    return tool.free_quota_limit > 0 and period not in {"unlimited", "none"}
+
+
 def is_gemini_3_or_newer(model: AIModelSpec) -> bool:
     """Prüft auf Gemini 3+ (`gemini-3*`, `gemini-4*`), wo 5.000/Mo Grounding-Freikontingent gilt."""
     return bool(_GEMINI_GEN3_RE.search(f"{model.id} {model.model_id}"))

@@ -29,7 +29,7 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
     monkeypatch.setenv("BRAIN_SQLITE_PATH", str(db_file))
     settings = AppSettings(brain_sqlite_path=str(db_file))
     brain = create_dashboard_brain(settings)
-    assert len(brain.list_models()) >= 8
+    assert len(brain.list_models()) >= 7
     assert len(brain.list_tools()) >= 15
     brain.close()
 
@@ -67,15 +67,19 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
     assert "ki_top_btn_pipeline" in pipeline_btn.proto.id
     assert pipeline_btn.proto.type == "secondary"
 
-    # Ablauf-Optionen inkl. Preview-Ausschluss stecken im eingeklappten Expander
+    # Ablauf-Optionen im eingeklappten Expander: Preview-Checkbox entfernt, Kontingent- & Paid-Option standardmäßig AUS
     options_exp = next(e for e in at.expander if "Ablauf-Optionen" in e.label)
     assert options_exp.proto.expanded is False
     exp_cb_labels = [c.label for c in options_exp.checkbox]
-    assert "Preview- & Experimental-Modelle ausschließen" in exp_cb_labels
+    assert not any("Preview" in lbl for lbl in exp_cb_labels)
     assert "🔎 Discover" in exp_cb_labels
     assert "🚀 Benchmark" in exp_cb_labels
     assert "🔓 Unblock" in exp_cb_labels
     assert "🧹 Prune Failing" in exp_cb_labels
+    quota_cb = next(c for c in options_exp.checkbox if c.key == "ki_opt_include_quota_tools")
+    assert quota_cb.value is False
+    paid_cb = next(c for c in options_exp.checkbox if c.key == "ki_opt_include_paid")
+    assert paid_cb.value is False
     assert not any("Ausgeschlossene Modelle erneut prüfen" in c.label for c in at.checkbox)
 
     # 5 Tabs: Sequencing (0), KI (1), Tools (2), Vault (3), Check (4)
@@ -91,18 +95,20 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
         assert exp.proto.expanded is False
         assert "0% Kosten" not in exp.label
 
-    # Tab 1 (KI) & Tab 2 (Tools): Tabellen intakt, klare Formulierung & KEINE API-Key-Buttons außerhalb von Vault
+    # Tab 1 (KI) & Tab 2 (Tools): Tabellen intakt, Einzel-Test-Button vorhanden & KEINE API-Key-Buttons außerhalb von Vault
     assert not any("0%-Standard" in c.value for c in at.tabs[1].caption)
     models_df = at.tabs[1].dataframe[0].value
     tools_df = at.tabs[2].dataframe[0].value
     assert "Latenz (ms)" in models_df.columns
     assert "Kosten (~$/1M)" in models_df.columns
     assert "Budget" in models_df.columns
-    assert any("Paid-Only" in str(val) for val in models_df["Budget"])
+    assert any("Free Tier" in str(val) for val in models_df["Budget"])
     assert "Kontingent / Kosten" in tools_df.columns
     assert "searxng_public" in list(tools_df["ID"])
     assert "gemini_google_maps" in list(tools_df["ID"])
+    assert "brave_search" not in list(tools_df["ID"])
     assert any("5000/5000/Mo" in str(val) for val in tools_df["Kontingent / Kosten"])
+    assert any(b.key == "ki_tool_probe_btn" and b.label == "🧪 Testen" for b in at.tabs[2].button)
 
     for non_vault_idx in (0, 1, 2, 4):
         assert not any("Missing Key" in b.label for b in at.tabs[non_vault_idx].button)
@@ -112,7 +118,7 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
     assert "Free-Tier API-Key Env" in model_inputs
     assert "Paid-Tier API-Key Env (optional)" in model_inputs
 
-    # Tab 3 (Vault): enthält Free-Tier-, Paid-Tier-, Tool-Keys & die 3 App-Zugriffstokens (Legacy GEMINI_API_KEY ausgeblendet, wenn ungesetzt)
+    # Tab 3 (Vault): enthält Free-Tier-, Paid-Tier-, Tool-Keys (ohne Brave!) & die 3 App-Zugriffstokens
     vault_btn_keys = [b.key for b in at.tabs[3].button]
     assert "ki_vault_row_btn_GEMINI_FREE_API_KEY" in vault_btn_keys
     assert "ki_vault_row_btn_GEMINI_PAID_API_KEY" in vault_btn_keys
@@ -120,7 +126,7 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
     assert "ki_vault_row_btn_GROQ_API_KEY" in vault_btn_keys
     assert "ki_vault_row_btn_GROQ_PAID_API_KEY" in vault_btn_keys
     assert "ki_vault_row_btn_TAVILY_API_KEY" in vault_btn_keys
-    assert "ki_vault_row_btn_BRAVE_SEARCH_API_KEY" in vault_btn_keys
+    assert "ki_vault_row_btn_BRAVE_SEARCH_API_KEY" not in vault_btn_keys
     assert "ki_vault_row_btn_SERPER_API_KEY" in vault_btn_keys
     assert "ki_vault_row_btn_BROWSERBASE_API_KEY" in vault_btn_keys
     assert "ki_app_issue_btn_news_bot" in vault_btn_keys
@@ -478,3 +484,47 @@ def test_ki_vault_shows_gemini_env_redundancy_and_readonly_dialog_hint(
     assert not at.exception
     assert not any(b.key == "ki_dlg_del_btn_GEMINI_API_KEY" for b in at.button)
     assert any("stammt aktuell aus **Streamlit Secrets" in i.value for i in at.info)
+
+
+def test_ki_tools_tab_single_tool_probe_button(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ki_brain.models import BrainFetchedPage, ProbeStatus
+    from streamlit.testing.v1 import AppTest
+
+    db_file = tmp_path / "single_probe_ui.db"
+    monkeypatch.setenv("BRAIN_SQLITE_PATH", str(db_file))
+    with create_dashboard_brain(AppSettings(brain_sqlite_path=str(db_file))) as b:
+        b.set_secret("BROWSERBASE_API_KEY", "bb_ui_single_test_key")
+
+    monkeypatch.setattr(
+        "ki_brain.benchmark.execute_extractor_tool",
+        lambda tool, url, secrets=None: BrainFetchedPage(
+            url=url, title="Wiki", text_content="Sauberer Testtext " * 15, extractor_used=tool.id, latency_ms=95
+        ),
+    )
+
+    def _app() -> None:
+        import os
+
+        from src.config.settings import AppSettings
+        from src.domain.enums import AuthRole
+        from src.ui.views.ki_view import render_ki_view
+
+        render_ki_view(AppSettings(brain_sqlite_path=os.environ["BRAIN_SQLITE_PATH"]), role=AuthRole.ADMIN)
+
+    at = AppTest.from_function(_app).run()
+    assert not at.exception
+    tool_sel = next(s for s in at.tabs[2].selectbox if s.key == "ki_tool_quick_sel")
+    tool_sel.set_value("browserbase_fetch").run()
+    probe_btn = next(b for b in at.tabs[2].button if b.key == "ki_tool_probe_btn")
+    at = probe_btn.click().run()
+    assert not at.exception
+    assert any("browserbase_fetch" in s.value and "OK" in s.value for s in at.success)
+
+    reopened = create_dashboard_brain(AppSettings(brain_sqlite_path=str(db_file)))
+    bb = reopened.get_tool("browserbase_fetch")
+    assert bb is not None and bb.last_status == ProbeStatus.OK
+    assert reopened.load_usage_quotas()["tools"]["browserbase_fetch"]["used"] == 1
+    reopened.close()
+

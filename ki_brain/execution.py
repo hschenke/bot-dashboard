@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import datetime
+import logging
 import time
 from collections.abc import Callable
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
-from ki_brain.enums import BrainTier
+from ki_brain.enums import BrainTier, ProbeStatus
 from ki_brain.exceptions import BrainProviderError, BrainSSRFError
 from ki_brain.llm_runner import UnifiedLLMRunner, is_quota_error, pop_last_grounding_counts
 from ki_brain.models import (
@@ -21,6 +23,7 @@ from ki_brain.models import (
     TierSequenceConfig,
     ToolSpec,
 )
+from ki_brain.optimizer import compute_tool_quality
 from ki_brain.quotas import (
     evaluate_model_quota,
     evaluate_tool_quota,
@@ -36,8 +39,60 @@ from ki_brain.tools.registry import (
     is_search_capable,
 )
 
+logger = logging.getLogger(__name__)
 ModelT = TypeVar("ModelT", bound=BaseModel)
 _AI_GROUNDING_SEARCH = frozenset({"gemini_google_search", "gemini_google_maps"})
+
+
+def _build_passive_tool_update(
+    tool: ToolSpec,
+    *,
+    ok: bool,
+    latency_ms: int,
+    result_count: int = 0,
+    text_chars: int = 0,
+    exc: Exception | None = None,
+) -> ToolSpec | None:
+    """Erstellt ein passives Health-Update aus produktivem Traffic (0 Extra-Calls)."""
+    now = datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds")
+    if ok:
+        quality = compute_tool_quality(ProbeStatus.OK, latency_ms, result_count, text_chars=text_chars)
+        prev_rel = tool.reliability_score or 100.0
+        reliability = round(0.6 * 100.0 + 0.4 * prev_rel, 1) if tool.last_tested_at else 100.0
+        return tool.model_copy(
+            update={
+                "last_status": ProbeStatus.OK,
+                "last_latency_ms": max(1, int(latency_ms)),
+                "last_result_count": max(0, int(result_count)),
+                "reliability_score": reliability,
+                "quality_score": quality,
+                "last_tested_at": now,
+                "last_error": "",
+            }
+        )
+    if exc is not None and is_quota_error(exc):
+        prev_rel = tool.reliability_score or 20.0
+        reliability = round(0.6 * 20.0 + 0.4 * prev_rel, 1) if tool.last_tested_at else 20.0
+        return tool.model_copy(
+            update={
+                "last_status": ProbeStatus.QUOTA_LIMITED,
+                "last_latency_ms": max(0, int(latency_ms)),
+                "reliability_score": reliability,
+                "quality_score": compute_tool_quality(ProbeStatus.QUOTA_LIMITED, latency_ms, 0),
+                "last_tested_at": now,
+                "last_error": str(exc)[:380],
+            }
+        )
+    return None
+
+
+def _persist_passive_tool_health(repo: BrainRepository, updates: list[ToolSpec]) -> None:
+    if not updates:
+        return
+    try:
+        repo.upsert_tools_batch(updates)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Passives Tool-Health-Update übersprungen: %s", exc)
 
 
 def _ordered_models(
@@ -151,6 +206,7 @@ def execute_tiered_search(
     executed: list[str] = []
     errors: dict[str, str] = {}
     usage_deltas: dict[str, int] = {}
+    health_updates: list[ToolSpec] = []
     tools_with_hits = 0
 
     for tool in candidates:
@@ -168,6 +224,7 @@ def execute_tiered_search(
         if on_action:
             on_action(f"🔎 Suche via {tool.name}...")
         executed.append(tool.id)
+        t_call = time.monotonic()
         try:
             if etype in _AI_GROUNDING_SEARCH:
                 hits = execute_search_tool(
@@ -177,9 +234,14 @@ def execute_tiered_search(
                 )
             else:
                 hits = execute_search_tool(tool, clean_q, language=language, secrets=secrets, limit=tool.max_results)
+            call_ms = int((time.monotonic() - t_call) * 1000)
             delta = _resolve_tool_usage_delta(tool)
             if delta > 0:
                 usage_deltas[tool.id] = usage_deltas.get(tool.id, 0) + delta
+            if hits:
+                upd = _build_passive_tool_update(tool, ok=True, latency_ms=call_ms, result_count=len(hits))
+                if upd is not None:
+                    health_updates.append(upd)
             added_here = 0
             for hit in hits:
                 if hit.url not in seen_urls:
@@ -190,10 +252,15 @@ def execute_tiered_search(
                 tools_with_hits += 1
         except Exception as exc:
             pop_last_grounding_counts()
+            call_ms = int((time.monotonic() - t_call) * 1000)
+            upd = _build_passive_tool_update(tool, ok=False, latency_ms=call_ms, exc=exc)
+            if upd is not None:
+                health_updates.append(upd)
             errors[tool.id] = str(exc)[:220]
 
     if usage_deltas:
         record_quota_usage(repo, tool_counts=usage_deltas)
+    _persist_passive_tool_health(repo, health_updates)
 
     return BrainSearchResult(
         query=clean_q,
@@ -219,18 +286,33 @@ def execute_tiered_fetch_page(
         repo, seq, is_extractor_capable, is_search=False, allow_paid=allow_paid, usage_state=usage_state
     )
     last_exc: Exception | None = None
+    health_updates: list[ToolSpec] = []
     for tool in candidates:
         if tool.requires_api_key and not secrets.has_key(tool.api_key_env):
             continue
+        t_call = time.monotonic()
         try:
             page = execute_extractor_tool(tool, url, secrets=secrets)
+            call_ms = int((time.monotonic() - t_call) * 1000)
             if tool.free_quota_limit > 0:
                 record_quota_usage(repo, tool_counts={tool.id: 1})
+            upd = _build_passive_tool_update(
+                tool, ok=True, latency_ms=call_ms, result_count=1, text_chars=len(page.text_content)
+            )
+            if upd is not None:
+                health_updates.append(upd)
+            _persist_passive_tool_health(repo, health_updates)
             return page
         except BrainSSRFError:
+            _persist_passive_tool_health(repo, health_updates)
             raise
         except Exception as exc:
+            call_ms = int((time.monotonic() - t_call) * 1000)
+            upd = _build_passive_tool_update(tool, ok=False, latency_ms=call_ms, exc=exc)
+            if upd is not None:
+                health_updates.append(upd)
             last_exc = exc
+    _persist_passive_tool_health(repo, health_updates)
     raise BrainProviderError(f"Alle Seiten-Extraktoren für '{url}' fehlgeschlagen: {last_exc}")
 
 

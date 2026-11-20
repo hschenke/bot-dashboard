@@ -64,8 +64,8 @@ def _run_pipeline_action(
     run_benchmark: bool,
     run_unblock: bool,
     run_prune: bool,
-    exclude_previews: bool,
     include_paid: bool,
+    include_quota_tools: bool,
 ) -> None:
     if not any((run_discover, run_benchmark, run_unblock, run_prune)):
         _flash("warning", "Kein Ablauf-Schritt ausgewählt — bitte unter 'Ablauf-Optionen' mindestens einen Schritt aktivieren.")
@@ -79,8 +79,8 @@ def _run_pipeline_action(
                 run_benchmark=run_benchmark,
                 run_unblock=run_unblock,
                 run_prune=run_prune,
-                exclude_previews=exclude_previews,
                 include_paid=include_paid,
+                include_quota_tools=include_quota_tools,
                 on_progress=cb,
             ),
         )
@@ -128,10 +128,10 @@ def render_ki_view(settings: AppSettings, role: AuthRole = AuthRole.ADMIN) -> No
             key="ki_top_btn_pipeline",
             disabled=not is_admin,
             width="stretch",
-            help="Führt den kompletten Ablauf aus: Discover → Benchmark & Optimize → Unblock Tools → Prune Failing.",
+            help="Führt den kompletten Ablauf aus: Discover (stabile Modelle, ohne Previews) → Benchmark & Optimize → Unblock Tools → Prune Failing.",
         )
 
-        with st.expander("⚙️ Ablauf-Optionen (Schritte, Preview-Filter & Paid-Check)", expanded=False):
+        with st.expander("⚙️ Ablauf-Optionen (Schritte, Kontingent & Paid-Check)", expanded=False):
             s1, s2, s3, s4 = st.columns(4)
             with s1:
                 step_discover = st.checkbox("🔎 Discover", value=True, key="ki_opt_discover", disabled=not is_admin)
@@ -141,19 +141,25 @@ def render_ki_view(settings: AppSettings, role: AuthRole = AuthRole.ADMIN) -> No
                 step_unblock = st.checkbox("🔓 Unblock", value=True, key="ki_opt_unblock", disabled=not is_admin)
             with s4:
                 step_prune = st.checkbox("🧹 Prune Failing", value=True, key="ki_opt_prune", disabled=not is_admin)
-            exclude_previews = st.checkbox(
-                "Preview- & Experimental-Modelle ausschließen",
-                value=True,
-                key="ki_exclude_previews",
+            include_quota_tools = st.checkbox(
+                "🎟️ Kontingent-Tools im Benchmark mittesten (verbraucht 1 Query/Session)",
+                value=False,
+                key="ki_opt_include_quota_tools",
                 disabled=not is_admin,
-                help="Ignoriert Preview-/Experimental-Modelle beim Discover (kanonischer Deep Research Agent bleibt erhalten).",
+                help=(
+                    "Standardmäßig AUS zum Schonen begrenzter Free-Kontingente (z. B. Browserbase 60/Mo, "
+                    "Serper 2.500 Total, Tavily 1.000/Mo, Gemini Grounding). Unlimited-Tools werden immer live geprüft."
+                ),
             )
             include_paid = st.checkbox(
-                "💳 Paid-Tier-Modelle im Benchmark mitprüfen (nur mit Paid-Key)",
+                "💳 Paid-Only-Modelle im Benchmark mitprüfen (nur Paid-Key · minimale Token-Kosten)",
                 value=False,
                 key="ki_opt_include_paid",
                 disabled=not is_admin,
-                help="Standardmäßig kostenlos über den Free-Tier-Key. Aktivieren, um Paid-Only-Modelle über den Paid-Tier-Key mit zu testen.",
+                help=(
+                    "Standardmäßig strikt $0 (nur Free-Tier-Key). Aktiviert sendet der Benchmark je 1 Mini-Prompt "
+                    "(< $0,001) an Paid-Only-Modelle über den Paid-Key; Free-Tier-Modelle & Tools bleiben kostenfrei."
+                ),
             )
 
         if is_admin:
@@ -167,8 +173,8 @@ def render_ki_view(settings: AppSettings, role: AuthRole = AuthRole.ADMIN) -> No
                 run_benchmark=step_bench,
                 run_unblock=step_unblock,
                 run_prune=step_prune,
-                exclude_previews=exclude_previews,
                 include_paid=include_paid,
+                include_quota_tools=include_quota_tools,
             )
 
         _render_feedback_banner()

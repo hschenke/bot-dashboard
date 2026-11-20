@@ -93,7 +93,7 @@ def format_unblock_feedback(summary: UnblockSummary) -> tuple[str, str]:
         text += (
             "\n\n💡 **Was du bei DuckDuckGo `HTTP 202` tun kannst:** Cloud-Datacenter-IPs erhalten von DuckDuckGo oft eine "
             "serverseitige Anti-Bot-Leerantwort (nicht per Code umgehbar). Hinterlege unter **🔐 Vault** einen "
-            "kostenfreien Key (`TAVILY_API_KEY`, `SERPER_API_KEY` oder `BRAVE_SEARCH_API_KEY`) oder nutze key-frei "
+            "kostenfreien Key (`TAVILY_API_KEY` oder `SERPER_API_KEY`) oder nutze key-frei "
             "`yahoo_search` + `searxng_public`."
         )
     level = "success" if (summary.unblocked_ids or summary.activated_alternatives) and not summary.still_blocked else "warning"
