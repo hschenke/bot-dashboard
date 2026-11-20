@@ -87,9 +87,6 @@ def _try_authenticate_from_url(settings: AppSettings) -> AuthRole | None:
         st.session_state["auth_token"] = url_token
         return AuthRole.READONLY
     del st.query_params["token"]
-    st.session_state["_auth_notice"] = (
-        "URL-Anmeldung mit Admin-Tokens ist deaktiviert. Bitte melde dich direkt mit dem Passwort an."
-    )
     return None
 
 
@@ -99,7 +96,6 @@ def _complete_admin_login(settings: AppSettings, remember_me: bool, client_fp: s
     )
     st.session_state.pop("_auth_restore_nonce", None)
     st.session_state.pop("_auth_restore_challenge", None)
-    st.session_state.pop("_auth_notice", None)
     if "token" in st.query_params:
         del st.query_params["token"]
     if remember_me:
@@ -117,11 +113,7 @@ def _complete_admin_login(settings: AppSettings, remember_me: bool, client_fp: s
 
 def _render_login_form(settings: AppSettings) -> None:
     limiter = _get_rate_limiter()
-    st.subheader("🔒 Bot-Dashboard Anmeldung")
-    st.caption("Geschützter Zugriff – bitte Dashboard-Passwort eingeben.")
-    notice = st.session_state.pop("_auth_notice", None)
-    if notice:
-        st.warning(str(notice))
+    st.subheader("🔒 Bot-Dashboard")
 
     locked, remaining_sec = limiter.is_locked_out("web")
     if locked:
@@ -130,7 +122,7 @@ def _render_login_form(settings: AppSettings) -> None:
 
     with st.form("dashboard_login_form", clear_on_submit=True):
         entered = st.text_input("Dashboard-Passwort", type="password")
-        remember_me = st.checkbox("🍪 Auf diesem Gerät 30 Tage angemeldet bleiben", value=True)
+        remember_me = st.checkbox("Angemeldet bleiben", value=True)
         submitted = st.form_submit_button("Anmelden", type="primary", width="stretch")
 
     if not submitted:

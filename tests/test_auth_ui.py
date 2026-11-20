@@ -401,7 +401,9 @@ def test_streamlit_apptest_login_flow(monkeypatch: pytest.MonkeyPatch) -> None:
 
     at = AppTest.from_function(_app).run()
     assert not at.exception
-    assert at.subheader[0].value == "🔒 Bot-Dashboard Anmeldung"
+    assert at.subheader[0].value == "🔒 Bot-Dashboard"
+    assert not at.warning
+    assert at.checkbox[0].label == "Angemeldet bleiben"
 
     at.text_input[0].set_value("apptest-secret")
     at.button[0].click().run()

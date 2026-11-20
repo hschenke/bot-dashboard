@@ -180,7 +180,4 @@ def sync_unauthenticated_storage(
         schedule_storage_sync("save")
     else:
         schedule_storage_sync("clear")
-        st.session_state["_auth_notice"] = (
-            "Gespeicherte Sitzung ist ungültig, abgemeldet oder nicht für dieses Gerät autorisiert."
-        )
     st.rerun()
