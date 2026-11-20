@@ -134,9 +134,10 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
     assert "ki_app_issue_btn_alert_bot" in vault_btn_keys
     assert any(b.label == "🔒 Secret sicher speichern / ersetzen" for b in at.tabs[3].button)
 
-    # Tab 4 (Check): Live-Test, Benchmark-Report, Bot-API (mit 3-App-Auth) & Snapshot
+    # Tab 4 (Check): Live-Test, Benchmark-Report & Snapshot (ohne Bot-API-Einbindungsblock)
     assert any("Letzter Benchmark-Testlauf" in s.value for s in at.tabs[4].subheader)
-    assert any("News-Bot, Research-Bot & Alert-Bot" in s.value for s in at.tabs[4].subheader)
+    assert not any("News-Bot, Research-Bot & Alert-Bot" in s.value for s in at.tabs[4].subheader)
+    assert len(at.tabs[4].code) == 0
     assert any(c.label.startswith("💳 Kostenpflichtige Modelle/Tools") and c.value is False for c in at.tabs[4].checkbox)
     maps_sel = next(s for s in at.tabs[4].selectbox if s.label == "🗺️ Google Maps Grounding")
     assert maps_sel.value == "Auto (Geo-Smart)"

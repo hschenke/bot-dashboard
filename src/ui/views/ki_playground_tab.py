@@ -1,4 +1,4 @@
-"""KI-Brain Tab 5 (Check): Live-Test (Fast/Standard/Deep), Benchmark-Report, Bots-API & Snapshot."""
+"""KI-Brain Tab 5 (Check): Live-Test (Fast/Standard/Deep), Benchmark-Report & Snapshot."""
 
 from __future__ import annotations
 
@@ -123,27 +123,6 @@ def _render_latest_benchmark_section(brain: KIWebsearchBrain, ui_state: BrainDas
     )
 
 
-def _render_bot_api_section() -> None:
-    st.subheader("🔌 Einbindung in News-Bot, Research-Bot & Alert-Bot")
-    st.caption(
-        "Zugriff ausschließlich für deine 3 freigegebenen Apps (`news_bot`, `research_bot`, `alert_bot`) "
-        "mit einem im Tab **🔐 Vault** generierten Access-Token (`BRAIN_APP_ID` + `BRAIN_APP_TOKEN`)."
-    )
-    st.code('pip install "git+https://github.com/hschenke/bot-dashboard.git"', language="bash")
-    st.code(
-        "from ki_brain import KIWebsearchBrain\n\n"
-        "# Liest BRAIN_APP_ID & BRAIN_APP_TOKEN (sowie BRAIN_TURSO_URL / BRAIN_TURSO_KEY) aus ENV/Secrets.\n"
-        "# Fremde Apps oder ungültige Tokens werden strikt mit BrainAuthError abgelehnt.\n"
-        "# Standardmäßig strikt 0% Kosten (Free-Tier-Key); Paid-Tier-Key erst bei allow_paid=True.\n"
-        "with KIWebsearchBrain.from_env() as brain:\n"
-        '    fast_hits = brain.search("Aktuelle KI-News", tier="fast")\n'
-        '    local_places = brain.search("Cafés am Alexanderplatz Berlin", tier="standard")  # Geo-Smart Maps\n'
-        '    free_answer = brain.ask("Vergleich lokaler LLM-Frameworks", tier="deep")\n'
-        '    paid_deep = brain.ask("Tiefenanalyse Quantencomputer", tier="deep", allow_paid=True)\n',
-        language="python",
-    )
-
-
 def _render_snapshot_controls(brain: KIWebsearchBrain, is_admin: bool, ui_state: BrainDashboardState | None = None) -> None:
     st.subheader("📦 Export, Import & Standardkatalog")
     snapshot = _snapshot_from_state(brain, ui_state)
@@ -178,11 +157,9 @@ def _render_snapshot_controls(brain: KIWebsearchBrain, is_admin: bool, ui_state:
 
 
 def render_playground_tab(brain: KIWebsearchBrain, is_admin: bool, *, ui_state: BrainDashboardState | None = None) -> None:
-    """Ermöglicht Live-Queries in Fast/Standard/Deep, Benchmark-Report, Bots-Einbindung & Export/Import/Reset."""
+    """Ermöglicht Live-Queries in Fast/Standard/Deep, Benchmark-Report & Export/Import/Reset."""
     _render_live_test_section(brain, is_admin)
     st.divider()
     _render_latest_benchmark_section(brain, ui_state=ui_state)
-    st.divider()
-    _render_bot_api_section()
     st.divider()
     _render_snapshot_controls(brain, is_admin, ui_state=ui_state)
