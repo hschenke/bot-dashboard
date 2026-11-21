@@ -300,22 +300,32 @@ def test_ki_vault_tab_secret_dialog_and_three_app_token_management(
     assert bb_tool is not None and bb_tool.last_status == ProbeStatus.OK
     reopened.close()
 
-    # 2. Im Vault-Tab App-Access-Token für research_bot erzeugen -> einmalig anzeigen & funktionsfähig
+    # 2. Im Vault-Tab 1-Secret KI_BRAIN_KEY für research_bot erzeugen -> einmalig anzeigen & funktionsfähig
+    import ki_brain
+
     issue_btn = next(b for b in at.tabs[3].button if b.key == "ki_app_issue_btn_research_bot")
     at = issue_btn.click().run()
     assert not at.exception
     issued_info = at.session_state["ki_vault_issued_app_token"]
     assert issued_info["app_id"] == "research_bot"
     issued_tok = str(issued_info["token"])
+    issued_conn_key = str(issued_info["connection_key"])
     assert issued_tok.startswith("kib_research_bot_")
+    assert issued_conn_key.startswith("kibk1_")
+    assert any(f'KI_BRAIN_KEY = "{issued_conn_key}"' in c.value for c in at.tabs[3].code)
 
-    with KIWebsearchBrain.from_env(app_id="research_bot", app_token=issued_tok, sqlite_path=db_file) as bot:
+    with ki_brain.connect(issued_conn_key, sqlite_path=db_file) as bot:
         assert bot.client_app_id == "research_bot"
 
-    # 3. Sperren über Vault-Button entzieht sofort den Zugriff
+    with KIWebsearchBrain.from_env(app_id="research_bot", app_token=issued_tok, sqlite_path=db_file) as bot_legacy:
+        assert bot_legacy.client_app_id == "research_bot"
+
+    # 3. Sperren über Vault-Button entzieht sofort den Zugriff (sowohl für KI_BRAIN_KEY als auch Legacy-Token)
     revoke_btn = next(b for b in at.tabs[3].button if b.key == "ki_app_revoke_btn_research_bot")
     at = revoke_btn.click().run()
     assert not at.exception
+    with pytest.raises(BrainAuthError):
+        ki_brain.connect(issued_conn_key, sqlite_path=db_file)
     with pytest.raises(BrainAuthError):
         KIWebsearchBrain.from_env(app_id="research_bot", app_token=issued_tok, sqlite_path=db_file)
 

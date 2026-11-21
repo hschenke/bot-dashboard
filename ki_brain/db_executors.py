@@ -150,7 +150,10 @@ class TursoBrainExecutor:
         if not token:
             raise BrainStorageError("Kein Turso Auth-Token für das KI-Brain angegeben.")
         self._pipeline_url = _normalize_turso_pipeline_url(database_url)
-        self._host = urlparse(self._pipeline_url).netloc
+        parsed = urlparse(self._pipeline_url)
+        self._host = parsed.netloc
+        self._database_url = f"{parsed.scheme}://{parsed.netloc}"
+        self._auth_token = token
         self._lock = threading.Lock()
         self._session = requests.Session()
         self._session.headers.update(
@@ -164,6 +167,10 @@ class TursoBrainExecutor:
     @property
     def backend_name(self) -> str:
         return f"Turso Cloud ({self._host.split('.')[0]})"
+
+    def _connection_credentials(self) -> tuple[str, str]:
+        """Interne Turso-Verbindungsdaten für Admin-Ausstellung von `KI_BRAIN_KEY`."""
+        return self._database_url, self._auth_token
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> BrainStatementResult:
         return self.execute_batch([(sql, params)])[0]

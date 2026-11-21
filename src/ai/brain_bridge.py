@@ -62,4 +62,6 @@ def create_dashboard_brain(
         repository=repo,
         secrets=build_brain_secrets(settings),
         genai_client=genai_client,
+        vault_passphrase=settings.brain_secret_key or turso_key,
+        explicit_vault_key=settings.brain_secret_key,
     )

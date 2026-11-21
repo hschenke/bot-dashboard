@@ -588,6 +588,29 @@ class BrainRepository:
                 decrypted[str(row["env_name"])] = val
         return decrypted
 
+    def migrate_legacy_secrets(self, passphrase: str = "") -> int:
+        """Migriert ältere `enc_v1:`-Vault-Einträge sicher auf app-übergreifendes `enc_v2:`."""
+        from ki_brain.secrets_vault import decrypt_secret_value, encrypt_secret_value
+
+        res = self._executor.execute(
+            "SELECT env_name, encrypted_value FROM brain_secrets WHERE encrypted_value LIKE ?",
+            ("enc_v1:%",),
+        )
+        migrated = 0
+        for row in res.rows:
+            plain = decrypt_secret_value(str(row["encrypted_value"]), passphrase=passphrase)
+            if not plain:
+                continue
+            re_encrypted = encrypt_secret_value(plain, passphrase=passphrase)
+            self.upsert_encrypted_secret(str(row["env_name"]), re_encrypted)
+            migrated += 1
+        return migrated
+
+    def get_turso_connection_credentials(self) -> tuple[str, str]:
+        """Liefert `(turso_url, turso_token)` falls Turso Cloud aktiv ist, sonst `('', '')`."""
+        getter = getattr(self._executor, "_connection_credentials", None)
+        return getter() if callable(getter) else ("", "")
+
     def upsert_app_client(self, app_id: str, token_hash: str, *, enabled: bool = True) -> str:
         from ki_brain.access import normalize_client_app_id
 

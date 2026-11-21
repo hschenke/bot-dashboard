@@ -21,22 +21,25 @@ Zusätzlich stellt dieses Repository mit [`ki_brain`](ki_brain/__init__.py) ein 
 
 ---
 
-## 🔌 Einbindung von `ki_brain` in deine 3 Apps (`News-Bot`, `Research-Bot`, `Alert-Bot`)
+## 🔌 1-Secret Plug-&-Play Einbindung von `ki_brain` (`News-Bot`, `Research-Bot`, `Alert-Bot`)
+
+In den 3 Bot-Repos genügt **1 Eintrag** in `requirements*.txt` (zieht automatisch immer die aktuelle `main`-Version ohne Streamlit-Ballast) sowie **1 einziges Secret (`KI_BRAIN_KEY`)** aus dem Dashboard-Tab **🔐 Vault**:
 
 ```bash
-pip install "git+https://github.com/hschenke/bot-dashboard.git"
+pip install "git+https://github.com/hschenke/bot-dashboard.git@main"
 ```
 
 ```python
-from ki_brain import KIWebsearchBrain
+import ki_brain
 
-# Exklusiver Zugriff für news_bot, research_bot & alert_bot via BRAIN_APP_ID + BRAIN_APP_TOKEN (im Vault generierbar).
-# Fremde Apps oder fehlende/widerrufene Tokens werden strikt mit BrainAuthError abgelehnt.
-with KIWebsearchBrain.from_env() as brain:
-    hits = brain.search("Aktuelle Entwicklungen KI", tier="fast")
-    maps_hits = brain.search("Cafés am Alexanderplatz Berlin", tier="standard")  # Geo-Smart Maps Grounding
-    answer = brain.ask("Tiefgehende Marktanalyse", tier="deep")
-    paid = brain.ask("Tiefenanalyse mit Paid-Modellen", tier="deep", allow_paid=True)
+# Liest KI_BRAIN_KEY automatisch aus ENV, st.secrets & .streamlit/secrets.toml (0 Kollision mit App-DB).
+# Fremde Apps oder gesperrte/widerrufene Keys werden strikt mit BrainAuthError abgelehnt.
+if ki_brain.is_configured():
+    with ki_brain.connect() as brain:
+        hits = brain.search("Aktuelle Entwicklungen KI", tier="fast")
+        maps_hits = brain.search("Cafés am Alexanderplatz Berlin", tier="standard")  # Geo-Smart Maps Grounding
+        answer = brain.ask("Tiefgehende Marktanalyse", tier="deep")
+        paid = brain.ask("Tiefenanalyse mit Paid-Modellen", tier="deep", allow_paid=True)
 ```
 
 ---

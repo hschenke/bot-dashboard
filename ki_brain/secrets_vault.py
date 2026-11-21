@@ -56,6 +56,7 @@ def _derive_legacy_master_material(passphrase: str = "") -> bytes:
 def _candidate_decryption_materials(prefix: str, passphrase: str = "") -> list[bytes]:
     shared = _derive_shared_master_material(passphrase)
     legacy = _derive_legacy_master_material(passphrase)
+    legacy_env_only = _derive_legacy_master_material("")
     turso_only = _hash_seed(
         [
             os.getenv("BRAIN_TURSO_KEY", "").strip() or os.getenv("TURSO_KEY", "").strip(),
@@ -63,9 +64,9 @@ def _candidate_decryption_materials(prefix: str, passphrase: str = "") -> list[b
         ]
     )
     ordered = (
-        [shared, legacy, turso_only]
+        [shared, legacy, legacy_env_only, turso_only]
         if prefix == _ENC_V2_PREFIX
-        else [legacy, shared, turso_only]
+        else [legacy, legacy_env_only, shared, turso_only]
     )
     unique: list[bytes] = []
     for mat in ordered:

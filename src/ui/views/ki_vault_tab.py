@@ -89,23 +89,31 @@ def _render_app_access_section(
 ) -> None:
     st.subheader("🛡️ App-Zugriff (Framework-Whitelist: nur deine 3 Apps)")
     st.caption(
-        "Das `ki_brain`-Framework lehnt alle fremden Aufrufe strikt ab (`BrainAuthError`). "
-        "Ausschließlich **News-Bot**, **Research-Bot** und **Alert-Bot** können über ein hier generiertes "
-        "256-Bit-Access-Token (`BRAIN_APP_ID` + `BRAIN_APP_TOKEN`) zugreifen."
+        "Das `ki_brain`-Framework lehnt fremde Aufrufe strikt ab (`BrainAuthError`). "
+        "Pro App genügt **1 einziges Secret (`KI_BRAIN_KEY`)** — inklusive Brain-DB-Verbindung & sofortiger Sperrfunktion."
     )
 
     issued = st.session_state.get(_ISSUED_TOKEN_SESSION_KEY)
-    if is_admin and isinstance(issued, dict) and issued.get("token"):
+    if is_admin and isinstance(issued, dict) and (issued.get("connection_key") or issued.get("token")):
         app_id = str(issued["app_id"])
-        token = str(issued["token"])
+        token = str(issued.get("token") or "")
+        conn_key = str(issued.get("connection_key") or "")
+        has_turso = bool(issued.get("has_turso", False))
         st.warning(
-            f"🔑 **Neues Access-Token für `{app_id}` (wird nur einmalig angezeigt — jetzt in die Streamlit/GitHub Secrets der App kopieren):**"
+            f"🔑 **Neuer 1-Secret Connection-Key für `{app_id}` (wird nur einmalig angezeigt — "
+            "dieses EINE Secret in Streamlit Cloud Secrets & GitHub Repository Secrets der App einfügen):**"
         )
-        st.code(
-            f'BRAIN_APP_ID = "{app_id}"\nBRAIN_APP_TOKEN = "{token}"\n',
-            language="toml",
-        )
-        if st.button("✅ Token kopiert — Anzeige schließen", key="ki_vault_dismiss_token_btn"):
+        st.code(f'KI_BRAIN_KEY = "{conn_key}"\n', language="toml")
+        if not has_turso:
+            st.info(
+                "ℹ️ Hinweis: Das Dashboard nutzt aktuell lokales SQLite. Für Cloud-Apps (Streamlit Cloud / GitHub Actions) "
+                "bitte zuerst `BRAIN_TURSO_URL` & `BRAIN_TURSO_KEY` (oder `TURSO_URL` & `TURSO_KEY`) im Dashboard setzen "
+                "und das Token danach neu erzeugen."
+            )
+        if token:
+            with st.expander("🔧 Alternative Einzel-Variablen (Legacy-Fallback)", expanded=False):
+                st.code(f'BRAIN_APP_ID = "{app_id}"\nBRAIN_APP_TOKEN = "{token}"\n', language="toml")
+        if st.button("✅ Key kopiert — Anzeige schließen", key="ki_vault_dismiss_token_btn"):
             st.session_state.pop(_ISSUED_TOKEN_SESSION_KEY, None)
             st.rerun()
 
@@ -128,7 +136,7 @@ def _render_app_access_section(
                 st.caption("⚪ No Token")
         with c_issue:
             if is_admin:
-                lbl = "🔄 Token rotieren" if client.has_token else "🔑 Token erzeugen"
+                lbl = "🔄 Key rotieren" if client.has_token else "🔑 Key erzeugen"
                 if st.button(lbl, key=f"ki_app_issue_btn_{client.app_id}", width="stretch"):
                     action_req = ("issue", client.app_id)
         with c_toggle:
@@ -144,9 +152,14 @@ def _render_app_access_section(
         verb, target_app = action_req
         try:
             if verb == "issue":
-                new_token = brain.issue_app_token(target_app)
-                st.session_state[_ISSUED_TOKEN_SESSION_KEY] = {"app_id": target_app, "token": new_token}
-                _set_feedback("success", f"Neues 256-Bit-Access-Token für `{target_app}` erzeugt (siehe Vault).")
+                raw_token, conn_key, has_turso = brain.issue_app_connection_key(target_app)
+                st.session_state[_ISSUED_TOKEN_SESSION_KEY] = {
+                    "app_id": target_app,
+                    "token": raw_token,
+                    "connection_key": conn_key,
+                    "has_turso": has_turso,
+                }
+                _set_feedback("success", f"Neuer 1-Secret `KI_BRAIN_KEY` für `{target_app}` erzeugt (siehe Vault).")
             elif verb == "disable":
                 brain.set_app_enabled(target_app, False)
                 _set_feedback("info", f"Zugriff für `{target_app}` gesperrt.")

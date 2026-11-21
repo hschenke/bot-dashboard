@@ -87,31 +87,36 @@ wheels = [
 
 [[package]]
 name = "bot-dashboard"
-version = "0.15.3"
+version = "0.16.0"
 source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4" },
-    { name = "cryptography" },
     { name = "defusedxml" },
     { name = "google-genai" },
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "requests" },
-    { name = "streamlit" },
 ]
 
 [package.optional-dependencies]
+dashboard = [
+    { name = "cryptography" },
+    { name = "streamlit" },
+]
 dev = [
+    { name = "cryptography" },
     { name = "pip-audit" },
     { name = "pytest" },
     { name = "ruff" },
+    { name = "streamlit" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.12.3" },
-    { name = "cryptography", specifier = ">=42.0.0" },
+    { name = "cryptography", marker = "extra == 'dashboard'", specifier = ">=42.0.0" },
+    { name = "cryptography", marker = "extra == 'dev'", specifier = ">=42.0.0" },
     { name = "defusedxml", specifier = ">=0.7.1" },
     { name = "google-genai", specifier = ">=2.30.1" },
     { name = "pip-audit", marker = "extra == 'dev'", specifier = ">=2.7.3" },
@@ -121,9 +126,10 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "requests", specifier = ">=2.32.3" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
-    { name = "streamlit", specifier = ">=1.60.0" },
+    { name = "streamlit", marker = "extra == 'dashboard'", specifier = ">=1.60.0" },
+    { name = "streamlit", marker = "extra == 'dev'", specifier = ">=1.60.0" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["dashboard", "dev"]
 
 [[package]]
 name = "cachecontrol"

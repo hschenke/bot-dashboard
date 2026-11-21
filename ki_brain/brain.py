@@ -21,6 +21,7 @@ from ki_brain.access import (
     generate_app_access_token,
 )
 from ki_brain.benchmark import BrainBenchmarkRunner
+from ki_brain.connection import encode_connection_key, resolve_connection_config
 from ki_brain.discovery import DiscoverySummary, auto_sync_catalog
 from ki_brain.enums import BrainTier, ProbeStatus, ToolCategory
 from ki_brain.exceptions import BrainAuthError, BrainValidationError
@@ -143,6 +144,8 @@ class KIWebsearchBrain:
         app_token: str = "",
         genai_client: Any = None,
         rate_limiter: LlmRateLimiter | None = None,
+        vault_passphrase: str = "",
+        explicit_vault_key: str = "",
         _internal_admin: bool = False,
     ) -> None:
         self._repo = repository
@@ -152,8 +155,12 @@ class KIWebsearchBrain:
         else:
             self._client_app_id = authorize_client_app(repository, app_id, app_token)
             self._is_admin_client = False
+        self._vault_passphrase = vault_passphrase.strip()
+        self._explicit_vault_key = explicit_vault_key.strip()
         self._base_secrets = secrets or BrainSecrets.from_env()
-        self._secrets = self._base_secrets.with_extra_keys(self._repo.load_decrypted_secrets())
+        self._secrets = self._base_secrets.with_extra_keys(
+            self._repo.load_decrypted_secrets(passphrase=self._vault_passphrase)
+        )
         self._genai_client = genai_client
         self._rate_limiter = rate_limiter or get_global_rate_limiter()
         self._runner = UnifiedLLMRunner(
@@ -168,6 +175,8 @@ class KIWebsearchBrain:
         *,
         genai_client: Any = None,
         rate_limiter: LlmRateLimiter | None = None,
+        vault_passphrase: str = "",
+        explicit_vault_key: str = "",
     ) -> KIWebsearchBrain:
         """Erstellt die interne Admin-Instanz für das authentifizierte Holli Dashboard."""
         return cls(
@@ -175,12 +184,15 @@ class KIWebsearchBrain:
             secrets=secrets,
             genai_client=genai_client,
             rate_limiter=rate_limiter,
+            vault_passphrase=vault_passphrase,
+            explicit_vault_key=explicit_vault_key,
             _internal_admin=True,
         )
 
     @classmethod
-    def from_env(
+    def connect(
         cls,
+        connection_key: str = "",
         *,
         app_id: str = "",
         app_token: str = "",
@@ -190,14 +202,18 @@ class KIWebsearchBrain:
         base_dir: Path | None = None,
         secrets: BrainSecrets | None = None,
     ) -> KIWebsearchBrain:
-        """Initialisiert das Brain für eine autorisierte App (`news_bot`, `research_bot`, `alert_bot`)."""
-        resolved_app_id = app_id.strip() or os.getenv("BRAIN_APP_ID", "").strip()
-        resolved_app_token = app_token.strip() or os.getenv("BRAIN_APP_TOKEN", "").strip()
-        resolved_url = turso_url or os.getenv("BRAIN_TURSO_URL") or os.getenv("TURSO_URL", "")
-        resolved_tok = turso_auth_token or os.getenv("BRAIN_TURSO_KEY") or os.getenv("TURSO_KEY", "")
+        """Plug-&-Play-Verbindung für autorisierte Apps (liest `KI_BRAIN_KEY` aus ENV & `st.secrets`)."""
+        cfg = resolve_connection_config(
+            connection_key=connection_key,
+            app_id=app_id,
+            app_token=app_token,
+            turso_url=turso_url,
+            turso_auth_token=turso_auth_token,
+            base_dir=base_dir,
+        )
         repo = create_brain_repository(
-            turso_url=resolved_url,
-            turso_auth_token=resolved_tok,
+            turso_url=cfg.turso_url,
+            turso_auth_token=cfg.turso_auth_token,
             sqlite_path=sqlite_path,
             base_dir=base_dir,
         )
@@ -205,12 +221,38 @@ class KIWebsearchBrain:
             return cls(
                 repository=repo,
                 secrets=secrets or BrainSecrets.from_env(),
-                app_id=resolved_app_id,
-                app_token=resolved_app_token,
+                app_id=cfg.app_id,
+                app_token=cfg.app_token,
+                vault_passphrase=cfg.effective_vault_passphrase,
             )
         except Exception:
             repo.close()
             raise
+
+    @classmethod
+    def from_env(
+        cls,
+        *,
+        connection_key: str = "",
+        app_id: str = "",
+        app_token: str = "",
+        turso_url: str = "",
+        turso_auth_token: str = "",
+        sqlite_path: str | Path = "data/ki_brain.db",
+        base_dir: Path | None = None,
+        secrets: BrainSecrets | None = None,
+    ) -> KIWebsearchBrain:
+        """Initialisiert das Brain für eine autorisierte App (`KI_BRAIN_KEY` oder Legacy-Variablen)."""
+        return cls.connect(
+            connection_key=connection_key,
+            app_id=app_id,
+            app_token=app_token,
+            turso_url=turso_url,
+            turso_auth_token=turso_auth_token,
+            sqlite_path=sqlite_path,
+            base_dir=base_dir,
+            secrets=secrets,
+        )
 
     @property
     def repository(self) -> BrainRepository:
@@ -442,7 +484,9 @@ class KIWebsearchBrain:
 
     # --- Write-Only Secret-Management (wie GitHub Secrets) ---
     def _refresh_runtime_secrets(self) -> None:
-        self._secrets = self._base_secrets.with_extra_keys(self._repo.load_decrypted_secrets())
+        self._secrets = self._base_secrets.with_extra_keys(
+            self._repo.load_decrypted_secrets(passphrase=self._vault_passphrase)
+        )
         self._runner = UnifiedLLMRunner(
             self._secrets, genai_client=self._genai_client, rate_limiter=self._rate_limiter
         )
@@ -471,7 +515,7 @@ class KIWebsearchBrain:
         """Speichert oder überschreibt ein Secret komplett verschlüsselt (Write-Only) und entsperrt Key-/Quota-Einträge."""
         self._require_admin()
         clean_name = validate_secret_env_name(env_name)
-        encrypted = encrypt_secret_value(new_secret_value)
+        encrypted = encrypt_secret_value(new_secret_value, passphrase=self._vault_passphrase)
         updated_at = self._repo.upsert_encrypted_secret(clean_name, encrypted)
         self._refresh_runtime_secrets()
         self._reset_items_for_secret(
@@ -525,9 +569,24 @@ class KIWebsearchBrain:
     def issue_app_token(self, app_id: str) -> str:
         """Generiert/rotiert ein 256-Bit-Access-Token für eine zugelassene App (Klartext nur 1× zurückgegeben!)."""
         self._require_admin()
+        self._repo.migrate_legacy_secrets(passphrase=self._vault_passphrase)
         token, token_hash = generate_app_access_token(app_id)
         self._repo.upsert_app_client(app_id, token_hash, enabled=True)
         return token
+
+    def issue_app_connection_key(self, app_id: str) -> tuple[str, str, bool]:
+        """Erzeugt App-Token + 1-Secret-Bundle `KI_BRAIN_KEY` (`(raw_token, connection_key, has_turso)`)."""
+        raw_token = self.issue_app_token(app_id)
+        turso_url, turso_token = self._repo.get_turso_connection_credentials()
+        explicit_vault_key = self._explicit_vault_key or os.getenv("BRAIN_SECRET_KEY", "").strip()
+        connection_key = encode_connection_key(
+            app_id,
+            raw_token,
+            turso_url=turso_url,
+            turso_auth_token=turso_token,
+            vault_passphrase=explicit_vault_key,
+        )
+        return raw_token, connection_key, bool(turso_url and turso_token)
 
     def revoke_app_token(self, app_id: str) -> bool:
         """Widerruft das Access-Token einer zugelassenen App sofort."""

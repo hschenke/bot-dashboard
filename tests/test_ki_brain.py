@@ -2184,3 +2184,142 @@ def test_paid_benchmark_keeps_free_models_and_tools_on_free_key_and_blocks_disco
     assert len(quick_entries) == 1 and quick_entries[0].status == ProbeStatus.OK
     assert all(key == "AIzaSyStrictPaidKey" for key, _ in calls_by_key)
     brain.close()
+
+
+def test_one_secret_ki_brain_key_plug_and_play_isolation_and_legacy_migration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import base64
+    import hashlib
+    import hmac
+    import json
+
+    import ki_brain
+    from ki_brain import (
+        BrainAuthError,
+        decode_connection_key,
+        encode_connection_key,
+    )
+    from ki_brain.secrets_vault import _derive_legacy_master_material, _keystream
+
+    # 1. Fail-closed Validierung für ungültige KI_BRAIN_KEY-Strings
+    for bad_key in ("", "invalid_prefix", "kibk1_!!!notbase64!!!", "kibk1_" + ("a" * 9000)):
+        with pytest.raises(BrainAuthError):
+            decode_connection_key(bad_key)
+
+    bad_ver = "kibk1_" + base64.urlsafe_b64encode(json.dumps({"v": 2, "a": "alert_bot", "t": "x"}).encode()).decode()
+    with pytest.raises(BrainAuthError):
+        decode_connection_key(bad_ver)
+
+    bad_app = "kibk1_" + base64.urlsafe_b64encode(json.dumps({"v": 1, "a": "evil_app", "t": "kib_evil_1"}).encode()).decode()
+    with pytest.raises(BrainAuthError):
+        decode_connection_key(bad_app)
+
+    # 2. Dashboard legt sowohl modernes enc_v2-Secret als auch altes enc_v1-Secret (mit Dashboard APP_PASSWORD) an
+    db_file = tmp_path / "one_secret_brain.db"
+    monkeypatch.setenv("APP_PASSWORD", "dashboard_only_admin_pw_123")
+    monkeypatch.setenv("BRAIN_TURSO_KEY", "brain_shared_turso_key_xyz")
+    monkeypatch.delenv("BRAIN_SECRET_KEY", raising=False)
+    monkeypatch.delenv("KI_BRAIN_KEY", raising=False)
+    monkeypatch.delenv("BRAIN_APP_ID", raising=False)
+    monkeypatch.delenv("BRAIN_APP_TOKEN", raising=False)
+    monkeypatch.delenv("GEMINI_FREE_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+
+    admin_repo = create_brain_repository(sqlite_path=db_file)
+    admin = KIWebsearchBrain.for_dashboard(
+        admin_repo, BrainSecrets(), vault_passphrase="brain_shared_turso_key_xyz"
+    )
+    admin.set_secret("GEMINI_FREE_API_KEY", "AIzaSyVaultModernFreeKey")
+
+    # Simuliere altes enc_v1:-Secret (vor v0.13 mit APP_PASSWORD verschlüsselt)
+    nonce = b"0123456789abcdef"
+    master_v1 = _derive_legacy_master_material("")
+    derived = hashlib.pbkdf2_hmac("sha256", master_v1, nonce, 120_000, dklen=64)
+    pt = b"tvly_legacy_v1_secret_999"
+    ct = bytes(a ^ b for a, b in zip(pt, _keystream(derived[:32], nonce, len(pt)), strict=True))
+    tag = hmac.new(derived[32:], nonce + ct, hashlib.sha256).digest()
+    enc_v1 = "enc_v1:" + base64.urlsafe_b64encode(nonce + tag + ct).decode("ascii")
+    admin_repo.upsert_encrypted_secret("TAVILY_API_KEY", enc_v1)
+
+    raw_tok, local_conn_key, has_turso = admin.issue_app_connection_key("alert_bot")
+    assert raw_tok.startswith("kib_alert_bot_")
+    assert local_conn_key.startswith("kibk1_")
+    assert has_turso is False
+
+    # Automatische enc_v1 -> enc_v2 Migration beim Ausstellen des App-Keys geprüft!
+    migrated_row = admin_repo._executor.execute(  # noqa: SLF001
+        "SELECT encrypted_value FROM brain_secrets WHERE env_name = ?", ("TAVILY_API_KEY",)
+    ).rows[0]
+    assert str(migrated_row["encrypted_value"]).startswith("enc_v2:")
+
+    # Simuliere Cloud-Connection-Key mit Brain-Vault-Passphrase (ohne Live-HTTP) & prüfe repr()-Maskierung
+    cloud_style_key = encode_connection_key(
+        "alert_bot",
+        raw_tok,
+        vault_passphrase="brain_shared_turso_key_xyz",
+    )
+    decoded = decode_connection_key(cloud_style_key)
+    assert decoded.app_id == "alert_bot"
+    assert raw_tok not in repr(decoded)
+    assert "brain_shared_turso_key_xyz" not in repr(decoded)
+
+    # 3. Host-App (alert_bot) hat VÖLLIG ANDERES TURSO_URL / TURSO_KEY / APP_PASSWORD in ENV!
+    monkeypatch.setenv("APP_PASSWORD", "alert_bot_different_pw")
+    monkeypatch.setenv("TURSO_URL", "libsql://alert-bot-own-db.turso.io")
+    monkeypatch.setenv("TURSO_KEY", "alert_bot_completely_different_turso_key")
+    monkeypatch.delenv("BRAIN_TURSO_KEY", raising=False)
+    monkeypatch.delenv("BRAIN_TURSO_URL", raising=False)
+    assert ki_brain.is_configured() is False
+
+    # 3a. Plug & Play über ENV KI_BRAIN_KEY -> ignoriert Alert-Bot TURSO_URL/KEY, entschlüsselt beide Vault-Secrets!
+    monkeypatch.setenv("KI_BRAIN_KEY", cloud_style_key)
+    assert ki_brain.is_configured() is True
+    with ki_brain.connect(sqlite_path=db_file) as bot:
+        assert bot.client_app_id == "alert_bot"
+        assert bot.is_admin_client is False
+        assert bot._secrets.resolve_key("GEMINI_FREE_API_KEY") == "AIzaSyVaultModernFreeKey"  # noqa: SLF001
+        assert bot._secrets.resolve_key("TAVILY_API_KEY") == "tvly_legacy_v1_secret_999"  # noqa: SLF001
+
+    # 3b. Plug & Play über lokales .streamlit/secrets.toml (ohne ENV KI_BRAIN_KEY)
+    monkeypatch.delenv("KI_BRAIN_KEY", raising=False)
+    st_dir = tmp_path / "alert_app_root" / ".streamlit"
+    st_dir.mkdir(parents=True)
+    (st_dir / "secrets.toml").write_text(f'KI_BRAIN_KEY = "{cloud_style_key}"\n', encoding="utf-8")
+    assert ki_brain.is_configured(base_dir=tmp_path / "alert_app_root") is True
+    with ki_brain.connect(sqlite_path=db_file, base_dir=tmp_path / "alert_app_root") as bot_toml:
+        assert bot_toml.client_app_id == "alert_bot"
+
+    # 3c. Plug & Play über Streamlit st.secrets (ohne ENV)
+    import streamlit as st
+
+    monkeypatch.setattr(st, "secrets", {"KI_BRAIN_KEY": cloud_style_key})
+    assert ki_brain.is_configured() is True
+    with ki_brain.connect(sqlite_path=db_file) as bot_st:
+        assert bot_st.client_app_id == "alert_bot"
+
+    # 4. Sofortige Sperrung im Dashboard-Vault blockiert bestehenden KI_BRAIN_KEY sofort!
+    admin.set_app_enabled("alert_bot", False)
+    with pytest.raises(BrainAuthError):
+        ki_brain.connect(sqlite_path=db_file)
+    admin.close()
+
+
+def test_ki_brain_package_is_lightweight_and_version_synced() -> None:
+    import tomllib
+
+    import ki_brain
+    from src.__version__ import __version__ as dashboard_version
+
+    root = Path(__file__).resolve().parent.parent
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    project = pyproject["project"]
+    assert ki_brain.__version__ == dashboard_version == project["version"]
+
+    core_deps = [d.lower() for d in project["dependencies"]]
+    assert not any(d.startswith("streamlit") for d in core_deps)
+    assert not any(d.startswith("cryptography") for d in core_deps)
+    dashboard_deps = [d.lower() for d in project["optional-dependencies"]["dashboard"]]
+    assert any(d.startswith("streamlit") for d in dashboard_deps)
+    assert any(d.startswith("cryptography") for d in dashboard_deps)
+
