@@ -23,6 +23,7 @@ from ki_brain.models import (
     AIModelSpec,
     BenchmarkEntry,
     BenchmarkReport,
+    BrainAccessLogEntry,
     BrainCitation,
     BrainConfigSnapshot,
     BrainFetchedPage,
@@ -51,7 +52,7 @@ from ki_brain.quotas import (
 from ki_brain.storage import BrainDashboardState, BrainRepository, create_brain_repository
 from ki_brain.unblock import UnblockSummary
 
-__version__ = "0.17.0"
+__version__ = "0.18.0"
 
 connect = KIWebsearchBrain.connect
 is_configured = is_brain_configured
@@ -61,6 +62,7 @@ __all__ = [
     "ALLOWED_CLIENT_APPS",
     "BenchmarkEntry",
     "BenchmarkReport",
+    "BrainAccessLogEntry",
     "BrainAuthError",
     "BrainCitation",
     "BrainConfigSnapshot",

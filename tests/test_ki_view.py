@@ -23,7 +23,7 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
 ) -> None:
     from streamlit.testing.v1 import AppTest
 
-    assert KI_TAB_LABELS == ("🎯 Sequencing", "🧩 KI", "🔧 Tools", "🔐 Vault", "🧪 Check")
+    assert KI_TAB_LABELS == ("🎯 Sequencing", "🧩 KI", "🔧 Tools", "🔐 Vault", "🧪 Check", "📜 Logs")
 
     db_file = tmp_path / "ui_brain.db"
     monkeypatch.setenv("BRAIN_SQLITE_PATH", str(db_file))
@@ -50,7 +50,7 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
     assert "🧠 KI-Brain" in headers
 
     metric_labels = [m.label for m in at.metric]
-    assert metric_labels == ["KI-Modelle", "Tools", "Letzter Testlauf"]
+    assert metric_labels[:3] == ["KI-Modelle", "Tools", "Letzter Testlauf"]
     assert not any("Speicher-Backend" in c.value for c in at.caption)
 
     # 1 vereinter Ablauf-Button statt 4 Einzelbuttons; Clean Previews & Retry Excluded entfernt
@@ -82,8 +82,8 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
     assert paid_cb.value is False
     assert not any("Ausgeschlossene Modelle erneut prüfen" in c.label for c in at.checkbox)
 
-    # 5 Tabs: Sequencing (0), KI (1), Tools (2), Vault (3), Check (4)
-    assert len(at.tabs) == 5
+    # 6 Tabs: Sequencing (0), KI (1), Tools (2), Vault (3), Check (4), Logs (5)
+    assert len(at.tabs) == 6
     ki_tc = at.get("tab_container")[0]
     assert ki_tc.proto.tab_container.id == ""
     assert "ki_brain_tabs" in ki_tc.proto.id
@@ -110,7 +110,7 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
     assert any("5000/5000/Mo" in str(val) for val in tools_df["Kontingent / Kosten"])
     assert any(b.key == "ki_tool_probe_btn" and b.label == "🧪 Testen" for b in at.tabs[2].button)
 
-    for non_vault_idx in (0, 1, 2, 4):
+    for non_vault_idx in (0, 1, 2, 4, 5):
         assert not any("Missing Key" in b.label for b in at.tabs[non_vault_idx].button)
 
     # Free- & Paid-Tier API-Key-Felder im manuellen Modell-Formular (Tab 1) vorbereitet
@@ -531,4 +531,78 @@ def test_ki_tools_tab_single_tool_probe_button(
     assert bb is not None and bb.last_status == ProbeStatus.OK
     assert reopened.load_usage_quotas()["tools"]["browserbase_fetch"]["used"] == 1
     reopened.close()
+
+
+def test_ki_logs_tab_renders_access_entries_and_clears_logs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ki_brain import BrainAccessLogEntry
+    from streamlit.testing.v1 import AppTest
+
+    db_file = tmp_path / "logs_tab_ui.db"
+    monkeypatch.setenv("BRAIN_SQLITE_PATH", str(db_file))
+    repo = create_brain_repository(sqlite_path=db_file)
+    repo.append_access_log(
+        BrainAccessLogEntry(
+            id="log_1",
+            created_at="2026-11-21T13:10:00+00:00",
+            caller_app="Alert-Bot",
+            environment="GitHub Actions · check_alerts",
+            action="search",
+            tier="fast",
+            budget_mode="free",
+            status="Success",
+            latency_ms=180,
+            tools_used=["yahoo_search"],
+            result_count=4,
+            summary="4 Treffer · Goldpreis EUR",
+        )
+    )
+    repo.append_access_log(
+        BrainAccessLogEntry(
+            id="log_2",
+            created_at="2026-11-21T13:12:00+00:00",
+            caller_app="Alert-Bot",
+            environment="Streamlit Cloud",
+            action="generate_structured",
+            tier="fast",
+            budget_mode="free",
+            status="Failed",
+            latency_ms=920,
+            summary="Schema: AiMetricExtraction · Timeout",
+        )
+    )
+    repo.close()
+
+    def _app() -> None:
+        import os
+
+        from src.config.settings import AppSettings
+        from src.domain.enums import AuthRole
+        from src.ui.views.ki_view import render_ki_view
+
+        render_ki_view(AppSettings(brain_sqlite_path=os.environ["BRAIN_SQLITE_PATH"]), role=AuthRole.ADMIN)
+
+    at = AppTest.from_function(_app).run()
+    assert not at.exception
+
+    logs_tab = at.tabs[5]
+    assert any("KI-Brain Zugriffs-Logs" in s.value for s in logs_tab.subheader)
+    log_metrics = {m.label: m.value for m in logs_tab.metric}
+    assert log_metrics["Zugriffe"] == "2"
+    assert log_metrics["Success-Rate"] == "50%"
+    assert log_metrics["Paid-Calls"] == "0"
+
+    logs_df = logs_tab.dataframe[0].value
+    assert list(logs_df["Wer"]) == ["Alert-Bot", "Alert-Bot"]
+    assert "🟢 Success" in list(logs_df["Status"])
+    assert "🔴 Failed" in list(logs_df["Status"])
+    assert all(val == "🆓 Free" for val in logs_df["Budget"])
+
+    clear_btn = next(b for b in logs_tab.button if b.key == "ki_logs_clear_btn")
+    at = clear_btn.click().run()
+    assert not at.exception
+    assert len(at.tabs[5].dataframe) == 0
+    assert any("Zugriffs-Logs geleert" in i.value for i in at.info)
+
 

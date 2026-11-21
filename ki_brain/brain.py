@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import datetime
+import logging
 import os
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +39,7 @@ from ki_brain.models import (
     AIModelSpec,
     BenchmarkEntry,
     BenchmarkReport,
+    BrainAccessLogEntry,
     BrainConfigSnapshot,
     BrainFetchedPage,
     BrainGenerationResult,
@@ -52,9 +55,16 @@ from ki_brain.rate_limiter import LlmRateLimiter, get_global_rate_limiter
 from ki_brain.secrets_vault import encrypt_secret_value, validate_secret_env_name
 from ki_brain.security import validate_safe_external_url
 from ki_brain.storage import BrainRepository, create_brain_repository
+from ki_brain.telemetry import (
+    build_access_log_entry,
+    detect_caller_app,
+    detect_runtime_environment,
+    sanitize_url_for_log,
+)
 from ki_brain.unblock import UnblockSummary
 from ki_brain.unblock import resolve_blocked_tools as _resolve_blocked_tools_impl
 
+logger = logging.getLogger(__name__)
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
 _DEFAULT_AI_SECRET_SPECS: tuple[tuple[str, str], ...] = (
@@ -141,6 +151,7 @@ class KIWebsearchBrain:
         secrets: BrainSecrets | None = None,
         *,
         fleet_secret: bytes = b"",
+        caller: str = "",
         genai_client: Any = None,
         rate_limiter: LlmRateLimiter | None = None,
         vault_passphrase: str = "",
@@ -148,11 +159,17 @@ class KIWebsearchBrain:
         _internal_admin: bool = False,
     ) -> None:
         self._repo = repository
+        self._caller_app = detect_caller_app(explicit_caller=caller, is_admin=_internal_admin)
+        self._environment = detect_runtime_environment()
         if _internal_admin:
             self._client_app_id = INTERNAL_DASHBOARD_APP
             self._is_admin_client = True
         else:
-            self._client_app_id = authorize_fleet_client(repository, fleet_secret)
+            try:
+                self._client_app_id = authorize_fleet_client(repository, fleet_secret)
+            except BrainAuthError as exc:
+                self._record_access(action="auth", status="Failed", summary=str(exc))
+                raise
             self._is_admin_client = False
         self._vault_passphrase = vault_passphrase.strip()
         self._explicit_vault_key = explicit_vault_key.strip()
@@ -193,6 +210,7 @@ class KIWebsearchBrain:
         cls,
         connection_key: str = "",
         *,
+        caller: str = "",
         sqlite_path: str | Path = "data/ki_brain.db",
         base_dir: Path | None = None,
         secrets: BrainSecrets | None = None,
@@ -210,6 +228,7 @@ class KIWebsearchBrain:
                 repository=repo,
                 secrets=secrets or BrainSecrets.from_env(),
                 fleet_secret=cfg.fleet_secret,
+                caller=caller,
                 vault_passphrase=cfg.effective_vault_passphrase,
             )
         except Exception:
@@ -221,6 +240,7 @@ class KIWebsearchBrain:
         cls,
         *,
         connection_key: str = "",
+        caller: str = "",
         sqlite_path: str | Path = "data/ki_brain.db",
         base_dir: Path | None = None,
         secrets: BrainSecrets | None = None,
@@ -228,6 +248,7 @@ class KIWebsearchBrain:
         """Alias für `KIWebsearchBrain.connect()`."""
         return cls.connect(
             connection_key=connection_key,
+            caller=caller,
             sqlite_path=sqlite_path,
             base_dir=base_dir,
             secrets=secrets,
@@ -941,6 +962,53 @@ class KIWebsearchBrain:
     def get_latest_benchmark(self) -> BenchmarkReport | None:
         return self._repo.get_latest_benchmark()
 
+    # --- Zugriffs-Logs (Wann, Wer, Wo, Wie, Budget & Erfolg) ---
+    def _record_access(
+        self,
+        *,
+        action: str,
+        status: str,
+        tier: str = "",
+        allow_paid: bool = False,
+        latency_ms: int = 0,
+        model_used: str = "",
+        tools_used: list[str] | tuple[str, ...] = (),
+        result_count: int = 0,
+        summary: str = "",
+    ) -> None:
+        try:
+            entry = build_access_log_entry(
+                caller_app=self._caller_app,
+                environment=self._environment,
+                action=action,
+                status=status,
+                tier=tier,
+                allow_paid=allow_paid,
+                latency_ms=latency_ms,
+                model_used=model_used,
+                tools_used=tools_used,
+                result_count=result_count,
+                summary=summary,
+            )
+            self._repo.append_access_log(entry)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Zugriffs-Log übersprungen: %s", exc)
+
+    def list_access_logs(
+        self,
+        *,
+        limit: int = 200,
+        caller_app: str = "",
+        status: str = "",
+    ) -> list[BrainAccessLogEntry]:
+        """Liefert die neuesten KI-Brain-Zugriffsprotokolle."""
+        return self._repo.list_access_logs(limit=limit, caller_app=caller_app, status=status)
+
+    def clear_access_logs(self) -> int:
+        """Löscht alle Zugriffs-Logs (nur Dashboard-Admin)."""
+        self._require_admin()
+        return self._repo.clear_access_logs()
+
     # --- Einheitliche Ausführungs-API für alle Anfragen ---
     def search(
         self,
@@ -955,23 +1023,69 @@ class KIWebsearchBrain:
         longitude: float | None = None,
         on_action: Callable[[str], None] | None = None,
     ) -> BrainSearchResult:
-        return execute_tiered_search(
-            self._repo,
-            self._secrets,
-            query,
-            BrainTier(tier),
-            language=language,
-            max_results=max_results,
-            runner=self._runner,
+        started = time.monotonic()
+        tier_enum = BrainTier(tier)
+        try:
+            res = execute_tiered_search(
+                self._repo,
+                self._secrets,
+                query,
+                tier_enum,
+                language=language,
+                max_results=max_results,
+                runner=self._runner,
+                allow_paid=allow_paid,
+                use_maps=use_maps,
+                latitude=latitude,
+                longitude=longitude,
+                on_action=on_action,
+            )
+        except Exception as exc:
+            self._record_access(
+                action="search",
+                status="Failed",
+                tier=tier_enum.value,
+                allow_paid=allow_paid,
+                latency_ms=int((time.monotonic() - started) * 1000),
+                summary=f"{query[:60]} · {exc}",
+            )
+            raise
+        self._record_access(
+            action="search",
+            status="Success",
+            tier=res.tier.value,
             allow_paid=allow_paid,
-            use_maps=use_maps,
-            latitude=latitude,
-            longitude=longitude,
-            on_action=on_action,
+            latency_ms=res.latency_ms or int((time.monotonic() - started) * 1000),
+            tools_used=res.tools_executed,
+            result_count=len(res.citations),
+            summary=f"{len(res.citations)} Treffer · {query[:90]}",
         )
+        return res
 
     def fetch_page(self, url: str, *, allow_paid: bool = False) -> BrainFetchedPage:
-        return execute_tiered_fetch_page(self._repo, self._secrets, url, allow_paid=allow_paid)
+        started = time.monotonic()
+        safe_target = sanitize_url_for_log(url)
+        try:
+            res = execute_tiered_fetch_page(self._repo, self._secrets, url, allow_paid=allow_paid)
+        except Exception as exc:
+            self._record_access(
+                action="fetch_page",
+                status="Failed",
+                allow_paid=allow_paid,
+                latency_ms=int((time.monotonic() - started) * 1000),
+                summary=f"{safe_target} · {exc}",
+            )
+            raise
+        self._record_access(
+            action="fetch_page",
+            status="Success",
+            allow_paid=allow_paid,
+            latency_ms=res.latency_ms or int((time.monotonic() - started) * 1000),
+            tools_used=[res.extractor_used] if res.extractor_used else [],
+            result_count=len(res.text_content),
+            summary=f"{safe_target} ({len(res.text_content)} Zeichen)",
+        )
+        return res
 
     def generate_text(
         self,
@@ -982,16 +1096,40 @@ class KIWebsearchBrain:
         allow_paid: bool = False,
         on_action: Callable[[str], None] | None = None,
     ) -> BrainGenerationResult:
-        return execute_tiered_text(
-            self._repo,
-            self._secrets,
-            self._runner,
-            prompt,
-            tier=BrainTier(tier),
-            system_instruction=system_instruction,
+        started = time.monotonic()
+        tier_enum = BrainTier(tier)
+        try:
+            res = execute_tiered_text(
+                self._repo,
+                self._secrets,
+                self._runner,
+                prompt,
+                tier=tier_enum,
+                system_instruction=system_instruction,
+                allow_paid=allow_paid,
+                on_action=on_action,
+            )
+        except Exception as exc:
+            self._record_access(
+                action="generate_text",
+                status="Failed",
+                tier=tier_enum.value,
+                allow_paid=allow_paid,
+                latency_ms=int((time.monotonic() - started) * 1000),
+                summary=f"Prompt ({len(prompt)} Zeichen) · {exc}",
+            )
+            raise
+        self._record_access(
+            action="generate_text",
+            status="Success",
+            tier=res.tier.value,
             allow_paid=allow_paid,
-            on_action=on_action,
+            latency_ms=res.latency_ms or int((time.monotonic() - started) * 1000),
+            model_used=res.model_used,
+            result_count=len(res.text),
+            summary=f"Antwort ({len(res.text)} Zeichen)",
         )
+        return res
 
     def generate_structured(
         self,
@@ -1002,16 +1140,41 @@ class KIWebsearchBrain:
         system_instruction: str = "",
         allow_paid: bool = False,
     ) -> tuple[ModelT, str]:
-        return execute_tiered_structured(
-            self._repo,
-            self._secrets,
-            self._runner,
-            prompt,
-            schema_cls,
-            tier=BrainTier(tier),
-            system_instruction=system_instruction,
+        started = time.monotonic()
+        tier_enum = BrainTier(tier)
+        schema_name = getattr(schema_cls, "__name__", "Schema")
+        try:
+            obj, model_used = execute_tiered_structured(
+                self._repo,
+                self._secrets,
+                self._runner,
+                prompt,
+                schema_cls,
+                tier=tier_enum,
+                system_instruction=system_instruction,
+                allow_paid=allow_paid,
+            )
+        except Exception as exc:
+            self._record_access(
+                action="generate_structured",
+                status="Failed",
+                tier=tier_enum.value,
+                allow_paid=allow_paid,
+                latency_ms=int((time.monotonic() - started) * 1000),
+                summary=f"Schema: {schema_name} · {exc}",
+            )
+            raise
+        self._record_access(
+            action="generate_structured",
+            status="Success",
+            tier=tier_enum.value,
             allow_paid=allow_paid,
+            latency_ms=int((time.monotonic() - started) * 1000),
+            model_used=model_used,
+            result_count=1,
+            summary=f"Schema: {schema_name}",
         )
+        return obj, model_used
 
     def ask(
         self,
@@ -1026,20 +1189,45 @@ class KIWebsearchBrain:
         longitude: float | None = None,
         on_action: Callable[[str], None] | None = None,
     ) -> BrainGenerationResult:
-        return execute_tiered_ask(
-            self._repo,
-            self._secrets,
-            self._runner,
-            query,
-            tier=BrainTier(tier),
-            language=language,
-            system_instruction=system_instruction,
+        started = time.monotonic()
+        tier_enum = BrainTier(tier)
+        try:
+            res = execute_tiered_ask(
+                self._repo,
+                self._secrets,
+                self._runner,
+                query,
+                tier=tier_enum,
+                language=language,
+                system_instruction=system_instruction,
+                allow_paid=allow_paid,
+                use_maps=use_maps,
+                latitude=latitude,
+                longitude=longitude,
+                on_action=on_action,
+            )
+        except Exception as exc:
+            self._record_access(
+                action="ask",
+                status="Failed",
+                tier=tier_enum.value,
+                allow_paid=allow_paid,
+                latency_ms=int((time.monotonic() - started) * 1000),
+                summary=f"{query[:60]} · {exc}",
+            )
+            raise
+        self._record_access(
+            action="ask",
+            status="Success",
+            tier=res.tier.value,
             allow_paid=allow_paid,
-            use_maps=use_maps,
-            latitude=latitude,
-            longitude=longitude,
-            on_action=on_action,
+            latency_ms=res.latency_ms or int((time.monotonic() - started) * 1000),
+            model_used=res.model_used,
+            tools_used=res.tools_executed,
+            result_count=len(res.citations),
+            summary=f"{len(res.citations)} Quellen · {query[:85]}",
         )
+        return res
 
     # --- Export / Import ---
     def export_snapshot(self) -> BrainConfigSnapshot:

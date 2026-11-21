@@ -438,3 +438,24 @@ class SecretStatusEntry(BaseModel):
     key_tier: str = Field(default="tool")
 
 
+class BrainAccessLogEntry(BaseModel):
+    """Protokolleintrag eines KI-Brain-Zugriffs (Wann, Wer, Wo, Wie, Budget & Erfolg)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    created_at: str
+    caller_app: str
+    environment: str
+    action: str
+    tier: str = ""
+    budget_mode: str = "free"
+    status: str = "Success"
+    latency_ms: int = 0
+    model_used: str = ""
+    tools_used: list[str] = Field(default_factory=list)
+    result_count: int = 0
+    summary: str = ""
+
+
+

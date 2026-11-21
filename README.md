@@ -16,7 +16,7 @@ Zusätzlich stellt dieses Repository mit [`ki_brain`](ki_brain/__init__.py) ein 
   - Verbindet sich mit den 3 Bot-Datenbanken (Turso HTTPS Hrana v2 oder lokal per Read-Only-SQLite).
 - **🧠 KI-Brain (Zentrales KI & Websearch Brain)**:
   - **Einheitlicher Ablauf (`🚀 Sync & Optimize`)**: Kombiniert Discover, Benchmark & Optimize, Unblock Tools und Prune Failing mit wählbaren Optionen.
-  - **5 strukturierte Tabs (`Sequencing | KI | Tools | Vault | Check`)**: Free- & Paid-Tier API-Keys sowie **1 gemeinsamer kompakter Flotten-Key (`KI_BRAIN_KEY`)** für alle 3 Apps werden zentral & Write-Only im **Vault** verwaltet.
+  - **6 strukturierte Tabs (`Sequencing | KI | Tools | Vault | Check | Logs`)**: Free- & Paid-Tier API-Keys sowie **1 gemeinsamer kompakter Flotten-Key (`KI_BRAIN_KEY`)** für alle 3 Apps werden zentral & Write-Only im **Vault** verwaltet; der Tab **📜 Logs** protokolliert jeden Zugriff (Wann, Wer, Wo, Aktion, Free/Paid, Latenz & Erfolg).
   - **Strikte 0%-Kosten-Priorität & Free-/Paid-Key-Trennung**: Standardanfragen (`allow_paid=False`) nutzen ausschließlich den Free-Tier-Key (`GEMINI_FREE_API_KEY` bzw. Fallback `GEMINI_API_KEY`); der Paid-Tier-Key (`GEMINI_PAID_API_KEY`) und Paid-Only-Modelle werden erst bei explizitem `allow_paid=True` aktiv.
 
 ---

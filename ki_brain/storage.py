@@ -13,12 +13,19 @@ from ki_brain.catalog import build_default_models, build_default_sequences, buil
 from ki_brain.db_executors import BrainSqlExecutor, SqliteBrainExecutor, TursoBrainExecutor
 from ki_brain.enums import BrainTier
 from ki_brain.exceptions import BrainStorageError
-from ki_brain.models import AIModelSpec, BenchmarkReport, TierSequenceConfig, ToolSpec
+from ki_brain.models import (
+    AIModelSpec,
+    BenchmarkReport,
+    BrainAccessLogEntry,
+    TierSequenceConfig,
+    ToolSpec,
+)
 from ki_brain.quotas import USAGE_QUOTAS_META_KEY, parse_usage_quotas
 from ki_brain.security import validate_identifier
 
 _INITIALIZED_BACKENDS: set[str] = set()
 _INITIALIZED_LOCK = threading.Lock()
+MAX_ACCESS_LOG_ENTRIES: int = 500
 
 
 @dataclass(frozen=True)
@@ -34,6 +41,8 @@ class BrainDashboardState:
     excluded_model_reasons: dict[str, str] = field(default_factory=dict)
     usage_quotas: dict[str, dict[str, dict[str, Any]]] = field(default_factory=lambda: {"tools": {}, "models": {}})
     fleet_client: dict[str, Any] | None = None
+    access_logs: list[BrainAccessLogEntry] = field(default_factory=list)
+
 
 _SCHEMA_SQL: tuple[str, ...] = (
     """
@@ -86,7 +95,48 @@ _SCHEMA_SQL: tuple[str, ...] = (
         last_used_at TEXT NOT NULL DEFAULT ''
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS brain_access_logs (
+        id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        caller_app TEXT NOT NULL,
+        environment TEXT NOT NULL,
+        action TEXT NOT NULL,
+        tier TEXT NOT NULL DEFAULT '',
+        budget_mode TEXT NOT NULL DEFAULT 'free',
+        status TEXT NOT NULL,
+        latency_ms INTEGER NOT NULL DEFAULT 0,
+        model_used TEXT NOT NULL DEFAULT '',
+        tools_used TEXT NOT NULL DEFAULT '',
+        result_count INTEGER NOT NULL DEFAULT 0,
+        summary TEXT NOT NULL DEFAULT ''
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_brain_access_logs_created_at
+    ON brain_access_logs (created_at DESC)
+    """,
 )
+
+
+def _row_to_access_log(row: dict[str, Any]) -> BrainAccessLogEntry:
+    raw_tools = str(row.get("tools_used") or "").strip()
+    tools = [t.strip() for t in raw_tools.split(",") if t.strip()] if raw_tools else []
+    return BrainAccessLogEntry(
+        id=str(row.get("id") or ""),
+        created_at=str(row.get("created_at") or ""),
+        caller_app=str(row.get("caller_app") or ""),
+        environment=str(row.get("environment") or ""),
+        action=str(row.get("action") or ""),
+        tier=str(row.get("tier") or ""),
+        budget_mode=str(row.get("budget_mode") or "free"),
+        status=str(row.get("status") or "Success"),
+        latency_ms=int(row.get("latency_ms") or 0),
+        model_used=str(row.get("model_used") or ""),
+        tools_used=tools,
+        result_count=int(row.get("result_count") or 0),
+        summary=str(row.get("summary") or ""),
+    )
 
 
 def _utc_now_iso() -> str:
@@ -517,8 +567,95 @@ class BrainRepository:
         """Setzt gespeicherte Verbrauchs-Zähler zurück."""
         self.set_meta(USAGE_QUOTAS_META_KEY, json.dumps({"tools": {}, "models": {}}))
 
+    def append_access_log(
+        self, entry: BrainAccessLogEntry, *, max_entries: int = MAX_ACCESS_LOG_ENTRIES
+    ) -> None:
+        """Speichert einen Zugriffs-Log-Eintrag und begrenzt die Historie atomar auf `max_entries`."""
+        limit = max(20, min(int(max_entries), 2000))
+        stmts = [
+            (
+                """
+                INSERT INTO brain_access_logs (
+                    id, created_at, caller_app, environment, action, tier,
+                    budget_mode, status, latency_ms, model_used, tools_used,
+                    result_count, summary
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    entry.id,
+                    entry.created_at,
+                    entry.caller_app,
+                    entry.environment,
+                    entry.action,
+                    entry.tier,
+                    entry.budget_mode,
+                    entry.status,
+                    entry.latency_ms,
+                    entry.model_used,
+                    ", ".join(entry.tools_used),
+                    entry.result_count,
+                    entry.summary,
+                ),
+            ),
+            (
+                """
+                DELETE FROM brain_access_logs
+                WHERE id NOT IN (
+                    SELECT id FROM brain_access_logs ORDER BY created_at DESC, id DESC LIMIT ?
+                )
+                """,
+                (limit,),
+            ),
+        ]
+        try:
+            self._executor.execute_batch(stmts)
+        except BrainStorageError as exc:
+            if "no such table" not in str(exc).lower():
+                raise
+            self._init_schema()
+            self._executor.execute_batch(stmts)
+
+    def list_access_logs(
+        self,
+        *,
+        limit: int = 200,
+        caller_app: str = "",
+        status: str = "",
+    ) -> list[BrainAccessLogEntry]:
+        """Liefert die neuesten Zugriffs-Logs (optional gefiltert nach App oder Status)."""
+        safe_limit = max(1, min(int(limit), MAX_ACCESS_LOG_ENTRIES))
+        clean_caller = caller_app.strip()
+        clean_status = status.strip()
+        sql = (
+            "SELECT id, created_at, caller_app, environment, action, tier, "
+            "budget_mode, status, latency_ms, model_used, tools_used, result_count, summary "
+            "FROM brain_access_logs "
+            "WHERE (? = '' OR caller_app = ?) AND (? = '' OR status = ?) "
+            "ORDER BY created_at DESC, id DESC LIMIT ?"
+        )
+        params = (clean_caller, clean_caller, clean_status, clean_status, safe_limit)
+        try:
+            res = self._executor.execute(sql, params)
+        except BrainStorageError as exc:
+            if "no such table" not in str(exc).lower():
+                raise
+            self._init_schema()
+            return []
+        return [_row_to_access_log(r) for r in res.rows]
+
+    def clear_access_logs(self) -> int:
+        """Löscht alle gespeicherten Zugriffs-Logs aus der Brain-Datenbank."""
+        try:
+            res = self._executor.execute("DELETE FROM brain_access_logs")
+            return res.affected_rows
+        except BrainStorageError as exc:
+            if "no such table" not in str(exc).lower():
+                raise
+            self._init_schema()
+            return 0
+
     def load_dashboard_state(self) -> BrainDashboardState:
-        """Lädt Modelle, Tools, Sequenzen, Benchmark, Secrets, Kontingente & Flotten-Key in einem Batch."""
+        """Lädt Modelle, Tools, Sequenzen, Benchmark, Secrets, Kontingente, Flotten-Key & Logs in einem Batch."""
         from ki_brain.access import FLEET_CLIENT_ID
 
         stmts = [
@@ -529,9 +666,15 @@ class BrainRepository:
             ("SELECT env_name, updated_at FROM brain_secrets ORDER BY env_name ASC", ()),
             ("SELECT key, value FROM brain_meta WHERE key IN (?, ?, ?)", ("excluded_ids", "excluded_reasons", USAGE_QUOTAS_META_KEY)),
             ("SELECT app_id, token_hash, enabled, created_at, last_used_at FROM brain_app_clients WHERE app_id = ?", (FLEET_CLIENT_ID,)),
+            (
+                "SELECT id, created_at, caller_app, environment, action, tier, "
+                "budget_mode, status, latency_ms, model_used, tools_used, result_count, summary "
+                "FROM brain_access_logs ORDER BY created_at DESC, id DESC LIMIT 200",
+                (),
+            ),
         ]
         try:
-            res_m, res_t, res_s, res_b, res_sec, res_meta, res_fleet = self._executor.execute_batch(stmts)
+            res_m, res_t, res_s, res_b, res_sec, res_meta, res_fleet, res_logs = self._executor.execute_batch(stmts)
         except BrainStorageError as exc:
             if "no such table" not in str(exc).lower():
                 raise
@@ -543,7 +686,7 @@ class BrainRepository:
             if self._cache_key:
                 with _INITIALIZED_LOCK:
                     _INITIALIZED_BACKENDS.add(self._cache_key)
-            res_m, res_t, res_s, res_b, res_sec, res_meta, res_fleet = self._executor.execute_batch(stmts)
+            res_m, res_t, res_s, res_b, res_sec, res_meta, res_fleet, res_logs = self._executor.execute_batch(stmts)
 
         models = [AIModelSpec.model_validate_json(str(r["payload_json"])) for r in res_m.rows]
         tools = [ToolSpec.model_validate_json(str(r["payload_json"])) for r in res_t.rows]
@@ -566,6 +709,7 @@ class BrainRepository:
                 "created_at": str(r["created_at"]),
                 "last_used_at": str(r["last_used_at"]),
             }
+        access_logs = [_row_to_access_log(r) for r in res_logs.rows]
         return BrainDashboardState(
             models=models,
             tools=tools,
@@ -576,6 +720,7 @@ class BrainRepository:
             excluded_model_reasons={mid: reasons_m[mid] for mid in excl_m if mid in reasons_m},
             usage_quotas=quotas,
             fleet_client=fleet_client,
+            access_logs=access_logs,
         )
 
     def close(self) -> None:

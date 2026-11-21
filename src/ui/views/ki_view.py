@@ -8,6 +8,7 @@ from ki_brain import BrainError, KIWebsearchBrain
 from src.ai.brain_bridge import create_dashboard_brain
 from src.config.settings import AppSettings
 from src.domain.enums import AuthRole
+from src.ui.views.ki_logs_tab import render_logs_tab
 from src.ui.views.ki_models_tab import render_models_tab
 from src.ui.views.ki_playground_tab import render_playground_tab
 from src.ui.views.ki_secret_dialog import render_active_secret_dialog
@@ -27,17 +28,19 @@ KI_TAB_MODELS = "🧩 KI"
 KI_TAB_TOOLS = "🔧 Tools"
 KI_TAB_VAULT = "🔐 Vault"
 KI_TAB_CHECK = "🧪 Check"
+KI_TAB_LOGS = "📜 Logs"
 KI_TAB_LABELS: tuple[str, ...] = (
     KI_TAB_SEQ,
     KI_TAB_MODELS,
     KI_TAB_TOOLS,
     KI_TAB_VAULT,
     KI_TAB_CHECK,
+    KI_TAB_LOGS,
 )
 
 
 def _open_ki_tabs() -> tuple[object, ...]:
-    """Rendert die 5 KI-Brain-Tabs mit stabiler Client-ID ohne Server-Reload beim Wechsel."""
+    """Rendert die 6 KI-Brain-Tabs mit stabiler Client-ID ohne Server-Reload beim Wechsel."""
     try:
         return tuple(st.tabs(list(KI_TAB_LABELS), key="ki_brain_tabs"))
     except TypeError:
@@ -181,7 +184,7 @@ def render_ki_view(settings: AppSettings, role: AuthRole = AuthRole.ADMIN) -> No
         if not is_admin:
             st.caption("Modus: Read-Only")
 
-        tab_seq, tab_mod, tab_tool, tab_vault, tab_check = _open_ki_tabs()
+        tab_seq, tab_mod, tab_tool, tab_vault, tab_check, tab_logs = _open_ki_tabs()
         with tab_seq:
             render_sequences_tab(brain, is_admin=is_admin, models=models, tools=tools, sequences=seqs)
         with tab_mod:
@@ -202,6 +205,8 @@ def render_ki_view(settings: AppSettings, role: AuthRole = AuthRole.ADMIN) -> No
             )
         with tab_check:
             render_playground_tab(brain, is_admin=is_admin, ui_state=ui_state)
+        with tab_logs:
+            render_logs_tab(brain, is_admin=is_admin, access_logs=ui_state.access_logs)
     finally:
         brain.close()
 

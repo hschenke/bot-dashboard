@@ -2172,3 +2172,124 @@ def test_ki_brain_package_is_lightweight_and_version_synced() -> None:
     assert any(d.startswith("streamlit") for d in dashboard_deps)
     assert any(d.startswith("cryptography") for d in dashboard_deps)
 
+
+def test_access_logging_auto_detects_caller_env_records_success_failure_and_redacts_secrets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ki_brain
+    from ki_brain import (
+        BrainAuthError,
+        BrainCitation,
+        BrainGenerationResult,
+        BrainProviderError,
+        BrainSearchResult,
+    )
+    from ki_brain.telemetry import (
+        detect_caller_app,
+        detect_runtime_environment,
+        sanitize_log_summary,
+        sanitize_url_for_log,
+    )
+
+    # 1. Herkunfts-Erkennung (Wer & Wo) ohne explizite Parameter
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "hschenke/alert-bot")
+    monkeypatch.setenv("GITHUB_WORKFLOW", "Check Alerts")
+    assert detect_caller_app() == "Alert-Bot"
+    assert detect_runtime_environment() == "GitHub Actions · Check Alerts"
+    assert detect_caller_app(is_admin=True) == "Dashboard"
+
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+    monkeypatch.setenv("STREAMLIT_APP_URL", "https://holli-research-bot.streamlit.app")
+    monkeypatch.setenv("STREAMLIT_SHARING_MODE", "streamlit")
+    assert detect_caller_app() == "Research-Bot"
+    assert detect_runtime_environment() == "Streamlit Cloud"
+
+    # 2. Secret-Redaction & Query-String-Stripping
+    assert "[REDACTED]" in sanitize_log_summary("Fehler mit kib_SecretToken123456 und AIzaSy1234567890abcdef")
+    assert "kib_SecretToken123456" not in sanitize_log_summary("kib_SecretToken123456")
+    assert sanitize_url_for_log("https://example.org/prices?api_key=supersecret") == "example.org/prices"
+
+    # 3. End-to-End Log-Aufzeichnung für Alert-Bot (Success, Failed & Auth-Denied)
+    db_file = tmp_path / "access_logs.db"
+    admin = KIWebsearchBrain.for_dashboard(create_brain_repository(sqlite_path=db_file))
+    fleet_key, _ = admin.issue_fleet_key()
+
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "hschenke/alert-bot")
+    monkeypatch.setenv("GITHUB_WORKFLOW", "check_alerts")
+    monkeypatch.delenv("STREAMLIT_SHARING_MODE", raising=False)
+    monkeypatch.setenv("KI_BRAIN_KEY", fleet_key)
+
+    monkeypatch.setattr(
+        "ki_brain.brain.execute_tiered_search",
+        lambda *_a, **_kw: BrainSearchResult(
+            query="Goldpreis EUR",
+            tier=BrainTier.FAST,
+            citations=[BrainCitation(title="Gold", url="https://example.org/gold", source_tool="yahoo_search")],
+            tools_executed=["yahoo_search"],
+            latency_ms=145,
+        ),
+    )
+    monkeypatch.setattr(
+        "ki_brain.brain.execute_tiered_structured",
+        lambda *_a, **_kw: (_SampleSchema(topic="Gold", score=99), "gemini-3.5-flash-lite"),
+    )
+    monkeypatch.setattr(
+        "ki_brain.brain.execute_tiered_text",
+        lambda *_a, **_kw: BrainGenerationResult(
+            text="Kurze Antwort",
+            tier=BrainTier.STANDARD,
+            model_used="gemini-3.8-flash",
+            latency_ms=320,
+        ),
+    )
+
+    with ki_brain.connect(sqlite_path=db_file) as bot:
+        bot.search("Goldpreis EUR", tier="fast", allow_paid=False)
+        bot.generate_structured("Analysiere Gold", _SampleSchema, tier="fast", allow_paid=False)
+        bot.generate_text("Fasse zusammen", tier="standard", allow_paid=False)
+
+        # Fehlerhafter Aufruf wird ebenfalls mit status='Failed' protokolliert
+        monkeypatch.setattr(
+            "ki_brain.brain.execute_tiered_search",
+            lambda *_a, **_kw: (_ for _ in ()).throw(BrainProviderError("Timeout mit AIzaSySecretKey999999")),
+        )
+        with pytest.raises(BrainProviderError):
+            bot.search("Fehler-Query", tier="standard", allow_paid=False)
+
+        # Client darf Logs nicht löschen
+        with pytest.raises(BrainAuthError):
+            bot.clear_access_logs()
+
+    # Gesperrter Key protokolliert fehlgeschlagenen Auth-Versuch
+    admin.set_fleet_enabled(False)
+    with pytest.raises(BrainAuthError):
+        ki_brain.connect(sqlite_path=db_file)
+
+    logs = admin.list_access_logs(limit=20)
+    assert len(logs) == 5
+    assert all(row.caller_app == "Alert-Bot" for row in logs)
+    assert all(row.environment == "GitHub Actions · check_alerts" for row in logs)
+    assert all(row.budget_mode == "free" for row in logs)
+
+    by_action = {(row.action, row.status): row for row in logs}
+    assert ("search", "Success") in by_action
+    assert by_action[("search", "Success")].tools_used == ["yahoo_search"]
+    assert by_action[("search", "Success")].latency_ms == 145
+    assert ("generate_structured", "Success") in by_action
+    assert by_action[("generate_structured", "Success")].model_used == "gemini-3.5-flash-lite"
+    assert ("generate_text", "Success") in by_action
+    assert ("search", "Failed") in by_action
+    assert "AIzaSySecretKey999999" not in by_action[("search", "Failed")].summary
+    assert "[REDACTED]" in by_action[("search", "Failed")].summary
+    assert ("auth", "Failed") in by_action
+
+    # Admin kann Logs leeren
+    cleared = admin.clear_access_logs()
+    assert cleared == 5
+    assert admin.list_access_logs() == []
+    admin.close()
+
+
