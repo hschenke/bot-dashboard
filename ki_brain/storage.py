@@ -15,10 +15,12 @@ from ki_brain.enums import BrainTier
 from ki_brain.exceptions import BrainStorageError
 from ki_brain.models import (
     AIModelSpec,
+    AppBrainPolicy,
     BenchmarkReport,
     BrainAccessLogEntry,
     TierSequenceConfig,
     ToolSpec,
+    default_app_policy,
 )
 from ki_brain.quotas import USAGE_QUOTAS_META_KEY, parse_usage_quotas
 from ki_brain.security import validate_identifier
@@ -26,6 +28,7 @@ from ki_brain.security import validate_identifier
 _INITIALIZED_BACKENDS: set[str] = set()
 _INITIALIZED_LOCK = threading.Lock()
 MAX_ACCESS_LOG_ENTRIES: int = 500
+APP_POLICIES_META_KEY: str = "app_policies"
 
 
 @dataclass(frozen=True)
@@ -566,6 +569,38 @@ class BrainRepository:
     def reset_usage_quotas(self) -> None:
         """Setzt gespeicherte Verbrauchs-Zähler zurück."""
         self.set_meta(USAGE_QUOTAS_META_KEY, json.dumps({"tools": {}, "models": {}}))
+
+    def load_app_policies(self) -> dict[str, AppBrainPolicy]:
+        """Lädt gespeicherte Tier-/Budget-Optionen aller Apps aus `brain_meta`."""
+        try:
+            raw = json.loads(self.get_meta(APP_POLICIES_META_KEY, "{}") or "{}")
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        parsed: dict[str, AppBrainPolicy] = {}
+        for key, val in raw.items():
+            clean_key = str(key).strip().lower()
+            if clean_key and isinstance(val, dict):
+                try:
+                    parsed[clean_key] = AppBrainPolicy.model_validate(val)
+                except ValueError:
+                    continue
+        return parsed
+
+    def get_app_policy(self, app_name: str) -> AppBrainPolicy:
+        """Liefert die gespeicherte App-Policy (oder den kostenfreien Standard-Default)."""
+        key = (app_name or "default").strip().lower()
+        return self.load_app_policies().get(key) or default_app_policy(app_name)
+
+    def save_app_policy(self, app_name: str, policy: AppBrainPolicy) -> AppBrainPolicy:
+        """Speichert die Tier-/Budget-Optionen einer App dauerhaft in Turso/SQLite."""
+        key = (app_name or "default").strip().lower()
+        all_policies = self.load_app_policies()
+        all_policies[key] = policy
+        payload = {k: p.model_dump(mode="json") for k, p in sorted(all_policies.items())}
+        self.set_meta(APP_POLICIES_META_KEY, json.dumps(payload))
+        return policy
 
     def append_access_log(
         self, entry: BrainAccessLogEntry, *, max_entries: int = MAX_ACCESS_LOG_ENTRIES

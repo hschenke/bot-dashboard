@@ -2299,3 +2299,98 @@ def test_access_logging_auto_detects_caller_env_records_success_failure_and_reda
     admin.close()
 
 
+def test_app_brain_policy_defaults_persistence_auto_tier_and_isolation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ki_brain
+    from ki_brain import (
+        AppBrainPolicy,
+        BrainAuthError,
+        BrainGenerationResult,
+        BrainSearchResult,
+        default_app_policy,
+    )
+
+    # 1. Kostenfreie Standard-Defaults je App
+    assert default_app_policy("Alert-Bot") == AppBrainPolicy(
+        llm_tier=BrainTier.FAST, search_tier=BrainTier.FAST, allow_paid=False, maps_mode="auto"
+    )
+    assert default_app_policy("News-Bot") == AppBrainPolicy(
+        llm_tier=BrainTier.STANDARD, search_tier=BrainTier.FAST, allow_paid=False, maps_mode="off"
+    )
+    assert default_app_policy("Research-Bot") == AppBrainPolicy(
+        llm_tier=BrainTier.DEEP, search_tier=BrainTier.STANDARD, allow_paid=False, maps_mode="auto"
+    )
+
+    # 2. App speichert eigene Optionen in Turso/SQLite & tier='auto' übernimmt sie automatisch
+    db_file = tmp_path / "app_policies.db"
+    admin = KIWebsearchBrain.for_dashboard(create_brain_repository(sqlite_path=db_file))
+    fleet_key, _ = admin.issue_fleet_key()
+
+    monkeypatch.setenv("GITHUB_REPOSITORY", "hschenke/alert-bot")
+    monkeypatch.setenv("KI_BRAIN_KEY", fleet_key)
+
+    captured_search: list[tuple[BrainTier, bool, bool | None]] = []
+    captured_struct: list[tuple[BrainTier, bool]] = []
+
+    def _fake_search(_r: Any, _s: Any, query: str, tier: BrainTier, **kw: Any) -> BrainSearchResult:
+        captured_search.append((tier, bool(kw.get("allow_paid")), kw.get("use_maps")))
+        return BrainSearchResult(query=query, tier=tier, citations=[], tools_executed=["yahoo_search"], latency_ms=50)
+
+    def _fake_struct(_r: Any, _s: Any, _run: Any, _p: str, _cls: Any, **kw: Any) -> tuple[_SampleSchema, str]:
+        captured_struct.append((kw["tier"], bool(kw.get("allow_paid"))))
+        return _SampleSchema(topic="OK", score=10), "gemini-3.8-flash"
+
+    def _fake_ask(_r: Any, _s: Any, _run: Any, _q: str, **kw: Any) -> BrainGenerationResult:
+        return BrainGenerationResult(text="OK", tier=kw["tier"], model_used="gemini-3.8-flash", latency_ms=90)
+
+    monkeypatch.setattr("ki_brain.brain.execute_tiered_search", _fake_search)
+    monkeypatch.setattr("ki_brain.brain.execute_tiered_structured", _fake_struct)
+    monkeypatch.setattr("ki_brain.brain.execute_tiered_ask", _fake_ask)
+
+    with ki_brain.connect(sqlite_path=db_file) as alert_bot:
+        # Anfangs greift der Default (Fast / Fast / Free)
+        assert alert_bot.get_app_policy().llm_tier == BrainTier.FAST
+        alert_bot.search("Test", tier="auto")
+        alert_bot.generate_structured("Test", _SampleSchema, tier="auto")
+        assert captured_search[-1] == (BrainTier.FAST, False, None)
+        assert captured_struct[-1] == (BrainTier.FAST, False)
+
+        # App ändert eigene Optionen auf Standard (Search) + Deep (KI) + Paid Opt-In + Maps Aus
+        saved = alert_bot.set_app_policy(
+            AppBrainPolicy(
+                llm_tier=BrainTier.DEEP,
+                search_tier=BrainTier.STANDARD,
+                allow_paid=True,
+                maps_mode="off",
+            )
+        )
+        assert saved.llm_tier == BrainTier.DEEP and saved.resolved_use_maps is False
+
+        # Cross-App-Schutz: Alert-Bot darf nicht die Optionen von News-Bot überschreiben!
+        with pytest.raises(BrainAuthError):
+            alert_bot.set_app_policy(AppBrainPolicy(allow_paid=True), app_name="News-Bot")
+
+    # Nach Neustart (z. B. GitHub Actions Worker) greifen gespeicherte Optionen automatisch
+    with ki_brain.connect(sqlite_path=db_file) as worker_bot:
+        worker_bot.search("Test 2", tier="auto")
+        worker_bot.generate_structured("Test 2", _SampleSchema, tier="auto")
+        assert captured_search[-1] == (BrainTier.STANDARD, True, False)
+        assert captured_struct[-1] == (BrainTier.DEEP, True)
+
+        # Explizite Übergabe überschreibt Policy weiterhin (z. B. hartes allow_paid=False)
+        worker_bot.search("Test 3", tier="auto", allow_paid=False)
+        assert captured_search[-1] == (BrainTier.STANDARD, False, False)
+
+        # News-Bot bleibt unberührt auf seinem eigenen 0%-Default
+        assert worker_bot.get_app_policy("News-Bot").allow_paid is False
+        assert worker_bot.get_app_policy("News-Bot").llm_tier == BrainTier.STANDARD
+
+    # Dashboard-Admin darf Policies für jede App setzen; Änderungen erscheinen im Zugriffs-Log (ohne Paid-Call-Zählung)
+    admin.set_app_policy(AppBrainPolicy(llm_tier=BrainTier.FAST, allow_paid=False), app_name="Alert-Bot")
+    assert admin.get_app_policy("Alert-Bot").llm_tier == BrainTier.FAST
+    assert admin.get_app_policy("Alert-Bot").allow_paid is False
+    policy_logs = [row for row in admin.list_access_logs(limit=20) if row.action == "policy_update"]
+    assert len(policy_logs) >= 2
+    assert all(row.budget_mode == "free" for row in policy_logs)
+    admin.close()

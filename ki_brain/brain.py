@@ -37,6 +37,7 @@ from ki_brain.execution import (
 from ki_brain.llm_runner import UnifiedLLMRunner
 from ki_brain.models import (
     AIModelSpec,
+    AppBrainPolicy,
     BenchmarkEntry,
     BenchmarkReport,
     BrainAccessLogEntry,
@@ -59,6 +60,7 @@ from ki_brain.telemetry import (
     build_access_log_entry,
     detect_caller_app,
     detect_runtime_environment,
+    normalize_caller_label,
     sanitize_url_for_log,
 )
 from ki_brain.unblock import UnblockSummary
@@ -1009,6 +1011,56 @@ class KIWebsearchBrain:
         self._require_admin()
         return self._repo.clear_access_logs()
 
+    # --- Persistente App-Optionen (Fast / Standard / Deep & Free / Paid) ---
+    def get_app_policy(self, app_name: str = "") -> AppBrainPolicy:
+        """Liefert die gespeicherten Tier-/Budget-Optionen dieser App (oder kostenfreien Default)."""
+        target = normalize_caller_label(app_name) if app_name.strip() else self._caller_app
+        return self._repo.get_app_policy(target)
+
+    def set_app_policy(self, policy: AppBrainPolicy, app_name: str = "") -> AppBrainPolicy:
+        """Speichert Tier-/Budget-Optionen in Turso (Apps dürfen nur ihre eigene Policy ändern)."""
+        target = normalize_caller_label(app_name) if app_name.strip() else self._caller_app
+        if not self._is_admin_client and target != self._caller_app:
+            raise BrainAuthError(
+                f"Zugriff verweigert: '{self._caller_app}' darf keine Optionen für '{target}' ändern."
+            )
+        saved = self._repo.save_app_policy(target, policy)
+        budget_label = "Paid Opt-In" if saved.allow_paid else "Free-Only"
+        self._record_access(
+            action="policy_update",
+            status="Success",
+            tier=saved.llm_tier.value,
+            allow_paid=False,
+            summary=(
+                f"{target}: LLM={saved.llm_tier.value} · Search={saved.search_tier.value} "
+                f"· Maps={saved.maps_mode} · {budget_label}"
+            ),
+        )
+        return saved
+
+    def _resolve_call_policy(
+        self,
+        tier: BrainTier | str,
+        allow_paid: bool | None,
+        *,
+        for_search: bool = False,
+        use_maps: bool | None = None,
+    ) -> tuple[BrainTier, bool, bool | None]:
+        use_policy = isinstance(tier, str) and tier.strip().lower() == "auto"
+        policy = self.get_app_policy() if use_policy else None
+        resolved_tier = (
+            (policy.search_tier if for_search else policy.llm_tier)
+            if policy is not None
+            else BrainTier(tier)
+        )
+        resolved_paid = (
+            bool(policy.allow_paid) if (allow_paid is None and policy is not None) else bool(allow_paid)
+        )
+        resolved_maps = (
+            policy.resolved_use_maps if (use_maps is None and policy is not None) else use_maps
+        )
+        return resolved_tier, resolved_paid, resolved_maps
+
     # --- Einheitliche Ausführungs-API für alle Anfragen ---
     def search(
         self,
@@ -1017,14 +1069,16 @@ class KIWebsearchBrain:
         tier: BrainTier | str = BrainTier.STANDARD,
         language: str = "de",
         max_results: int = 8,
-        allow_paid: bool = False,
+        allow_paid: bool | None = None,
         use_maps: bool | None = None,
         latitude: float | None = None,
         longitude: float | None = None,
         on_action: Callable[[str], None] | None = None,
     ) -> BrainSearchResult:
         started = time.monotonic()
-        tier_enum = BrainTier(tier)
+        tier_enum, eff_paid, eff_maps = self._resolve_call_policy(
+            tier, allow_paid, for_search=True, use_maps=use_maps
+        )
         try:
             res = execute_tiered_search(
                 self._repo,
@@ -1034,8 +1088,8 @@ class KIWebsearchBrain:
                 language=language,
                 max_results=max_results,
                 runner=self._runner,
-                allow_paid=allow_paid,
-                use_maps=use_maps,
+                allow_paid=eff_paid,
+                use_maps=eff_maps,
                 latitude=latitude,
                 longitude=longitude,
                 on_action=on_action,
@@ -1045,7 +1099,7 @@ class KIWebsearchBrain:
                 action="search",
                 status="Failed",
                 tier=tier_enum.value,
-                allow_paid=allow_paid,
+                allow_paid=eff_paid,
                 latency_ms=int((time.monotonic() - started) * 1000),
                 summary=f"{query[:60]} · {exc}",
             )
@@ -1054,7 +1108,7 @@ class KIWebsearchBrain:
             action="search",
             status="Success",
             tier=res.tier.value,
-            allow_paid=allow_paid,
+            allow_paid=eff_paid,
             latency_ms=res.latency_ms or int((time.monotonic() - started) * 1000),
             tools_used=res.tools_executed,
             result_count=len(res.citations),
@@ -1093,11 +1147,11 @@ class KIWebsearchBrain:
         *,
         tier: BrainTier | str = BrainTier.FAST,
         system_instruction: str = "",
-        allow_paid: bool = False,
+        allow_paid: bool | None = None,
         on_action: Callable[[str], None] | None = None,
     ) -> BrainGenerationResult:
         started = time.monotonic()
-        tier_enum = BrainTier(tier)
+        tier_enum, eff_paid, _ = self._resolve_call_policy(tier, allow_paid, for_search=False)
         try:
             res = execute_tiered_text(
                 self._repo,
@@ -1106,7 +1160,7 @@ class KIWebsearchBrain:
                 prompt,
                 tier=tier_enum,
                 system_instruction=system_instruction,
-                allow_paid=allow_paid,
+                allow_paid=eff_paid,
                 on_action=on_action,
             )
         except Exception as exc:
@@ -1114,7 +1168,7 @@ class KIWebsearchBrain:
                 action="generate_text",
                 status="Failed",
                 tier=tier_enum.value,
-                allow_paid=allow_paid,
+                allow_paid=eff_paid,
                 latency_ms=int((time.monotonic() - started) * 1000),
                 summary=f"Prompt ({len(prompt)} Zeichen) · {exc}",
             )
@@ -1123,7 +1177,7 @@ class KIWebsearchBrain:
             action="generate_text",
             status="Success",
             tier=res.tier.value,
-            allow_paid=allow_paid,
+            allow_paid=eff_paid,
             latency_ms=res.latency_ms or int((time.monotonic() - started) * 1000),
             model_used=res.model_used,
             result_count=len(res.text),
@@ -1138,10 +1192,10 @@ class KIWebsearchBrain:
         *,
         tier: BrainTier | str = BrainTier.FAST,
         system_instruction: str = "",
-        allow_paid: bool = False,
+        allow_paid: bool | None = None,
     ) -> tuple[ModelT, str]:
         started = time.monotonic()
-        tier_enum = BrainTier(tier)
+        tier_enum, eff_paid, _ = self._resolve_call_policy(tier, allow_paid, for_search=False)
         schema_name = getattr(schema_cls, "__name__", "Schema")
         try:
             obj, model_used = execute_tiered_structured(
@@ -1152,14 +1206,14 @@ class KIWebsearchBrain:
                 schema_cls,
                 tier=tier_enum,
                 system_instruction=system_instruction,
-                allow_paid=allow_paid,
+                allow_paid=eff_paid,
             )
         except Exception as exc:
             self._record_access(
                 action="generate_structured",
                 status="Failed",
                 tier=tier_enum.value,
-                allow_paid=allow_paid,
+                allow_paid=eff_paid,
                 latency_ms=int((time.monotonic() - started) * 1000),
                 summary=f"Schema: {schema_name} · {exc}",
             )
@@ -1168,7 +1222,7 @@ class KIWebsearchBrain:
             action="generate_structured",
             status="Success",
             tier=tier_enum.value,
-            allow_paid=allow_paid,
+            allow_paid=eff_paid,
             latency_ms=int((time.monotonic() - started) * 1000),
             model_used=model_used,
             result_count=1,
@@ -1183,14 +1237,16 @@ class KIWebsearchBrain:
         tier: BrainTier | str = BrainTier.STANDARD,
         language: str = "de",
         system_instruction: str = "",
-        allow_paid: bool = False,
+        allow_paid: bool | None = None,
         use_maps: bool | None = None,
         latitude: float | None = None,
         longitude: float | None = None,
         on_action: Callable[[str], None] | None = None,
     ) -> BrainGenerationResult:
         started = time.monotonic()
-        tier_enum = BrainTier(tier)
+        tier_enum, eff_paid, eff_maps = self._resolve_call_policy(
+            tier, allow_paid, for_search=False, use_maps=use_maps
+        )
         try:
             res = execute_tiered_ask(
                 self._repo,
@@ -1200,8 +1256,8 @@ class KIWebsearchBrain:
                 tier=tier_enum,
                 language=language,
                 system_instruction=system_instruction,
-                allow_paid=allow_paid,
-                use_maps=use_maps,
+                allow_paid=eff_paid,
+                use_maps=eff_maps,
                 latitude=latitude,
                 longitude=longitude,
                 on_action=on_action,
@@ -1211,7 +1267,7 @@ class KIWebsearchBrain:
                 action="ask",
                 status="Failed",
                 tier=tier_enum.value,
-                allow_paid=allow_paid,
+                allow_paid=eff_paid,
                 latency_ms=int((time.monotonic() - started) * 1000),
                 summary=f"{query[:60]} · {exc}",
             )
@@ -1220,7 +1276,7 @@ class KIWebsearchBrain:
             action="ask",
             status="Success",
             tier=res.tier.value,
-            allow_paid=allow_paid,
+            allow_paid=eff_paid,
             latency_ms=res.latency_ms or int((time.monotonic() - started) * 1000),
             model_used=res.model_used,
             tools_used=res.tools_executed,

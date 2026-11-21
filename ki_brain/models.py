@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ki_brain.enums import BrainTier, ModelProvider, ProbeStatus, ToolCategory
 
@@ -458,4 +458,42 @@ class BrainAccessLogEntry(BaseModel):
     summary: str = ""
 
 
+_ALLOWED_MAPS_MODES: frozenset[str] = frozenset({"auto", "always", "off"})
 
+
+class AppBrainPolicy(BaseModel):
+    """Persistente App-Optionen für Tier-Auswahl (Fast/Standard/Deep), Maps & Free/Paid-Budget."""
+
+    model_config = ConfigDict(frozen=True)
+
+    llm_tier: BrainTier = BrainTier.FAST
+    search_tier: BrainTier = BrainTier.FAST
+    allow_paid: bool = False
+    maps_mode: str = "auto"
+
+    @field_validator("maps_mode", mode="before")
+    @classmethod
+    def _normalize_maps_mode(cls, val: object) -> str:
+        clean = str(val or "auto").strip().lower()
+        return clean if clean in _ALLOWED_MAPS_MODES else "auto"
+
+    @property
+    def resolved_use_maps(self) -> bool | None:
+        """Übersetzt `maps_mode` in den `use_maps`-Parameter (`True`, `False` oder `None`=Geo-Smart)."""
+        if self.maps_mode == "always":
+            return True
+        if self.maps_mode == "off":
+            return False
+        return None
+
+
+def default_app_policy(app_name: str = "") -> AppBrainPolicy:
+    """Liefert sinnvolle, strikt kostenfreie (0%) Start-Optionen je App."""
+    key = (app_name or "").strip().lower().replace("_", "-")
+    if "alert" in key:
+        return AppBrainPolicy(llm_tier=BrainTier.FAST, search_tier=BrainTier.FAST, allow_paid=False, maps_mode="auto")
+    if "news" in key:
+        return AppBrainPolicy(llm_tier=BrainTier.STANDARD, search_tier=BrainTier.FAST, allow_paid=False, maps_mode="off")
+    if "research" in key:
+        return AppBrainPolicy(llm_tier=BrainTier.DEEP, search_tier=BrainTier.STANDARD, allow_paid=False, maps_mode="auto")
+    return AppBrainPolicy(llm_tier=BrainTier.STANDARD, search_tier=BrainTier.STANDARD, allow_paid=False, maps_mode="auto")

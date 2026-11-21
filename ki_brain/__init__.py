@@ -21,6 +21,7 @@ from ki_brain.exceptions import (
 )
 from ki_brain.models import (
     AIModelSpec,
+    AppBrainPolicy,
     BenchmarkEntry,
     BenchmarkReport,
     BrainAccessLogEntry,
@@ -33,6 +34,7 @@ from ki_brain.models import (
     SecretStatusEntry,
     TierSequenceConfig,
     ToolSpec,
+    default_app_policy,
     derive_tier_key_envs,
 )
 from ki_brain.pricing import (
@@ -52,7 +54,7 @@ from ki_brain.quotas import (
 from ki_brain.storage import BrainDashboardState, BrainRepository, create_brain_repository
 from ki_brain.unblock import UnblockSummary
 
-__version__ = "0.18.1"
+__version__ = "0.19.0"
 
 connect = KIWebsearchBrain.connect
 is_configured = is_brain_configured
@@ -60,6 +62,7 @@ is_configured = is_brain_configured
 __all__ = [
     "AIModelSpec",
     "ALLOWED_CLIENT_APPS",
+    "AppBrainPolicy",
     "BenchmarkEntry",
     "BenchmarkReport",
     "BrainAccessLogEntry",
@@ -98,6 +101,7 @@ __all__ = [
     "connect",
     "create_brain_repository",
     "decode_connection_key",
+    "default_app_policy",
     "derive_tier_key_envs",
     "encode_connection_key",
     "estimate_blended_cost_per_1m",

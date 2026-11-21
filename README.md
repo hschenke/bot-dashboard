@@ -31,15 +31,21 @@ pip install "git+https://github.com/hschenke/bot-dashboard.git@main"
 
 ```python
 import ki_brain
+from ki_brain import AppBrainPolicy, BrainTier
 
 # Liest KI_BRAIN_KEY automatisch aus ENV, st.secrets & .streamlit/secrets.toml (0 Kollision mit App-DB).
 # Fremde Aufrufe oder gesperrte/rotierte Keys werden strikt mit BrainAuthError abgelehnt.
 if ki_brain.is_configured():
     with ki_brain.connect() as brain:
-        hits = brain.search("Aktuelle Entwicklungen KI", tier="fast")
-        maps_hits = brain.search("Cafés am Alexanderplatz Berlin", tier="standard")  # Geo-Smart Maps Grounding
-        answer = brain.ask("Tiefgehende Marktanalyse", tier="deep")
-        paid = brain.ask("Tiefenanalyse mit Paid-Modellen", tier="deep", allow_paid=True)
+        # Persistente App-Optionen (Fast / Standard / Deep, Maps & Free/Paid) in Turso speichern/laden:
+        policy = brain.get_app_policy()
+        brain.set_app_policy(AppBrainPolicy(llm_tier=BrainTier.STANDARD, search_tier=BrainTier.FAST, allow_paid=False))
+
+        # tier="auto" nutzt automatisch die in der App-Option gespeicherten Stufen (UI & Worker synchron):
+        hits = brain.search("Aktuelle Entwicklungen KI", tier="auto")
+        answer = brain.ask("Tiefgehende Marktanalyse", tier="auto")
+        # Expliziter Tier-Override weiterhin jederzeit möglich:
+        deep_paid = brain.ask("Tiefenanalyse mit Paid-Modellen", tier="deep", allow_paid=True)
 ```
 
 ---
