@@ -52,7 +52,7 @@ from ki_brain.quotas import (
 from ki_brain.storage import BrainDashboardState, BrainRepository, create_brain_repository
 from ki_brain.unblock import UnblockSummary
 
-__version__ = "0.18.0"
+__version__ = "0.18.1"
 
 connect = KIWebsearchBrain.connect
 is_configured = is_brain_configured

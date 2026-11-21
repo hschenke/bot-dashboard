@@ -2172,6 +2172,12 @@ def test_ki_brain_package_is_lightweight_and_version_synced() -> None:
     assert any(d.startswith("streamlit") for d in dashboard_deps)
     assert any(d.startswith("cryptography") for d in dashboard_deps)
 
+    # Streamlit Community Cloud nutzt requirements.txt (nicht uv.lock), damit streamlit installiert bleibt
+    req_txt = (root / "requirements.txt").read_text(encoding="utf-8").lower()
+    assert "streamlit" in req_txt and "cryptography" in req_txt
+    gitignore_lines = {ln.strip() for ln in (root / ".gitignore").read_text(encoding="utf-8").splitlines()}
+    assert "uv.lock" in gitignore_lines
+
 
 def test_access_logging_auto_detects_caller_env_records_success_failure_and_redacts_secrets(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
