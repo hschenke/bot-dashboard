@@ -15,10 +15,10 @@ from pydantic import BaseModel
 
 from ki_brain.access import (
     INTERNAL_DASHBOARD_APP,
-    AppClientStatus,
-    authorize_client_app,
-    build_app_client_statuses,
-    generate_app_access_token,
+    FleetAccessStatus,
+    authorize_fleet_client,
+    build_fleet_access_status,
+    generate_fleet_access_secret,
 )
 from ki_brain.benchmark import BrainBenchmarkRunner
 from ki_brain.connection import encode_connection_key, resolve_connection_config
@@ -140,8 +140,7 @@ class KIWebsearchBrain:
         repository: BrainRepository,
         secrets: BrainSecrets | None = None,
         *,
-        app_id: str = "",
-        app_token: str = "",
+        fleet_secret: bytes = b"",
         genai_client: Any = None,
         rate_limiter: LlmRateLimiter | None = None,
         vault_passphrase: str = "",
@@ -153,7 +152,7 @@ class KIWebsearchBrain:
             self._client_app_id = INTERNAL_DASHBOARD_APP
             self._is_admin_client = True
         else:
-            self._client_app_id = authorize_client_app(repository, app_id, app_token)
+            self._client_app_id = authorize_fleet_client(repository, fleet_secret)
             self._is_admin_client = False
         self._vault_passphrase = vault_passphrase.strip()
         self._explicit_vault_key = explicit_vault_key.strip()
@@ -194,23 +193,12 @@ class KIWebsearchBrain:
         cls,
         connection_key: str = "",
         *,
-        app_id: str = "",
-        app_token: str = "",
-        turso_url: str = "",
-        turso_auth_token: str = "",
         sqlite_path: str | Path = "data/ki_brain.db",
         base_dir: Path | None = None,
         secrets: BrainSecrets | None = None,
     ) -> KIWebsearchBrain:
-        """Plug-&-Play-Verbindung für autorisierte Apps (liest `KI_BRAIN_KEY` aus ENV & `st.secrets`)."""
-        cfg = resolve_connection_config(
-            connection_key=connection_key,
-            app_id=app_id,
-            app_token=app_token,
-            turso_url=turso_url,
-            turso_auth_token=turso_auth_token,
-            base_dir=base_dir,
-        )
+        """Plug-&-Play-Verbindung für News-Bot, Research-Bot & Alert-Bot (1 Secret: `KI_BRAIN_KEY`)."""
+        cfg = resolve_connection_config(connection_key=connection_key, base_dir=base_dir)
         repo = create_brain_repository(
             turso_url=cfg.turso_url,
             turso_auth_token=cfg.turso_auth_token,
@@ -221,8 +209,7 @@ class KIWebsearchBrain:
             return cls(
                 repository=repo,
                 secrets=secrets or BrainSecrets.from_env(),
-                app_id=cfg.app_id,
-                app_token=cfg.app_token,
+                fleet_secret=cfg.fleet_secret,
                 vault_passphrase=cfg.effective_vault_passphrase,
             )
         except Exception:
@@ -234,21 +221,13 @@ class KIWebsearchBrain:
         cls,
         *,
         connection_key: str = "",
-        app_id: str = "",
-        app_token: str = "",
-        turso_url: str = "",
-        turso_auth_token: str = "",
         sqlite_path: str | Path = "data/ki_brain.db",
         base_dir: Path | None = None,
         secrets: BrainSecrets | None = None,
     ) -> KIWebsearchBrain:
-        """Initialisiert das Brain für eine autorisierte App (`KI_BRAIN_KEY` oder Legacy-Variablen)."""
+        """Alias für `KIWebsearchBrain.connect()`."""
         return cls.connect(
             connection_key=connection_key,
-            app_id=app_id,
-            app_token=app_token,
-            turso_url=turso_url,
-            turso_auth_token=turso_auth_token,
             sqlite_path=sqlite_path,
             base_dir=base_dir,
             secrets=secrets,
@@ -558,45 +537,38 @@ class KIWebsearchBrain:
             self._repo.upsert_tools_batch(tools_to_save)
         return removed
 
-    # --- App-Zugriffskontrolle (Whitelist: news_bot, research_bot, alert_bot) ---
-    def list_app_clients(
-        self, *, client_records: dict[str, dict[str, Any]] | None = None
-    ) -> list[AppClientStatus]:
-        """Liefert den sicheren Zugriffsstatus der 3 exklusiv zugelassenen Apps."""
-        recs = client_records if client_records is not None else self._repo.list_app_client_records()
-        return build_app_client_statuses(recs)
+    # --- Einheitlicher Flotten-Zugriff (1 kompakter KI_BRAIN_KEY für alle 3 Apps) ---
+    def get_fleet_access_status(
+        self, *, client_record: dict[str, Any] | None = None
+    ) -> FleetAccessStatus:
+        """Liefert den sicheren Zugriffsstatus des gemeinsamen Flotten-Keys."""
+        rec = client_record if client_record is not None else self._repo.get_fleet_client_record()
+        return build_fleet_access_status(rec)
 
-    def issue_app_token(self, app_id: str) -> str:
-        """Generiert/rotiert ein 256-Bit-Access-Token für eine zugelassene App (Klartext nur 1× zurückgegeben!)."""
+    def issue_fleet_key(self) -> tuple[str, bool]:
+        """Erzeugt/rotiert den kompakten 1-Secret `KI_BRAIN_KEY` für alle 3 Apps (`(key, has_turso)`)."""
         self._require_admin()
-        self._repo.migrate_legacy_secrets(passphrase=self._vault_passphrase)
-        token, token_hash = generate_app_access_token(app_id)
-        self._repo.upsert_app_client(app_id, token_hash, enabled=True)
-        return token
-
-    def issue_app_connection_key(self, app_id: str) -> tuple[str, str, bool]:
-        """Erzeugt App-Token + 1-Secret-Bundle `KI_BRAIN_KEY` (`(raw_token, connection_key, has_turso)`)."""
-        raw_token = self.issue_app_token(app_id)
+        raw_secret, token_hash = generate_fleet_access_secret()
+        self._repo.upsert_fleet_client(token_hash, enabled=True)
         turso_url, turso_token = self._repo.get_turso_connection_credentials()
         explicit_vault_key = self._explicit_vault_key or os.getenv("BRAIN_SECRET_KEY", "").strip()
         connection_key = encode_connection_key(
-            app_id,
-            raw_token,
+            raw_secret,
             turso_url=turso_url,
             turso_auth_token=turso_token,
             vault_passphrase=explicit_vault_key,
         )
-        return raw_token, connection_key, bool(turso_url and turso_token)
+        return connection_key, bool(turso_url and turso_token)
 
-    def revoke_app_token(self, app_id: str) -> bool:
-        """Widerruft das Access-Token einer zugelassenen App sofort."""
+    def set_fleet_enabled(self, enabled: bool) -> bool:
+        """Aktiviert oder sperrt den gemeinsamen Flotten-Key für alle 3 Apps sofort."""
         self._require_admin()
-        return self._repo.revoke_app_client(app_id)
+        return self._repo.set_fleet_client_enabled(enabled)
 
-    def set_app_enabled(self, app_id: str, enabled: bool) -> bool:
-        """Aktiviert oder sperrt den Zugriff einer bereits registrierten App."""
+    def revoke_fleet_key(self) -> bool:
+        """Widerruft den gemeinsamen Flotten-Key sofort."""
         self._require_admin()
-        return self._repo.set_app_client_enabled(app_id, enabled)
+        return self._repo.revoke_fleet_client()
 
     @staticmethod
     def _select_quick_verify_model(models: list[AIModelSpec]) -> AIModelSpec:

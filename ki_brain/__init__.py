@@ -1,6 +1,6 @@
 """KI-Brain – Zentrales Framework für kostenfreie Modelle, Web-Tools & Tier-Sequenzen."""
 
-from ki_brain.access import ALLOWED_CLIENT_APPS, AppClientStatus
+from ki_brain.access import ALLOWED_CLIENT_APPS, FLEET_CLIENT_ID, FleetAccessStatus
 from ki_brain.brain import KIWebsearchBrain, PipelineSummary
 from ki_brain.connection import (
     CONNECTION_KEY_ENV,
@@ -51,7 +51,7 @@ from ki_brain.quotas import (
 from ki_brain.storage import BrainDashboardState, BrainRepository, create_brain_repository
 from ki_brain.unblock import UnblockSummary
 
-__version__ = "0.16.0"
+__version__ = "0.17.0"
 
 connect = KIWebsearchBrain.connect
 is_configured = is_brain_configured
@@ -59,7 +59,6 @@ is_configured = is_brain_configured
 __all__ = [
     "AIModelSpec",
     "ALLOWED_CLIENT_APPS",
-    "AppClientStatus",
     "BenchmarkEntry",
     "BenchmarkReport",
     "BrainAuthError",
@@ -80,6 +79,8 @@ __all__ = [
     "BrainValidationError",
     "CONNECTION_KEY_ENV",
     "DiscoverySummary",
+    "FLEET_CLIENT_ID",
+    "FleetAccessStatus",
     "KIWebsearchBrain",
     "ModelProvider",
     "PipelineSummary",

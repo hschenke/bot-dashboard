@@ -118,7 +118,7 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
     assert "Free-Tier API-Key Env" in model_inputs
     assert "Paid-Tier API-Key Env (optional)" in model_inputs
 
-    # Tab 3 (Vault): enthält Free-Tier-, Paid-Tier-, Tool-Keys (ohne Brave!) & die 3 App-Zugriffstokens
+    # Tab 3 (Vault): enthält Free-Tier-, Paid-Tier-, Tool-Keys (ohne Brave!) & 1 gemeinsamen Flotten-Key
     vault_btn_keys = [b.key for b in at.tabs[3].button]
     assert "ki_vault_row_btn_GEMINI_FREE_API_KEY" in vault_btn_keys
     assert "ki_vault_row_btn_GEMINI_PAID_API_KEY" in vault_btn_keys
@@ -129,9 +129,8 @@ def test_create_dashboard_brain_bridge_and_apptest_render(
     assert "ki_vault_row_btn_BRAVE_SEARCH_API_KEY" not in vault_btn_keys
     assert "ki_vault_row_btn_SERPER_API_KEY" in vault_btn_keys
     assert "ki_vault_row_btn_BROWSERBASE_API_KEY" in vault_btn_keys
-    assert "ki_app_issue_btn_news_bot" in vault_btn_keys
-    assert "ki_app_issue_btn_research_bot" in vault_btn_keys
-    assert "ki_app_issue_btn_alert_bot" in vault_btn_keys
+    assert "ki_fleet_issue_btn" in vault_btn_keys
+    assert "ki_app_issue_btn_news_bot" not in vault_btn_keys
     assert any(b.label == "🔒 Secret sicher speichern / ersetzen" for b in at.tabs[3].button)
 
     # Tab 4 (Check): Live-Test, Benchmark-Report & Snapshot (ohne Bot-API-Einbindungsblock)
@@ -300,34 +299,28 @@ def test_ki_vault_tab_secret_dialog_and_three_app_token_management(
     assert bb_tool is not None and bb_tool.last_status == ProbeStatus.OK
     reopened.close()
 
-    # 2. Im Vault-Tab 1-Secret KI_BRAIN_KEY für research_bot erzeugen -> einmalig anzeigen & funktionsfähig
+    # 2. Im Vault-Tab 1 gemeinsamen kompakten KI_BRAIN_KEY erzeugen -> einmalig anzeigen & funktionsfähig
     import ki_brain
+    from ki_brain import FLEET_CLIENT_ID
 
-    issue_btn = next(b for b in at.tabs[3].button if b.key == "ki_app_issue_btn_research_bot")
+    issue_btn = next(b for b in at.tabs[3].button if b.key == "ki_fleet_issue_btn")
     at = issue_btn.click().run()
     assert not at.exception
-    issued_info = at.session_state["ki_vault_issued_app_token"]
-    assert issued_info["app_id"] == "research_bot"
-    issued_tok = str(issued_info["token"])
+    issued_info = at.session_state["ki_vault_issued_fleet_key"]
     issued_conn_key = str(issued_info["connection_key"])
-    assert issued_tok.startswith("kib_research_bot_")
-    assert issued_conn_key.startswith("kibk1_")
+    assert issued_conn_key.startswith("kib_")
+    assert len(issued_conn_key) <= 32
     assert any(f'KI_BRAIN_KEY = "{issued_conn_key}"' in c.value for c in at.tabs[3].code)
 
     with ki_brain.connect(issued_conn_key, sqlite_path=db_file) as bot:
-        assert bot.client_app_id == "research_bot"
+        assert bot.client_app_id == FLEET_CLIENT_ID
 
-    with KIWebsearchBrain.from_env(app_id="research_bot", app_token=issued_tok, sqlite_path=db_file) as bot_legacy:
-        assert bot_legacy.client_app_id == "research_bot"
-
-    # 3. Sperren über Vault-Button entzieht sofort den Zugriff (sowohl für KI_BRAIN_KEY als auch Legacy-Token)
-    revoke_btn = next(b for b in at.tabs[3].button if b.key == "ki_app_revoke_btn_research_bot")
+    # 3. Sperren über Vault-Button entzieht sofort den Zugriff für alle 3 Apps
+    revoke_btn = next(b for b in at.tabs[3].button if b.key == "ki_fleet_revoke_btn")
     at = revoke_btn.click().run()
     assert not at.exception
     with pytest.raises(BrainAuthError):
         ki_brain.connect(issued_conn_key, sqlite_path=db_file)
-    with pytest.raises(BrainAuthError):
-        KIWebsearchBrain.from_env(app_id="research_bot", app_token=issued_tok, sqlite_path=db_file)
 
 
 def test_app_sidebar_has_three_pages_ki_brain_and_divider_before_logout(

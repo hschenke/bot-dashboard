@@ -1,33 +1,43 @@
-"""1-Secret Plug-&-Play Verbindungs-Bundle (`KI_BRAIN_KEY`) & Auto-Secret-Auflösung."""
+"""Kompakter 1-Secret Plug-&-Play Flotten-Key (`KI_BRAIN_KEY`) & Auto-Secret-Auflösung."""
 
 from __future__ import annotations
 
 import base64
-import json
 import logging
 import os
 import sys
 import tomllib
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ki_brain.access import normalize_client_app_id
+from ki_brain.access import FLEET_SECRET_BYTES
 from ki_brain.exceptions import BrainAuthError
 
 logger = logging.getLogger(__name__)
 
 CONNECTION_KEY_ENV: str = "KI_BRAIN_KEY"
-CONNECTION_KEY_PREFIX: str = "kibk1_"
-_MAX_CONNECTION_KEY_LEN: int = 8192
+CONNECTION_KEY_PREFIX: str = "kib_"
+_MAX_CONNECTION_KEY_LEN: int = 4096
+_MAX_UNCOMPRESSED_BYTES: int = 4096
+_STD_TURSO_JWT_HDR: str = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9"
+_ED25519_SIG_BYTES: int = 64
+
+_VERSION_MASK: int = 0xE0
+_VERSION_1: int = 0x20
+_FLAG_TURSO_SUFFIX: int = 0x01
+_FLAG_COMPACT_JWT: int = 0x02
+_FLAG_HAS_VAULT_SECRET: int = 0x04
+_FLAG_DEFLATED: int = 0x08
+_FLAG_HAS_TURSO: int = 0x10
 
 
 @dataclass(frozen=True)
 class BrainConnectionConfig:
-    """Aufgelöste, sichere Verbindungsparameter für eine autorisierte Client-App."""
+    """Aufgelöste, sichere Verbindungsparameter aus dem kompakten `KI_BRAIN_KEY`."""
 
-    app_id: str
-    app_token: str = field(repr=False)
+    fleet_secret: bytes = field(repr=False)
     turso_url: str = ""
     turso_auth_token: str = field(default="", repr=False)
     vault_passphrase: str = field(default="", repr=False)
@@ -38,54 +48,202 @@ class BrainConnectionConfig:
         return self.vault_passphrase.strip() or self.turso_auth_token.strip()
 
 
+def _b64u_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def _b64u_decode(text: str) -> bytes:
+    padded = text + ("=" * ((4 - len(text) % 4) % 4))
+    return base64.urlsafe_b64decode(padded.encode("ascii"))
+
+
+def _try_split_eddsa_jwt(token: str) -> tuple[bytes, bytes] | None:
+    """Dekodiert Standard-Turso-EdDSA-JWT verlustfrei in `(payload_raw, sig_64B)`."""
+    parts = token.split(".")
+    if len(parts) != 3 or parts[0] != _STD_TURSO_JWT_HDR:
+        return None
+    try:
+        payload_raw = _b64u_decode(parts[1])
+        sig_raw = _b64u_decode(parts[2])
+    except Exception:  # noqa: BLE001
+        return None
+    if len(sig_raw) != _ED25519_SIG_BYTES:
+        return None
+    if _b64u_encode(payload_raw) != parts[1] or _b64u_encode(sig_raw) != parts[2]:
+        return None
+    return payload_raw, sig_raw
+
+
+def _normalize_compact_host(turso_url: str) -> tuple[bytes, bool]:
+    clean = turso_url.strip().rstrip("/")
+    if clean.startswith("libsql://"):
+        clean = "https://" + clean.removeprefix("libsql://")
+    if clean.startswith("https://"):
+        host = clean.removeprefix("https://")
+        if host.endswith(".turso.io") and "/" not in host:
+            return host.removesuffix(".turso.io").encode("utf-8"), True
+        return host.encode("utf-8"), False
+    return clean.encode("utf-8"), False
+
+
+def _reconstruct_turso_url(host: str, has_suffix: bool) -> str:
+    if has_suffix:
+        return f"https://{host}.turso.io"
+    if host.startswith(("http://", "https://")):
+        return host
+    return f"https://{host}"
+
+
 def encode_connection_key(
-    app_id: str,
-    app_token: str,
+    fleet_secret: bytes,
     *,
     turso_url: str = "",
     turso_auth_token: str = "",
     vault_passphrase: str = "",
 ) -> str:
-    """Bündelt App-Token & Brain-DB-Zugang in einen einzelnen `KI_BRAIN_KEY`-String."""
-    clean_app = normalize_client_app_id(app_id)
-    clean_tok = (app_token or "").strip()
-    if not clean_tok:
-        raise BrainAuthError("Kein gültiges App-Access-Token zum Erstellen von KI_BRAIN_KEY angegeben.")
-    payload: dict[str, Any] = {"v": 1, "a": clean_app, "t": clean_tok}
-    if turso_url.strip():
-        payload["u"] = turso_url.strip()
-    if turso_auth_token.strip():
-        payload["k"] = turso_auth_token.strip()
-    if vault_passphrase.strip():
-        payload["s"] = vault_passphrase.strip()
-    raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-    encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
-    return f"{CONNECTION_KEY_PREFIX}{encoded}"
+    """Kodiert Flotten-Secret & Brain-DB-Zugang kompakt als `kib_<base64url>`."""
+    if len(fleet_secret) != FLEET_SECRET_BYTES:
+        raise BrainAuthError("Ungültiges Flotten-Secret zum Erstellen von KI_BRAIN_KEY.")
+
+    flags = _VERSION_1
+    clean_url, clean_tok = turso_url.strip(), turso_auth_token.strip()
+    clean_pass = vault_passphrase.strip()
+    has_turso = bool(clean_url and clean_tok)
+    if not has_turso and not clean_pass:
+        return f"{CONNECTION_KEY_PREFIX}{_b64u_encode(bytes([flags]) + fleet_secret)}"
+
+    text_parts = bytearray()
+    sig_trailer = b""
+    if has_turso:
+        flags |= _FLAG_HAS_TURSO
+        host_bytes, has_suffix = _normalize_compact_host(clean_url)
+        if not host_bytes or len(host_bytes) > 255:
+            raise BrainAuthError("Ungültige Turso-URL für KI_BRAIN_KEY.")
+        if has_suffix:
+            flags |= _FLAG_TURSO_SUFFIX
+        text_parts.append(len(host_bytes))
+        text_parts.extend(host_bytes)
+        jwt_parts = _try_split_eddsa_jwt(clean_tok)
+        if jwt_parts is not None:
+            flags |= _FLAG_COMPACT_JWT
+            payload_raw, sig_trailer = jwt_parts
+            text_parts.extend(len(payload_raw).to_bytes(2, "big"))
+            text_parts.extend(payload_raw)
+        else:
+            raw_tok = clean_tok.encode("utf-8")
+            text_parts.extend(len(raw_tok).to_bytes(2, "big"))
+            text_parts.extend(raw_tok)
+
+    if clean_pass:
+        flags |= _FLAG_HAS_VAULT_SECRET
+        pass_bytes = clean_pass.encode("utf-8")
+        text_parts.extend(len(pass_bytes).to_bytes(2, "big"))
+        text_parts.extend(pass_bytes)
+
+    raw_text = bytes(text_parts)
+    compressor = zlib.compressobj(level=9, wbits=-15)
+    compressed = compressor.compress(raw_text) + compressor.flush()
+    if len(compressed) < len(raw_text):
+        flags |= _FLAG_DEFLATED
+        head_payload = compressed
+    else:
+        head_payload = raw_text
+
+    blob = bytes([flags]) + len(head_payload).to_bytes(2, "big") + head_payload + fleet_secret + sig_trailer
+    return f"{CONNECTION_KEY_PREFIX}{_b64u_encode(blob)}"
+
+
+def _read_u16_slice(buf: bytes, offset: int) -> tuple[bytes, int]:
+    if offset + 2 > len(buf):
+        raise BrainAuthError("Beschädigter KI_BRAIN_KEY (Längenfeld abgeschnitten).")
+    length = int.from_bytes(buf[offset : offset + 2], "big")
+    end = offset + 2 + length
+    if end > len(buf):
+        raise BrainAuthError("Beschädigter KI_BRAIN_KEY (Nutzdaten abgeschnitten).")
+    return buf[offset + 2 : end], end
+
+
+def _decompress_safe(data: bytes) -> bytes:
+    decomp = zlib.decompressobj(wbits=-15)
+    try:
+        out = decomp.decompress(data, _MAX_UNCOMPRESSED_BYTES)
+        tail = decomp.flush(_MAX_UNCOMPRESSED_BYTES - len(out) + 1)
+    except zlib.error as exc:
+        raise BrainAuthError("KI_BRAIN_KEY konnte nicht dekomprimiert werden.") from exc
+    if decomp.unconsumed_tail or len(out) + len(tail) > _MAX_UNCOMPRESSED_BYTES:
+        raise BrainAuthError("KI_BRAIN_KEY überschreitet das zulässige Größenlimit.")
+    return out + tail
 
 
 def decode_connection_key(raw_key: str) -> BrainConnectionConfig:
-    """Dekodiert und validiert ein `KI_BRAIN_KEY`-Bundle (`kibk1_...`, fail-closed)."""
+    """Dekodiert und validiert einen kompakten `KI_BRAIN_KEY` (`kib_...`, fail-closed)."""
     cleaned = (raw_key or "").strip()
     if not cleaned.startswith(CONNECTION_KEY_PREFIX) or len(cleaned) > _MAX_CONNECTION_KEY_LEN:
-        raise BrainAuthError("Ungültiges KI_BRAIN_KEY-Format (erwartet Präfix 'kibk1_').")
-    body = cleaned.removeprefix(CONNECTION_KEY_PREFIX)
-    padded = body + ("=" * ((4 - len(body) % 4) % 4))
+        raise BrainAuthError("Ungültiges KI_BRAIN_KEY-Format (erwartet Präfix 'kib_').")
     try:
-        data = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+        blob = _b64u_decode(cleaned.removeprefix(CONNECTION_KEY_PREFIX))
     except Exception as exc:  # noqa: BLE001
         raise BrainAuthError("KI_BRAIN_KEY konnte nicht dekodiert werden.") from exc
-    if not isinstance(data, dict) or data.get("v") != 1:
+    if not blob:
+        raise BrainAuthError("Leerer KI_BRAIN_KEY.")
+
+    flags = blob[0]
+    if (flags & _VERSION_MASK) != _VERSION_1:
         raise BrainAuthError("Nicht unterstützte KI_BRAIN_KEY-Version.")
-    clean_app = normalize_client_app_id(str(data.get("a") or ""))
-    clean_tok = str(data.get("t") or "").strip()
-    if not clean_tok:
-        raise BrainAuthError("KI_BRAIN_KEY enthält kein gültiges App-Token.")
+    has_turso = bool(flags & _FLAG_HAS_TURSO)
+    has_secret = bool(flags & _FLAG_HAS_VAULT_SECRET)
+    compact_jwt = bool(flags & _FLAG_COMPACT_JWT)
+
+    if not has_turso and not has_secret:
+        if len(blob) != 1 + FLEET_SECRET_BYTES:
+            raise BrainAuthError("Ungültige Länge für lokalen KI_BRAIN_KEY.")
+        return BrainConnectionConfig(fleet_secret=blob[1:])
+
+    if len(blob) < 3:
+        raise BrainAuthError("Beschädigter KI_BRAIN_KEY-Header.")
+    head_len = int.from_bytes(blob[1:3], "big")
+    trailer_len = FLEET_SECRET_BYTES + (_ED25519_SIG_BYTES if (has_turso and compact_jwt) else 0)
+    if len(blob) != 3 + head_len + trailer_len:
+        raise BrainAuthError("Beschädigter KI_BRAIN_KEY (inkonsistente Länge).")
+
+    head_raw = blob[3 : 3 + head_len]
+    text_buf = _decompress_safe(head_raw) if (flags & _FLAG_DEFLATED) else head_raw
+    sec_start = 3 + head_len
+    fleet_secret = blob[sec_start : sec_start + FLEET_SECRET_BYTES]
+    sig_bytes = blob[sec_start + FLEET_SECRET_BYTES :]
+
+    pos = 0
+    turso_url, turso_token, vault_pass = "", "", ""
+    try:
+        if has_turso:
+            if pos >= len(text_buf):
+                raise BrainAuthError("Beschädigter KI_BRAIN_KEY (Host fehlt).")
+            host_len = text_buf[pos]
+            pos += 1
+            if pos + host_len > len(text_buf):
+                raise BrainAuthError("Beschädigter KI_BRAIN_KEY (Host abgeschnitten).")
+            host = text_buf[pos : pos + host_len].decode("utf-8", errors="strict")
+            pos += host_len
+            turso_url = _reconstruct_turso_url(host, bool(flags & _FLAG_TURSO_SUFFIX))
+            tok_part, pos = _read_u16_slice(text_buf, pos)
+            if compact_jwt:
+                turso_token = f"{_STD_TURSO_JWT_HDR}.{_b64u_encode(tok_part)}.{_b64u_encode(sig_bytes)}"
+            else:
+                turso_token = tok_part.decode("utf-8", errors="strict")
+
+        if has_secret:
+            sec_part, pos = _read_u16_slice(text_buf, pos)
+            vault_pass = sec_part.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise BrainAuthError("Beschädigter KI_BRAIN_KEY (ungültige Textkodierung).") from exc
+    if pos != len(text_buf):
+        raise BrainAuthError("Beschädigter KI_BRAIN_KEY (unerwartete Restdaten).")
+
     return BrainConnectionConfig(
-        app_id=clean_app,
-        app_token=clean_tok,
-        turso_url=str(data.get("u") or "").strip(),
-        turso_auth_token=str(data.get("k") or "").strip(),
-        vault_passphrase=str(data.get("s") or "").strip(),
+        fleet_secret=fleet_secret,
+        turso_url=turso_url,
+        turso_auth_token=turso_token,
+        vault_passphrase=vault_pass,
     )
 
 
@@ -149,53 +307,13 @@ def get_runtime_secret(key: str, *, base_dir: Path | None = None) -> str:
 def resolve_connection_config(
     *,
     connection_key: str = "",
-    app_id: str = "",
-    app_token: str = "",
-    turso_url: str = "",
-    turso_auth_token: str = "",
-    vault_passphrase: str = "",
     base_dir: Path | None = None,
 ) -> BrainConnectionConfig:
-    """Löst 1-Secret (`KI_BRAIN_KEY`) oder Legacy-Einzelvariablen fehlertolerant & isoliert auf."""
-    raw_bundle = (
-        connection_key.strip()
-        or get_runtime_secret(CONNECTION_KEY_ENV, base_dir=base_dir)
-        or get_runtime_secret("BRAIN_CONNECTION_KEY", base_dir=base_dir)
-    )
-    if raw_bundle:
-        decoded = decode_connection_key(raw_bundle)
-        return BrainConnectionConfig(
-            app_id=app_id.strip() or decoded.app_id,
-            app_token=app_token.strip() or decoded.app_token,
-            turso_url=turso_url.strip() or decoded.turso_url,
-            turso_auth_token=turso_auth_token.strip() or decoded.turso_auth_token,
-            vault_passphrase=vault_passphrase.strip() or decoded.vault_passphrase,
-        )
-
-    resolved_app = app_id.strip() or get_runtime_secret("BRAIN_APP_ID", base_dir=base_dir)
-    resolved_tok = app_token.strip() or get_runtime_secret("BRAIN_APP_TOKEN", base_dir=base_dir)
-    if resolved_tok.startswith(CONNECTION_KEY_PREFIX):
-        decoded = decode_connection_key(resolved_tok)
-        return BrainConnectionConfig(
-            app_id=resolved_app or decoded.app_id,
-            app_token=decoded.app_token,
-            turso_url=turso_url.strip() or decoded.turso_url,
-            turso_auth_token=turso_auth_token.strip() or decoded.turso_auth_token,
-            vault_passphrase=vault_passphrase.strip() or decoded.vault_passphrase,
-        )
-
-    brain_url = turso_url.strip() or get_runtime_secret("BRAIN_TURSO_URL", base_dir=base_dir)
-    brain_key = turso_auth_token.strip() or get_runtime_secret("BRAIN_TURSO_KEY", base_dir=base_dir)
-    resolved_url = brain_url or os.getenv("TURSO_URL", "").strip()
-    resolved_key = brain_key or os.getenv("TURSO_KEY", "").strip()
-    resolved_pass = vault_passphrase.strip() or get_runtime_secret("BRAIN_SECRET_KEY", base_dir=base_dir)
-    return BrainConnectionConfig(
-        app_id=resolved_app,
-        app_token=resolved_tok,
-        turso_url=resolved_url,
-        turso_auth_token=resolved_key,
-        vault_passphrase=resolved_pass,
-    )
+    """Löst den 1-Secret `KI_BRAIN_KEY` automatisch aus Argument, ENV, `st.secrets` oder TOML auf."""
+    raw_key = connection_key.strip() or get_runtime_secret(CONNECTION_KEY_ENV, base_dir=base_dir)
+    if not raw_key:
+        raise BrainAuthError("Kein KI_BRAIN_KEY in Umgebungsvariablen oder Streamlit Secrets gefunden.")
+    return decode_connection_key(raw_key)
 
 
 def is_brain_configured(
@@ -203,24 +321,12 @@ def is_brain_configured(
     *,
     base_dir: Path | None = None,
 ) -> bool:
-    """Prüft schnell & ohne DB-Aufruf, ob `KI_BRAIN_KEY` oder Legacy-Brain-Auth gesetzt ist."""
-    raw_bundle = (
-        connection_key.strip()
-        or get_runtime_secret(CONNECTION_KEY_ENV, base_dir=base_dir)
-        or get_runtime_secret("BRAIN_CONNECTION_KEY", base_dir=base_dir)
-    )
-    if raw_bundle:
-        try:
-            decode_connection_key(raw_bundle)
-            return True
-        except BrainAuthError:
-            return False
-    app_id = get_runtime_secret("BRAIN_APP_ID", base_dir=base_dir)
-    app_tok = get_runtime_secret("BRAIN_APP_TOKEN", base_dir=base_dir)
-    if not (app_id and app_tok):
+    """Prüft schnell & ohne DB-Aufruf, ob ein gültiger `KI_BRAIN_KEY` gesetzt ist."""
+    raw_key = connection_key.strip() or get_runtime_secret(CONNECTION_KEY_ENV, base_dir=base_dir)
+    if not raw_key:
         return False
     try:
-        normalize_client_app_id(app_id)
+        decode_connection_key(raw_key)
         return True
     except BrainAuthError:
         return False

@@ -1,4 +1,4 @@
-"""Strikte App-Zugriffskontrolle für das KI-Brain Framework (Whitelist + Token-Auth)."""
+"""Einheitliche Flotten-Zugriffskontrolle für das KI-Brain (1 Key für alle 3 Apps)."""
 
 from __future__ import annotations
 
@@ -15,65 +15,43 @@ if TYPE_CHECKING:
     from ki_brain.storage import BrainRepository
 
 ALLOWED_CLIENT_APPS: tuple[str, ...] = ("news_bot", "research_bot", "alert_bot")
+FLEET_CLIENT_ID: str = "fleet"
 INTERNAL_DASHBOARD_APP: str = "bot_dashboard"
+FLEET_DISPLAY_NAME: str = "Bot-Flotte (News-Bot, Research-Bot & Alert-Bot)"
 
-CLIENT_APP_DISPLAY_NAMES: dict[str, str] = {
-    "news_bot": "News-Bot",
-    "research_bot": "Research-Bot",
-    "alert_bot": "Alert-Bot",
-}
-
-_TOKEN_PREFIX = "kib_"  # noqa: S105
+FLEET_SECRET_BYTES: int = 16  # 128-Bit kryptographisches Geheimnis (kompakt & sicher)
 _HASH_PREFIX = "sha256_v1:"
 
 
-class AppClientStatus(BaseModel):
-    """Sicherer Zugriffsstatus einer freigegebenen App (enthält niemals Token oder Hash!)."""
+class FleetAccessStatus(BaseModel):
+    """Sicherer Zugriffsstatus des gemeinsamen Flotten-Keys (enthält niemals Key oder Hash!)."""
 
     model_config = ConfigDict(frozen=True)
 
-    app_id: str
-    display_name: str
-    has_token: bool = False
+    client_id: str = FLEET_CLIENT_ID
+    display_name: str = FLEET_DISPLAY_NAME
+    has_key: bool = False
     enabled: bool = False
     created_at: str = ""
     last_used_at: str = ""
 
 
-def normalize_client_app_id(raw_app_id: str) -> str:
-    """Normalisiert und prüft eine App-ID strikt gegen die 3-App-Whitelist."""
-    clean = (raw_app_id or "").strip().lower().replace("-", "_")
-    if clean not in ALLOWED_CLIENT_APPS:
-        allowed = ", ".join(ALLOWED_CLIENT_APPS)
-        raise BrainAuthError(
-            f"Zugriff verweigert: App '{raw_app_id or 'unbekannt'}' ist nicht zugelassen "
-            f"(erlaubt sind ausschließlich: {allowed})."
-        )
-    return clean
-
-
-def _compute_salted_token_hash(app_id: str, token: str, salt: bytes) -> str:
-    digest = hmac.new(salt, f"{app_id}:{token}".encode(), hashlib.sha256).hexdigest()
+def _compute_salted_hash(raw_secret: bytes, salt: bytes) -> str:
+    digest = hmac.new(salt, b"fleet:" + raw_secret, hashlib.sha256).hexdigest()
     return f"{_HASH_PREFIX}{salt.hex()}:{digest}"
 
 
-def generate_app_access_token(app_id: str) -> tuple[str, str]:
-    """Erzeugt ein kryptographisches 256-Bit-App-Token und seinen gesalzenen Hash."""
-    clean_app = normalize_client_app_id(app_id)
-    token = f"{_TOKEN_PREFIX}{clean_app}_{secrets.token_urlsafe(32)}"
+def generate_fleet_access_secret() -> tuple[bytes, str]:
+    """Erzeugt ein 128-Bit-Flotten-Geheimnis (16 Bytes) und seinen gesalzenen HMAC-Hash."""
+    raw_secret = secrets.token_bytes(FLEET_SECRET_BYTES)
     salt = secrets.token_bytes(16)
-    return token, _compute_salted_token_hash(clean_app, token, salt)
+    return raw_secret, _compute_salted_hash(raw_secret, salt)
 
 
-def verify_app_access_token(app_id: str, token: str, stored_hash: str) -> bool:
-    """Prüft ein App-Access-Token in konstanter Zeit gegen den gespeicherten Hash."""
-    try:
-        clean_app = normalize_client_app_id(app_id)
-    except BrainAuthError:
-        return False
-    clean_tok = (token or "").strip()
+def verify_fleet_access_secret(raw_secret: bytes, stored_hash: str) -> bool:
+    """Prüft das Flotten-Geheimnis in konstanter Zeit gegen den gespeicherten Hash."""
     raw_hash = (stored_hash or "").strip()
-    if not clean_tok.startswith(f"{_TOKEN_PREFIX}{clean_app}_") or not raw_hash.startswith(_HASH_PREFIX):
+    if len(raw_secret) != FLEET_SECRET_BYTES or not raw_hash.startswith(_HASH_PREFIX):
         return False
     parts = raw_hash.removeprefix(_HASH_PREFIX).split(":", 1)
     if len(parts) != 2:
@@ -82,49 +60,34 @@ def verify_app_access_token(app_id: str, token: str, stored_hash: str) -> bool:
         salt = bytes.fromhex(parts[0])
     except ValueError:
         return False
-    expected = _compute_salted_token_hash(clean_app, clean_tok, salt)
+    expected = _compute_salted_hash(raw_secret, salt)
     return hmac.compare_digest(expected, raw_hash)
 
 
-def authorize_client_app(repo: BrainRepository, app_id: str, app_token: str) -> str:
-    """Verifiziert App-ID + Access-Token gegen die Brain-DB (fail-closed)."""
-    clean_app = normalize_client_app_id(app_id)
-    clean_tok = (app_token or "").strip()
-    if not clean_tok:
-        raise BrainAuthError(
-            f"Zugriff verweigert: Kein BRAIN_APP_TOKEN für '{clean_app}' angegeben."
-        )
-    record = repo.get_app_client_record(clean_app)
+def authorize_fleet_client(repo: BrainRepository, raw_secret: bytes) -> str:
+    """Verifiziert den gemeinsamen `KI_BRAIN_KEY` gegen die Brain-DB (fail-closed)."""
+    if len(raw_secret) != FLEET_SECRET_BYTES:
+        raise BrainAuthError("Zugriff verweigert: Kein gültiger KI_BRAIN_KEY angegeben.")
+    record = repo.get_fleet_client_record()
     if not record or not record.get("token_hash"):
-        raise BrainAuthError(
-            f"Zugriff verweigert: Für '{clean_app}' ist kein aktives Token im Vault hinterlegt."
-        )
+        raise BrainAuthError("Zugriff verweigert: Im KI-Brain Vault ist kein aktiver KI_BRAIN_KEY hinterlegt.")
     if not bool(record.get("enabled", False)):
-        raise BrainAuthError(
-            f"Zugriff verweigert: App '{clean_app}' ist im KI-Brain Vault gesperrt."
-        )
-    if not verify_app_access_token(clean_app, clean_tok, str(record["token_hash"])):
-        raise BrainAuthError(
-            f"Zugriff verweigert: Ungültiges App-Access-Token für '{clean_app}'."
-        )
-    repo.touch_app_client_last_used(clean_app)
-    return clean_app
+        raise BrainAuthError("Zugriff verweigert: KI_BRAIN_KEY ist im KI-Brain Vault gesperrt.")
+    if not verify_fleet_access_secret(raw_secret, str(record["token_hash"])):
+        raise BrainAuthError("Zugriff verweigert: Ungültiger oder rotierter KI_BRAIN_KEY.")
+    repo.touch_fleet_client_last_used()
+    return FLEET_CLIENT_ID
 
 
-def build_app_client_statuses(records: dict[str, dict[str, Any]]) -> list[AppClientStatus]:
-    """Erstellt die geordnete Statusliste der 3 exklusiv zugelassenen Apps."""
-    statuses: list[AppClientStatus] = []
-    for app_id in ALLOWED_CLIENT_APPS:
-        rec = records.get(app_id) or {}
-        has_tok = bool(str(rec.get("token_hash") or "").strip())
-        statuses.append(
-            AppClientStatus(
-                app_id=app_id,
-                display_name=CLIENT_APP_DISPLAY_NAMES.get(app_id, app_id),
-                has_token=has_tok,
-                enabled=bool(rec.get("enabled", False)) and has_tok,
-                created_at=str(rec.get("created_at") or ""),
-                last_used_at=str(rec.get("last_used_at") or ""),
-            )
-        )
-    return statuses
+def build_fleet_access_status(record: dict[str, Any] | None) -> FleetAccessStatus:
+    """Erstellt den sicheren UI-Status des gemeinsamen Flotten-Zugangs."""
+    rec = record or {}
+    has_key = bool(str(rec.get("token_hash") or "").strip())
+    return FleetAccessStatus(
+        client_id=FLEET_CLIENT_ID,
+        display_name=FLEET_DISPLAY_NAME,
+        has_key=has_key,
+        enabled=bool(rec.get("enabled", False)) and has_key,
+        created_at=str(rec.get("created_at") or ""),
+        last_used_at=str(rec.get("last_used_at") or ""),
+    )

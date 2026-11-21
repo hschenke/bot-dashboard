@@ -1,11 +1,11 @@
-"""KI-Brain Tab 4 (Vault): Zentraler Write-Only API-Key-Tresor (Free/Paid) & 3-App-Zugriffskontrolle."""
+"""KI-Brain Tab 4 (Vault): Zentraler Write-Only API-Key-Tresor (Free/Paid) & einheitlicher Flotten-Key."""
 
 from __future__ import annotations
 
 from typing import Any
 
 import streamlit as st
-from ki_brain import AppClientStatus, BrainError, KIWebsearchBrain, SecretStatusEntry
+from ki_brain import BrainError, FleetAccessStatus, KIWebsearchBrain, SecretStatusEntry
 
 from src.ui.formatters import format_iso_timestamp
 from src.ui.views.ki_secret_dialog import queue_secret_dialog_on_click
@@ -17,7 +17,7 @@ _TIER_LABELS: dict[str, str] = {
     "legacy": "🔁 Legacy-Fallback",
     "tool": "🔧 Tool-Key",
 }
-_ISSUED_TOKEN_SESSION_KEY = "ki_vault_issued_app_token"  # noqa: S105
+_ISSUED_KEY_SESSION_KEY = "ki_vault_issued_fleet_key"  # noqa: S105
 
 
 def _set_feedback(level: str, message: str) -> None:
@@ -81,94 +81,85 @@ def _render_tool_keys_section(tool_entries: list[SecretStatusEntry], *, is_admin
     _render_secret_table_rows(tool_entries, is_admin=is_admin)
 
 
-def _render_app_access_section(
+def _render_fleet_access_section(
     brain: KIWebsearchBrain,
-    clients: list[AppClientStatus],
+    fleet: FleetAccessStatus,
     *,
     is_admin: bool,
 ) -> None:
-    st.subheader("🛡️ App-Zugriff (Framework-Whitelist: nur deine 3 Apps)")
+    st.subheader("🛡️ App-Zugriff (1 gemeinsamer Key für alle 3 Apps)")
     st.caption(
-        "Das `ki_brain`-Framework lehnt fremde Aufrufe strikt ab (`BrainAuthError`). "
-        "Pro App genügt **1 einziges Secret (`KI_BRAIN_KEY`)** — inklusive Brain-DB-Verbindung & sofortiger Sperrfunktion."
+        "Genau **1 kompakter `KI_BRAIN_KEY`** für **News-Bot**, **Research-Bot** und **Alert-Bot** — "
+        "inkl. Brain-DB-Verbindung & sofortiger Sperr-/Rotationsfunktion."
     )
 
-    issued = st.session_state.get(_ISSUED_TOKEN_SESSION_KEY)
-    if is_admin and isinstance(issued, dict) and (issued.get("connection_key") or issued.get("token")):
-        app_id = str(issued["app_id"])
-        token = str(issued.get("token") or "")
-        conn_key = str(issued.get("connection_key") or "")
+    issued = st.session_state.get(_ISSUED_KEY_SESSION_KEY)
+    if is_admin and isinstance(issued, dict) and issued.get("connection_key"):
+        conn_key = str(issued["connection_key"])
         has_turso = bool(issued.get("has_turso", False))
         st.warning(
-            f"🔑 **Neuer 1-Secret Connection-Key für `{app_id}` (wird nur einmalig angezeigt — "
-            "dieses EINE Secret in Streamlit Cloud Secrets & GitHub Repository Secrets der App einfügen):**"
+            "🔑 **Neuer `KI_BRAIN_KEY` für News-Bot, Research-Bot & Alert-Bot "
+            "(wird nur einmalig angezeigt — dieses EINE Secret in Streamlit Cloud Secrets & GitHub Repository Secrets der 3 Apps einfügen):**"
         )
         st.code(f'KI_BRAIN_KEY = "{conn_key}"\n', language="toml")
         if not has_turso:
             st.info(
                 "ℹ️ Hinweis: Das Dashboard nutzt aktuell lokales SQLite. Für Cloud-Apps (Streamlit Cloud / GitHub Actions) "
                 "bitte zuerst `BRAIN_TURSO_URL` & `BRAIN_TURSO_KEY` (oder `TURSO_URL` & `TURSO_KEY`) im Dashboard setzen "
-                "und das Token danach neu erzeugen."
+                "und den Key danach neu erzeugen."
             )
-        if token:
-            with st.expander("🔧 Alternative Einzel-Variablen (Legacy-Fallback)", expanded=False):
-                st.code(f'BRAIN_APP_ID = "{app_id}"\nBRAIN_APP_TOKEN = "{token}"\n', language="toml")
         if st.button("✅ Key kopiert — Anzeige schließen", key="ki_vault_dismiss_token_btn"):
-            st.session_state.pop(_ISSUED_TOKEN_SESSION_KEY, None)
+            st.session_state.pop(_ISSUED_KEY_SESSION_KEY, None)
             st.rerun()
 
-    action_req: tuple[str, str] | None = None
-    for client in clients:
-        c_app, c_state, c_issue, c_toggle = st.columns([1.6, 1.5, 1.4, 1.2], vertical_alignment="center")
-        with c_app:
-            st.markdown(f"**{client.display_name}** (`{client.app_id}`)")
-            ts_parts = [
-                f"Erstellt: {format_iso_timestamp(client.created_at)}" if client.created_at else "Kein Token",
-                f"Zuletzt genutzt: {format_iso_timestamp(client.last_used_at)}" if client.last_used_at else "",
-            ]
-            st.caption(" · ".join(p for p in ts_parts if p))
-        with c_state:
-            if client.enabled:
-                st.caption("🟢 Active")
-            elif client.has_token:
-                st.caption("⛔ Disabled")
+    action_req: str | None = None
+    c_app, c_state, c_issue, c_toggle = st.columns([1.8, 1.2, 1.4, 1.2], vertical_alignment="center")
+    with c_app:
+        st.markdown(f"**{fleet.display_name}**")
+        ts_parts = [
+            f"Erstellt: {format_iso_timestamp(fleet.created_at)}" if fleet.created_at else "Kein Key",
+            f"Zuletzt genutzt: {format_iso_timestamp(fleet.last_used_at)}" if fleet.last_used_at else "",
+        ]
+        st.caption(" · ".join(p for p in ts_parts if p))
+    with c_state:
+        if fleet.enabled:
+            st.caption("🟢 Active")
+        elif fleet.has_key:
+            st.caption("⛔ Disabled")
+        else:
+            st.caption("⚪ No Key")
+    with c_issue:
+        if is_admin:
+            lbl = "🔄 Key rotieren" if fleet.has_key else "🔑 Key erzeugen"
+            if st.button(lbl, key="ki_fleet_issue_btn", width="stretch"):
+                action_req = "issue"
+    with c_toggle:
+        if is_admin and fleet.has_key:
+            if fleet.enabled:
+                if st.button("⛔ Sperren", key="ki_fleet_revoke_btn", width="stretch"):
+                    action_req = "disable"
             else:
-                st.caption("⚪ No Token")
-        with c_issue:
-            if is_admin:
-                lbl = "🔄 Key rotieren" if client.has_token else "🔑 Key erzeugen"
-                if st.button(lbl, key=f"ki_app_issue_btn_{client.app_id}", width="stretch"):
-                    action_req = ("issue", client.app_id)
-        with c_toggle:
-            if is_admin and client.has_token:
-                if client.enabled:
-                    if st.button("⛔ Sperren", key=f"ki_app_revoke_btn_{client.app_id}", width="stretch"):
-                        action_req = ("disable", client.app_id)
-                else:
-                    if st.button("✅ Freigeben", key=f"ki_app_enable_btn_{client.app_id}", width="stretch"):
-                        action_req = ("enable", client.app_id)
+                if st.button("✅ Freigeben", key="ki_fleet_enable_btn", width="stretch"):
+                    action_req = "enable"
 
     if action_req is not None:
-        verb, target_app = action_req
         try:
-            if verb == "issue":
-                raw_token, conn_key, has_turso = brain.issue_app_connection_key(target_app)
-                st.session_state[_ISSUED_TOKEN_SESSION_KEY] = {
-                    "app_id": target_app,
-                    "token": raw_token,
+            if action_req == "issue":
+                conn_key, has_turso = brain.issue_fleet_key()
+                st.session_state[_ISSUED_KEY_SESSION_KEY] = {
                     "connection_key": conn_key,
                     "has_turso": has_turso,
                 }
-                _set_feedback("success", f"Neuer 1-Secret `KI_BRAIN_KEY` für `{target_app}` erzeugt (siehe Vault).")
-            elif verb == "disable":
-                brain.set_app_enabled(target_app, False)
-                _set_feedback("info", f"Zugriff für `{target_app}` gesperrt.")
-            elif verb == "enable":
-                brain.set_app_enabled(target_app, True)
-                _set_feedback("success", f"Zugriff für `{target_app}` wieder freigegeben.")
+                _set_feedback("success", "Neuer kompakter `KI_BRAIN_KEY` für alle 3 Apps erzeugt (siehe Vault).")
+            elif action_req == "disable":
+                brain.set_fleet_enabled(False)
+                _set_feedback("info", "Flotten-Zugriff (`KI_BRAIN_KEY`) sofort gesperrt.")
+            elif action_req == "enable":
+                brain.set_fleet_enabled(True)
+                _set_feedback("success", "Flotten-Zugriff (`KI_BRAIN_KEY`) wieder freigegeben.")
             invalidate_ki_ui_cache()
         except BrainError as exc:
-            _set_feedback("error", f"App-Zugriff konnte nicht aktualisiert werden: {exc}")
+            _set_feedback("error", f"Flotten-Zugriff konnte nicht aktualisiert werden: {exc}")
         st.rerun()
 
 
@@ -226,19 +217,19 @@ def render_vault_tab(
     is_admin: bool,
     *,
     statuses: list[SecretStatusEntry] | None = None,
-    app_client_records: dict[str, dict[str, Any]] | None = None,
+    fleet_client_record: dict[str, Any] | None = None,
 ) -> None:
-    """Rendert den zentralen Vault-Tab für alle API-Keys (Free/Paid) & die 3-App-Zugriffskontrolle."""
+    """Rendert den zentralen Vault-Tab für alle API-Keys (Free/Paid) & den gemeinsamen Flotten-Key."""
     resolved = statuses if statuses is not None else brain.list_secret_statuses()
     ai_entries = [s for s in resolved if s.category == "ai"]
     tool_entries = [s for s in resolved if s.category != "ai"]
-    clients = brain.list_app_clients(client_records=app_client_records)
+    fleet = brain.get_fleet_access_status(client_record=fleet_client_record)
 
     _render_ai_keys_section(ai_entries, is_admin=is_admin)
     st.divider()
     _render_tool_keys_section(tool_entries, is_admin=is_admin)
     st.divider()
-    _render_app_access_section(brain, clients, is_admin=is_admin)
+    _render_fleet_access_section(brain, fleet, is_admin=is_admin)
 
     if is_admin:
         st.divider()

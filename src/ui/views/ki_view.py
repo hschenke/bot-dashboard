@@ -198,7 +198,7 @@ def render_ki_view(settings: AppSettings, role: AuthRole = AuthRole.ADMIN) -> No
                 brain,
                 is_admin=is_admin,
                 statuses=secret_statuses,
-                app_client_records=ui_state.app_clients,
+                fleet_client_record=ui_state.fleet_client,
             )
         with tab_check:
             render_playground_tab(brain, is_admin=is_admin, ui_state=ui_state)

@@ -14,13 +14,11 @@ from ki_brain.db_executors import BrainSqlExecutor, SqliteBrainExecutor, TursoBr
 from ki_brain.enums import BrainTier
 from ki_brain.exceptions import BrainStorageError
 from ki_brain.models import AIModelSpec, BenchmarkReport, TierSequenceConfig, ToolSpec
-from ki_brain.pricing import infer_model_is_free
 from ki_brain.quotas import USAGE_QUOTAS_META_KEY, parse_usage_quotas
 from ki_brain.security import validate_identifier
 
 _INITIALIZED_BACKENDS: set[str] = set()
 _INITIALIZED_LOCK = threading.Lock()
-_CATALOG_REV = "5"
 
 
 @dataclass(frozen=True)
@@ -35,7 +33,7 @@ class BrainDashboardState:
     excluded_model_ids: tuple[str, ...] = ()
     excluded_model_reasons: dict[str, str] = field(default_factory=dict)
     usage_quotas: dict[str, dict[str, dict[str, Any]]] = field(default_factory=lambda: {"tools": {}, "models": {}})
-    app_clients: dict[str, dict[str, Any]] = field(default_factory=dict)
+    fleet_client: dict[str, Any] | None = None
 
 _SCHEMA_SQL: tuple[str, ...] = (
     """
@@ -160,172 +158,32 @@ class BrainRepository:
         )
 
     def ensure_seeded(self) -> None:
-        meta_res = self._executor.execute(
-            "SELECT key, value FROM brain_meta WHERE key IN ('seeded_v1', 'seeded_catalog_rev', 'known_builtin_ids', 'excluded_ids')"
-        )
-        meta = {str(r["key"]): str(r["value"]) for r in meta_res.rows}
-        if meta.get("seeded_v1") == "1" and meta.get("seeded_catalog_rev") == _CATALOG_REV:
+        if self.get_meta("seeded_v1") == "1":
             return
-
         now = _utc_now_iso()
-        defaults_models = build_default_models()
-        defaults_tools = build_default_tools()
-        stmts: list[tuple[str, tuple[str, ...]]] = []
-
-        if meta.get("seeded_v1") != "1":
-            for model in defaults_models:
-                stmts.append(
-                    ("INSERT OR IGNORE INTO brain_models (id, payload_json, updated_at) VALUES (?, ?, ?)", (model.id, model.model_dump_json(), now))
-                )
-            for tool in defaults_tools:
-                stmts.append(
-                    ("INSERT OR IGNORE INTO brain_tools (id, payload_json, updated_at) VALUES (?, ?, ?)", (tool.id, tool.model_dump_json(), now))
-                )
-            for tier, seq in build_default_sequences().items():
-                updated_seq = seq.model_copy(update={"updated_at": seq.updated_at or now})
-                stmts.append(
-                    ("INSERT OR IGNORE INTO brain_sequences (tier, payload_json, updated_at) VALUES (?, ?, ?)", (tier.value, updated_seq.model_dump_json(), now))
-                )
-            known_ids = {"models": [m.id for m in defaults_models], "tools": [t.id for t in defaults_tools]}
-            stmts.append(("INSERT OR REPLACE INTO brain_meta (key, value) VALUES (?, ?)", ("known_builtin_ids", json.dumps(known_ids))))
-            stmts.append(("INSERT OR REPLACE INTO brain_meta (key, value) VALUES (?, ?)", ("seeded_v1", "1")))
-            stmts.append(("INSERT OR REPLACE INTO brain_meta (key, value) VALUES (?, ?)", ("seeded_catalog_rev", _CATALOG_REV)))
-            self._executor.execute_batch(stmts)
-            return
-
-        # Non-destruktives Katalog-Upgrade (inkl. Maps Grounding, Kontingent-Limits & Paid-Only-Klassifikation)
-        try:
-            known = json.loads(meta.get("known_builtin_ids") or "{}")
-        except json.JSONDecodeError:
-            known = {}
-        try:
-            excl = json.loads(meta.get("excluded_ids") or "{}")
-        except json.JSONDecodeError:
-            excl = {}
-        known_m, known_t = set(known.get("models", [])), set(known.get("tools", []))
-        excl_m = {str(x).strip().lower() for x in excl.get("models", [])}
-        excl_t = {str(x).strip().lower() for x in excl.get("tools", [])}
-
-        for model in defaults_models:
-            if model.id not in known_m and model.id not in excl_m:
-                stmts.append(("INSERT OR IGNORE INTO brain_models (id, payload_json, updated_at) VALUES (?, ?, ?)", (model.id, model.model_dump_json(), now)))
-            known_m.add(model.id)
-        for tool in defaults_tools:
-            if tool.id not in known_t and tool.id not in excl_t:
-                stmts.append(("INSERT OR IGNORE INTO brain_tools (id, payload_json, updated_at) VALUES (?, ?, ?)", (tool.id, tool.model_dump_json(), now)))
-            known_t.add(tool.id)
-
-        dropped_m, dropped_t = self._append_rev5_preview_and_brave_cleanup(stmts)
-        self._append_rev3_metadata_upgrades(
-            stmts, defaults_tools, now, skip_models=dropped_m, skip_tools=dropped_t
-        )
-        self._append_rev4_sequence_sanitization(
-            stmts, now, dropped_models=dropped_m, dropped_tools=dropped_t
-        )
-        stmts.append(("INSERT OR REPLACE INTO brain_meta (key, value) VALUES (?, ?)", ("known_builtin_ids", json.dumps({"models": sorted(known_m), "tools": sorted(known_t)}))))
-        stmts.append(("INSERT OR REPLACE INTO brain_meta (key, value) VALUES (?, ?)", ("seeded_catalog_rev", _CATALOG_REV)))
-        self._executor.execute_batch(stmts)
-
-    def _append_rev5_preview_and_brave_cleanup(
-        self, stmts: list[tuple[str, tuple[str, ...]]]
-    ) -> tuple[set[str], set[str]]:
-        """Entfernt veraltete Preview-/Experimental-Modelle & unkonfiguriertes `brave_search` bei Katalog-Upgrade."""
-        from ki_brain.discovery import is_preview_or_experimental_model
-
-        dropped_m: set[str] = set()
-        for m in self.list_models():
-            if m.source != "custom" and is_preview_or_experimental_model(m.model_id, m.name):
-                stmts.append(("DELETE FROM brain_models WHERE id = ?", (m.id,)))
-                dropped_m.add(m.id)
-
-        dropped_t: set[str] = set()
-        vault_secrets = self.list_secret_timestamps()
-        for t in self.list_tools():
-            if t.id == "brave_search" and t.source != "custom" and "BRAVE_SEARCH_API_KEY" not in vault_secrets:
-                stmts.append(("DELETE FROM brain_tools WHERE id = ?", (t.id,)))
-                dropped_t.add(t.id)
-        return dropped_m, dropped_t
-
-    def _append_rev3_metadata_upgrades(
-        self,
-        stmts: list[tuple[str, tuple[str, ...]]],
-        defaults_tools: list[ToolSpec],
-        now: str,
-        *,
-        skip_models: set[str] | None = None,
-        skip_tools: set[str] | None = None,
-    ) -> None:
-        default_t_map = {t.id: t for t in defaults_tools}
-        ignored_m = skip_models or set()
-        ignored_t = skip_tools or set()
-        for m in self.list_models():
-            if m.id in ignored_m:
-                continue
-            if m.source != "custom" and not infer_model_is_free(
-                m.model_id, m.name, provider=m.provider, input_cost_per_1m=m.input_cost_per_1m, output_cost_per_1m=m.output_cost_per_1m
-            ) and (m.is_free or m.free_quota_period != "none"):
-                up_m = m.model_copy(update={"is_free": False, "free_quota_period": "none"})
-                stmts.append(("UPDATE brain_models SET payload_json = ?, updated_at = ? WHERE id = ?", (up_m.model_dump_json(), now, m.id)))
-        for t in self.list_tools():
-            if t.id in ignored_t:
-                continue
-            dt = default_t_map.get(t.id)
-            if dt and t.free_quota_limit == 0 and dt.free_quota_limit > 0:
-                up_t = t.model_copy(update={
-                    "free_quota_limit": dt.free_quota_limit, "free_quota_period": dt.free_quota_period,
-                    "free_quota_unit": dt.free_quota_unit, "paid_cost_per_1k": dt.paid_cost_per_1k,
-                })
-                stmts.append(("UPDATE brain_tools SET payload_json = ?, updated_at = ? WHERE id = ?", (up_t.model_dump_json(), now, t.id)))
-
-    def _append_rev4_sequence_sanitization(
-        self,
-        stmts: list[tuple[str, tuple[str, ...]]],
-        now: str,
-        *,
-        dropped_models: set[str] | None = None,
-        dropped_tools: set[str] | None = None,
-    ) -> None:
-        """Bereinigt veraltete/gelöschte Modell- & Tool-IDs, deep_agent-Flags & Rationale-Texte in brain_sequences."""
-        from ki_brain.optimizer import _format_rationale
-
-        drop_m = dropped_models or set()
-        drop_t = dropped_tools or set()
-        all_models = [m for m in self.list_models() if m.id not in drop_m]
-        all_tools = [t for t in self.list_tools() if t.id not in drop_t]
-        valid_m_ids = {m.id for m in all_models}
-        valid_t_ids = {t.id for t in all_tools}
-        deep_agent_ids = {m.id for m in all_models if m.is_deep_agent}
-        paid_model_ids = {
-            m.id for m in all_models
-            if not m.is_free or not infer_model_is_free(
-                m.model_id, m.name, provider=m.provider, input_cost_per_1m=m.input_cost_per_1m, output_cost_per_1m=m.output_cost_per_1m
+        stmts: list[tuple[str, tuple[str, ...]]] = [
+            (
+                "INSERT OR IGNORE INTO brain_models (id, payload_json, updated_at) VALUES (?, ?, ?)",
+                (model.id, model.model_dump_json(), now),
             )
-        }
-        usage_state = self.load_usage_quotas()
-        for seq in self.list_sequences().values():
-            if seq.manual_override:
-                continue
-            free_s = [tid for tid in seq.search_tool_sequence if tid in valid_t_ids]
-            free_e = [tid for tid in seq.extractor_tool_sequence if tid in valid_t_ids]
-            free_m = [mid for mid in seq.model_sequence if mid in valid_m_ids and mid not in paid_model_ids]
-            paid_s = [tid for tid in (seq.paid_search_tool_sequence or seq.search_tool_sequence) if tid in valid_t_ids]
-            paid_e = [tid for tid in (seq.paid_extractor_tool_sequence or seq.extractor_tool_sequence) if tid in valid_t_ids]
-            paid_m = [mid for mid in (seq.paid_model_sequence or seq.model_sequence) if mid in valid_m_ids]
-            has_free_deep = seq.tier == BrainTier.DEEP and any(mid in deep_agent_ids for mid in free_m)
-            has_paid_deep = seq.tier == BrainTier.DEEP and any(mid in deep_agent_ids for mid in paid_m)
-            rationale = _format_rationale(seq.tier, free_s, free_m, all_tools, all_models, usage_state)
-            up_s = seq.model_copy(update={
-                "search_tool_sequence": free_s,
-                "extractor_tool_sequence": free_e,
-                "model_sequence": free_m,
-                "paid_search_tool_sequence": paid_s,
-                "paid_extractor_tool_sequence": paid_e,
-                "paid_model_sequence": paid_m,
-                "use_deep_agent": has_free_deep,
-                "paid_use_deep_agent": has_paid_deep,
-                "optimization_rationale": rationale,
-            })
-            stmts.append(("UPDATE brain_sequences SET payload_json = ?, updated_at = ? WHERE tier = ?", (up_s.model_dump_json(), now, seq.tier.value)))
+            for model in build_default_models()
+        ]
+        stmts.extend(
+            (
+                "INSERT OR IGNORE INTO brain_tools (id, payload_json, updated_at) VALUES (?, ?, ?)",
+                (tool.id, tool.model_dump_json(), now),
+            )
+            for tool in build_default_tools()
+        )
+        stmts.extend(
+            (
+                "INSERT OR IGNORE INTO brain_sequences (tier, payload_json, updated_at) VALUES (?, ?, ?)",
+                (tier.value, seq.model_copy(update={"updated_at": seq.updated_at or now}).model_dump_json(), now),
+            )
+            for tier, seq in build_default_sequences().items()
+        )
+        stmts.append(("INSERT OR REPLACE INTO brain_meta (key, value) VALUES (?, ?)", ("seeded_v1", "1")))
+        self._executor.execute_batch(stmts)
 
     def list_excluded_ids(self) -> tuple[set[str], set[str]]:
         """Liefert persistent ausgeschlossene (gelöschte/defekte) Modell- und Tool-IDs."""
@@ -411,7 +269,7 @@ class BrainRepository:
                 ("DELETE FROM brain_tools", ()),
                 ("DELETE FROM brain_sequences", ()),
                 (
-                    "DELETE FROM brain_meta WHERE key IN ('seeded_v1', 'seeded_catalog_rev', 'known_builtin_ids', 'excluded_ids', 'excluded_reasons')",
+                    "DELETE FROM brain_meta WHERE key IN ('seeded_v1', 'excluded_ids', 'excluded_reasons')",
                     (),
                 ),
             ]
@@ -588,33 +446,14 @@ class BrainRepository:
                 decrypted[str(row["env_name"])] = val
         return decrypted
 
-    def migrate_legacy_secrets(self, passphrase: str = "") -> int:
-        """Migriert ältere `enc_v1:`-Vault-Einträge sicher auf app-übergreifendes `enc_v2:`."""
-        from ki_brain.secrets_vault import decrypt_secret_value, encrypt_secret_value
-
-        res = self._executor.execute(
-            "SELECT env_name, encrypted_value FROM brain_secrets WHERE encrypted_value LIKE ?",
-            ("enc_v1:%",),
-        )
-        migrated = 0
-        for row in res.rows:
-            plain = decrypt_secret_value(str(row["encrypted_value"]), passphrase=passphrase)
-            if not plain:
-                continue
-            re_encrypted = encrypt_secret_value(plain, passphrase=passphrase)
-            self.upsert_encrypted_secret(str(row["env_name"]), re_encrypted)
-            migrated += 1
-        return migrated
-
     def get_turso_connection_credentials(self) -> tuple[str, str]:
         """Liefert `(turso_url, turso_token)` falls Turso Cloud aktiv ist, sonst `('', '')`."""
         getter = getattr(self._executor, "_connection_credentials", None)
         return getter() if callable(getter) else ("", "")
 
-    def upsert_app_client(self, app_id: str, token_hash: str, *, enabled: bool = True) -> str:
-        from ki_brain.access import normalize_client_app_id
+    def upsert_fleet_client(self, token_hash: str, *, enabled: bool = True) -> str:
+        from ki_brain.access import FLEET_CLIENT_ID
 
-        clean_app = normalize_client_app_id(app_id)
         now = _utc_now_iso()
         self._executor.execute(
             """
@@ -625,34 +464,31 @@ class BrainRepository:
                 enabled = excluded.enabled,
                 created_at = excluded.created_at
             """,
-            (clean_app, token_hash, 1 if enabled else 0, now),
+            (FLEET_CLIENT_ID, token_hash, 1 if enabled else 0, now),
         )
         return now
 
-    def set_app_client_enabled(self, app_id: str, enabled: bool) -> bool:
-        from ki_brain.access import normalize_client_app_id
+    def set_fleet_client_enabled(self, enabled: bool) -> bool:
+        from ki_brain.access import FLEET_CLIENT_ID
 
-        clean_app = normalize_client_app_id(app_id)
         res = self._executor.execute(
             "UPDATE brain_app_clients SET enabled = ? WHERE app_id = ?",
-            (1 if enabled else 0, clean_app),
+            (1 if enabled else 0, FLEET_CLIENT_ID),
         )
         return res.affected_rows > 0
 
-    def revoke_app_client(self, app_id: str) -> bool:
-        from ki_brain.access import normalize_client_app_id
+    def revoke_fleet_client(self) -> bool:
+        from ki_brain.access import FLEET_CLIENT_ID
 
-        clean_app = normalize_client_app_id(app_id)
-        res = self._executor.execute("DELETE FROM brain_app_clients WHERE app_id = ?", (clean_app,))
+        res = self._executor.execute("DELETE FROM brain_app_clients WHERE app_id = ?", (FLEET_CLIENT_ID,))
         return res.affected_rows > 0
 
-    def get_app_client_record(self, app_id: str) -> dict[str, Any] | None:
-        from ki_brain.access import normalize_client_app_id
+    def get_fleet_client_record(self) -> dict[str, Any] | None:
+        from ki_brain.access import FLEET_CLIENT_ID
 
-        clean_app = normalize_client_app_id(app_id)
         res = self._executor.execute(
             "SELECT app_id, token_hash, enabled, created_at, last_used_at FROM brain_app_clients WHERE app_id = ?",
-            (clean_app,),
+            (FLEET_CLIENT_ID,),
         )
         if not res.rows:
             return None
@@ -665,28 +501,12 @@ class BrainRepository:
             "last_used_at": str(r["last_used_at"]),
         }
 
-    def list_app_client_records(self) -> dict[str, dict[str, Any]]:
-        res = self._executor.execute(
-            "SELECT app_id, token_hash, enabled, created_at, last_used_at FROM brain_app_clients ORDER BY app_id ASC"
-        )
-        return {
-            str(r["app_id"]): {
-                "app_id": str(r["app_id"]),
-                "token_hash": str(r["token_hash"]),
-                "enabled": bool(int(r["enabled"])),
-                "created_at": str(r["created_at"]),
-                "last_used_at": str(r["last_used_at"]),
-            }
-            for r in res.rows
-        }
+    def touch_fleet_client_last_used(self) -> None:
+        from ki_brain.access import FLEET_CLIENT_ID
 
-    def touch_app_client_last_used(self, app_id: str) -> None:
-        from ki_brain.access import normalize_client_app_id
-
-        clean_app = normalize_client_app_id(app_id)
         self._executor.execute(
             "UPDATE brain_app_clients SET last_used_at = ? WHERE app_id = ?",
-            (_utc_now_iso(), clean_app),
+            (_utc_now_iso(), FLEET_CLIENT_ID),
         )
 
     def load_usage_quotas(self) -> dict[str, dict[str, dict[str, Any]]]:
@@ -698,7 +518,9 @@ class BrainRepository:
         self.set_meta(USAGE_QUOTAS_META_KEY, json.dumps({"tools": {}, "models": {}}))
 
     def load_dashboard_state(self) -> BrainDashboardState:
-        """Lädt Modelle, Tools, Sequenzen, Benchmark, Secrets, Kontingente & App-Clients in einem Batch."""
+        """Lädt Modelle, Tools, Sequenzen, Benchmark, Secrets, Kontingente & Flotten-Key in einem Batch."""
+        from ki_brain.access import FLEET_CLIENT_ID
+
         stmts = [
             ("SELECT payload_json FROM brain_models ORDER BY id ASC", ()),
             ("SELECT payload_json FROM brain_tools ORDER BY id ASC", ()),
@@ -706,10 +528,10 @@ class BrainRepository:
             ("SELECT payload_json FROM brain_benchmark_runs ORDER BY started_at DESC LIMIT 1", ()),
             ("SELECT env_name, updated_at FROM brain_secrets ORDER BY env_name ASC", ()),
             ("SELECT key, value FROM brain_meta WHERE key IN (?, ?, ?)", ("excluded_ids", "excluded_reasons", USAGE_QUOTAS_META_KEY)),
-            ("SELECT app_id, token_hash, enabled, created_at, last_used_at FROM brain_app_clients ORDER BY app_id ASC", ()),
+            ("SELECT app_id, token_hash, enabled, created_at, last_used_at FROM brain_app_clients WHERE app_id = ?", (FLEET_CLIENT_ID,)),
         ]
         try:
-            res_m, res_t, res_s, res_b, res_sec, res_meta, res_clients = self._executor.execute_batch(stmts)
+            res_m, res_t, res_s, res_b, res_sec, res_meta, res_fleet = self._executor.execute_batch(stmts)
         except BrainStorageError as exc:
             if "no such table" not in str(exc).lower():
                 raise
@@ -721,7 +543,7 @@ class BrainRepository:
             if self._cache_key:
                 with _INITIALIZED_LOCK:
                     _INITIALIZED_BACKENDS.add(self._cache_key)
-            res_m, res_t, res_s, res_b, res_sec, res_meta, res_clients = self._executor.execute_batch(stmts)
+            res_m, res_t, res_s, res_b, res_sec, res_meta, res_fleet = self._executor.execute_batch(stmts)
 
         models = [AIModelSpec.model_validate_json(str(r["payload_json"])) for r in res_m.rows]
         tools = [ToolSpec.model_validate_json(str(r["payload_json"])) for r in res_t.rows]
@@ -734,16 +556,16 @@ class BrainRepository:
         excl_m, _ = _parse_excluded_payload(meta_map.get("excluded_ids", "{}"))
         reasons_m, _ = _parse_reasons_payload(meta_map.get("excluded_reasons", "{}"))
         quotas = parse_usage_quotas(meta_map.get(USAGE_QUOTAS_META_KEY, "{}"))
-        app_clients = {
-            str(r["app_id"]): {
+        fleet_client: dict[str, Any] | None = None
+        if res_fleet.rows:
+            r = res_fleet.rows[0]
+            fleet_client = {
                 "app_id": str(r["app_id"]),
                 "token_hash": str(r["token_hash"]),
                 "enabled": bool(int(r["enabled"])),
                 "created_at": str(r["created_at"]),
                 "last_used_at": str(r["last_used_at"]),
             }
-            for r in res_clients.rows
-        }
         return BrainDashboardState(
             models=models,
             tools=tools,
@@ -753,7 +575,7 @@ class BrainRepository:
             excluded_model_ids=tuple(sorted(excl_m)),
             excluded_model_reasons={mid: reasons_m[mid] for mid in excl_m if mid in reasons_m},
             usage_quotas=quotas,
-            app_clients=app_clients,
+            fleet_client=fleet_client,
         )
 
     def close(self) -> None:

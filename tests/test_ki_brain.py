@@ -835,9 +835,7 @@ def test_llm_runner_transient_503_retry_and_status_specific_cleanup() -> None:
         runner.run_text(spec, "Ping")
 
 
-def test_searxng_html_fallback_open_meteo_and_legacy_db_upgrade(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from ki_brain.db_executors import SqliteBrainExecutor
-    from ki_brain.storage import BrainRepository
+def test_searxng_html_fallback_and_open_meteo_city_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     from ki_brain.tools.extractors import query_open_meteo
     from ki_brain.tools.searxng import build_searxng_tool, discover_verified_searxng_pool
 
@@ -871,34 +869,6 @@ def test_searxng_html_fallback_open_meteo_and_legacy_db_upgrade(monkeypatch: pyt
     monkeypatch.setattr("ki_brain.tools.extractors.safe_http_request", _meteo_http)
     weather_hits = query_open_meteo("Berlin")
     assert len(weather_hits) == 1 and "16.4" in weather_hits[0].snippet
-
-    # 3. Bestehende Alt-DB (seeded_v1='1' ohne seeded_catalog_rev) erhält searxng_public automatisch ohne Excluded-IDs zu reaktivieren
-    legacy_db = tmp_path / "legacy_v1.db"
-    ex = SqliteBrainExecutor(legacy_db)
-    ex.execute_batch(
-        [
-            ("CREATE TABLE brain_models (id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, updated_at TEXT NOT NULL)", ()),
-            ("CREATE TABLE brain_tools (id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, updated_at TEXT NOT NULL)", ()),
-            ("CREATE TABLE brain_sequences (tier TEXT PRIMARY KEY, payload_json TEXT NOT NULL, updated_at TEXT NOT NULL)", ()),
-            ("CREATE TABLE brain_benchmark_runs (run_id TEXT PRIMARY KEY, started_at TEXT NOT NULL, payload_json TEXT NOT NULL)", ()),
-            ("CREATE TABLE brain_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)", ()),
-            ("CREATE TABLE brain_secrets (env_name TEXT PRIMARY KEY, encrypted_value TEXT NOT NULL, updated_at TEXT NOT NULL)", ()),
-            ("INSERT INTO brain_meta (key, value) VALUES ('seeded_v1', '1')", ()),
-            ("INSERT INTO brain_meta (key, value) VALUES ('known_builtin_ids', '{\"models\": [\"gemini-3.5-flash-lite\"], \"tools\": [\"yahoo_search\"]}')", ()),
-            ("INSERT INTO brain_meta (key, value) VALUES ('excluded_ids', '{\"models\": [\"gemini-3.6-flash\"], \"tools\": []}')", ()),
-        ]
-    )
-    migrated = BrainRepository(ex)
-    migrated_tools = {t.id for t in migrated.list_tools()}
-    migrated_models = {m.id for m in migrated.list_models()}
-    assert "searxng_public" in migrated_tools
-    assert "gemini_google_maps" in migrated_tools
-    assert "brave_search" not in migrated_tools
-    assert "gemini-4-hydrogen" in migrated_models
-    assert "gemini-3.6-flash" not in migrated_models
-    assert "deep-research-preview-04-2026" not in migrated_models
-    assert migrated.get_meta("seeded_catalog_rev") == "5"
-    migrated.close()
 
 
 def test_discover_recovers_quota_429_and_paid_models_without_readding_previews(
@@ -1579,167 +1549,68 @@ def test_strict_zero_cost_enforcement_quota_exhaustion_and_allow_paid_opt_in(
     brain.close()
 
 
-def test_legacy_rev2_to_rev5_upgrade_preserves_customizations(tmp_path: Path) -> None:
-    import json
-
-    from ki_brain.catalog import build_default_models, build_default_tools
-    from ki_brain.db_executors import SqliteBrainExecutor
-    from ki_brain.models import TierSequenceConfig
-    from ki_brain.storage import BrainRepository
-
-    rev2_db = tmp_path / "legacy_rev2.db"
-    ex = SqliteBrainExecutor(rev2_db)
-    seed_repo = BrainRepository(ex, seed_defaults=False)
-    seed_repo._init_schema()  # noqa: SLF001
-
-    legacy_paid = AIModelSpec(
-        id="gemini-4-argon",
-        name="Gemini 4 Argon",
-        model_id="gemini-4-argon",
-        tier_hint=BrainTier.DEEP,
-        is_free=True,
-        free_quota_period="unlimited",
-        paid_api_key_env="GEMINI_PAID_API_KEY",
-    )
-    legacy_preview = AIModelSpec(
-        id="deep-research-preview-04-2026",
-        name="Gemini Deep Research Agent",
-        provider=ModelProvider.GEMINI_DEEP_AGENT,
-        model_id="deep-research-preview-04-2026",
-        tier_hint=BrainTier.DEEP,
-        is_free=True,
-        free_quota_period="unlimited",
-        is_deep_agent=True,
-    )
-    legacy_brave = ToolSpec(
-        id="brave_search",
-        name="Brave Search API",
-        category=ToolCategory.WEB_SEARCH,
-        executor_type="brave_search",
-        endpoint_url="https://api.search.brave.com/res/v1/web/search",
-        requires_api_key=True,
-        api_key_env="BRAVE_SEARCH_API_KEY",
-    )
-    old_models = [*build_default_models(), legacy_paid, legacy_preview]
-    old_tools = [
-        *[
-            t.model_copy(update={"free_quota_limit": 0, "free_quota_period": "unlimited"})
-            for t in build_default_tools()
-            if t.id != "gemini_google_maps"
-        ],
-        legacy_brave,
-    ]
-    for m in old_models:
-        seed_repo.upsert_model(m)
-    for t in old_tools:
-        seed_repo.upsert_tool(t)
-
-    seed_repo.upsert_sequence(
-        TierSequenceConfig(
-            tier=BrainTier.FAST,
-            search_tool_sequence=["wikipedia_api"],
-            model_sequence=["gemini-3.5-flash-lite"],
-            manual_override=True,
-        )
-    )
-    seed_repo.upsert_sequence(
-        TierSequenceConfig(
-            tier=BrainTier.DEEP,
-            search_tool_sequence=["yahoo_search", "brave_search", "gemini_google_search"],
-            model_sequence=["deep-research-preview-04-2026", "gemini-4-argon", "gemini-2.5-flash"],
-            use_deep_agent=True,
-            manual_override=False,
-        )
-    )
-    seed_repo.set_meta("seeded_v1", "1")
-    seed_repo.set_meta("seeded_catalog_rev", "2")
-    seed_repo.set_meta(
-        "known_builtin_ids",
-        json.dumps({"models": [m.id for m in old_models], "tools": [t.id for t in old_tools]}),
-    )
-    seed_repo.close()
-
-    upgraded = BrainRepository(SqliteBrainExecutor(rev2_db))
-    assert upgraded.get_meta("seeded_catalog_rev") == "5"
-    assert upgraded.get_tool("gemini_google_maps") is not None
-    assert upgraded.get_tool("gemini_google_search").free_quota_limit == 5000  # type: ignore[union-attr]
-    # Rev 5 räumt Preview-Modelle & unkonfiguriertes brave_search automatisch auf
-    assert upgraded.get_model("deep-research-preview-04-2026") is None
-    assert upgraded.get_tool("brave_search") is None
-    assert upgraded.get_model("gemini-4-argon").is_free is False  # type: ignore[union-attr]
-
-    fast_seq = upgraded.get_sequence(BrainTier.FAST)
-    assert fast_seq.manual_override is True and fast_seq.search_tool_sequence == ["wikipedia_api"]
-
-    deep_seq = upgraded.get_sequence(BrainTier.DEEP)
-    assert deep_seq.use_deep_agent is False
-    assert deep_seq.paid_use_deep_agent is False
-    assert "deep-research-preview-04-2026" not in deep_seq.model_sequence
-    assert "deep-research-preview-04-2026" not in deep_seq.paid_model_sequence
-    assert "brave_search" not in deep_seq.search_tool_sequence
-    assert "gemini-4-argon" not in deep_seq.model_sequence
-    assert "gemini-4-argon" in deep_seq.paid_model_sequence
-    upgraded.close()
-
-
-def test_strict_three_app_access_control_and_admin_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from ki_brain import ALLOWED_CLIENT_APPS, BrainAuthError
+def test_unified_fleet_access_control_and_admin_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import ki_brain
+    from ki_brain import ALLOWED_CLIENT_APPS, FLEET_CLIENT_ID, BrainAuthError
 
     db_file = tmp_path / "access_guard.db"
+    monkeypatch.delenv("KI_BRAIN_KEY", raising=False)
     assert ALLOWED_CLIENT_APPS == ("news_bot", "research_bot", "alert_bot")
 
     # 1. Fremde oder unauthentifizierte Aufrufe schlagen fail-closed fehl
     with pytest.raises(BrainAuthError):
         KIWebsearchBrain(create_brain_repository(sqlite_path=db_file))
     with pytest.raises(BrainAuthError):
-        KIWebsearchBrain.from_env(sqlite_path=db_file)
+        ki_brain.connect(sqlite_path=db_file)
     with pytest.raises(BrainAuthError):
-        KIWebsearchBrain.from_env(app_id="stranger_app", app_token="kib_stranger_123", sqlite_path=db_file)
-    with pytest.raises(BrainAuthError):
-        KIWebsearchBrain.from_env(app_id="news_bot", app_token="kib_news_bot_fake", sqlite_path=db_file)
+        ki_brain.connect("kib_invalid_fake_key", sqlite_path=db_file)
 
-    # 2. Dashboard-Admin erzeugt Token exklusiv für die 3 Apps (Fremd-App wird auch beim Ausstellen geblockt)
+    # 2. Dashboard-Admin erzeugt 1 gemeinsamen, kompakten Flotten-Key für alle 3 Apps
     admin = KIWebsearchBrain.for_dashboard(create_brain_repository(sqlite_path=db_file))
-    with pytest.raises(BrainAuthError):
-        admin.issue_app_token("evil_bot")
+    status_before = admin.get_fleet_access_status()
+    assert status_before.has_key is False and status_before.enabled is False
 
-    res_token = admin.issue_app_token("research_bot")
-    assert res_token.startswith("kib_research_bot_")
-    clients = {c.app_id: c for c in admin.list_app_clients()}
-    assert set(clients.keys()) == {"news_bot", "research_bot", "alert_bot"}
-    assert clients["research_bot"].has_token is True and clients["research_bot"].enabled is True
-    assert clients["news_bot"].has_token is False and clients["news_bot"].enabled is False
-    # Klartext-Token wird niemals in der DB gespeichert
-    raw_row = admin.repository.get_app_client_record("research_bot")
-    assert raw_row is not None and res_token not in raw_row["token_hash"]
+    fleet_key, has_turso = admin.issue_fleet_key()
+    assert fleet_key.startswith("kib_")
+    assert len(fleet_key) <= 32  # Lokaler SQLite-Flotten-Key ist extrem kompakt (27 Zeichen)
+    assert has_turso is False
 
-    # 3. Autorisierte App (research_bot, auch mit Bindestrich-Normalisierung) erhält Zugriff, aber keine Admin-Vault-Rechte
-    monkeypatch.setenv("BRAIN_APP_ID", "research-bot")
-    monkeypatch.setenv("BRAIN_APP_TOKEN", res_token)
-    with KIWebsearchBrain.from_env(sqlite_path=db_file) as bot_brain:
-        assert bot_brain.client_app_id == "research_bot"
+    status_active = admin.get_fleet_access_status()
+    assert status_active.has_key is True and status_active.enabled is True
+    # Klartext-Key wird niemals in der DB gespeichert
+    raw_row = admin.repository.get_fleet_client_record()
+    assert raw_row is not None and fleet_key not in raw_row["token_hash"]
+
+    # 3. Client-App verbindet sich via ENV KI_BRAIN_KEY, hat aber keine Admin-Vault-Rechte
+    monkeypatch.setenv("KI_BRAIN_KEY", fleet_key)
+    with ki_brain.connect(sqlite_path=db_file) as bot_brain:
+        assert bot_brain.client_app_id == FLEET_CLIENT_ID
         assert bot_brain.is_admin_client is False
         assert len(bot_brain.list_models()) >= 7
         with pytest.raises(BrainAuthError):
             bot_brain.set_secret("GEMINI_FREE_API_KEY", "unauthorized")
         with pytest.raises(BrainAuthError):
-            bot_brain.issue_app_token("news_bot")
+            bot_brain.issue_fleet_key()
 
-    # 4. Token gilt nicht für andere App & Sperren/Widerrufen blockiert sofort
+    # 4. Sperren, Freigeben, Rotieren & Widerrufen wirken sofort
+    assert admin.set_fleet_enabled(False) is True
     with pytest.raises(BrainAuthError):
-        KIWebsearchBrain.from_env(app_id="news_bot", app_token=res_token, sqlite_path=db_file)
+        ki_brain.connect(sqlite_path=db_file)
 
-    assert admin.set_app_enabled("research_bot", False) is True
+    assert admin.set_fleet_enabled(True) is True
+    with ki_brain.connect(sqlite_path=db_file) as bot_again:
+        assert bot_again.client_app_id == FLEET_CLIENT_ID
+
+    rotated_key, _ = admin.issue_fleet_key()
+    assert rotated_key != fleet_key
     with pytest.raises(BrainAuthError):
-        KIWebsearchBrain.from_env(app_id="research_bot", app_token=res_token, sqlite_path=db_file)
+        ki_brain.connect(fleet_key, sqlite_path=db_file)
+    with ki_brain.connect(rotated_key, sqlite_path=db_file) as bot_rot:
+        assert bot_rot.client_app_id == FLEET_CLIENT_ID
 
-    assert admin.set_app_enabled("research_bot", True) is True
-    with KIWebsearchBrain.from_env(app_id="research_bot", app_token=res_token, sqlite_path=db_file) as bot_again:
-        assert bot_again.client_app_id == "research_bot"
-
-    assert admin.revoke_app_token("research_bot") is True
+    assert admin.revoke_fleet_key() is True
     with pytest.raises(BrainAuthError):
-        KIWebsearchBrain.from_env(app_id="research_bot", app_token=res_token, sqlite_path=db_file)
+        ki_brain.connect(rotated_key, sqlite_path=db_file)
     admin.close()
 
 
@@ -1748,13 +1619,15 @@ def test_free_and_paid_tier_keys_isolation_and_cross_app_vault_decryption(
 ) -> None:
     from types import SimpleNamespace
 
+    import ki_brain
     from ki_brain.llm_runner import UnifiedLLMRunner
 
-    # 1. Cross-App Vault-Entschlüsselung: Dashboard hat APP_PASSWORD + BRAIN_TURSO_KEY, Bot hat nur BRAIN_TURSO_KEY
+    # 1. Cross-App Vault-Entschlüsselung: Dashboard hat APP_PASSWORD + BRAIN_TURSO_KEY, Bot hat nur KI_BRAIN_KEY + BRAIN_TURSO_KEY
     db_file = tmp_path / "tier_keys_vault.db"
     monkeypatch.setenv("APP_PASSWORD", "dashboard_only_admin_pw")
     monkeypatch.setenv("BRAIN_TURSO_KEY", "shared_turso_secret_token_999")
     monkeypatch.delenv("BRAIN_SECRET_KEY", raising=False)
+    monkeypatch.delenv("KI_BRAIN_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_FREE_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_PAID_API_KEY", raising=False)
@@ -1773,12 +1646,12 @@ def test_free_and_paid_tier_keys_isolation_and_cross_app_vault_decryption(
             paid_api_key_env="GEMINI_PAID_API_KEY",
         )
     )
-    bot_token = admin.issue_app_token("alert_bot")
+    fleet_key, _ = admin.issue_fleet_key()
     admin.close()
 
     # Bot-Umgebung ohne Dashboard-APP_PASSWORD entschlüsselt beide Keys problemlos aus dem Vault
     monkeypatch.delenv("APP_PASSWORD", raising=False)
-    with KIWebsearchBrain.from_env(app_id="alert_bot", app_token=bot_token, sqlite_path=db_file) as bot:
+    with ki_brain.connect(fleet_key, sqlite_path=db_file) as bot:
         free_model = bot.get_model("gemini-3.5-flash-lite")
         paid_model = bot.get_model("gemini-4-argon")
         assert free_model is not None and paid_model is not None
@@ -1862,53 +1735,7 @@ def test_run_full_pipeline_executes_all_four_steps_with_progress_and_options(tmp
     brain.close()
 
 
-def test_rev5_sequence_sanitization_and_prune_removes_stale_deleted_preview(tmp_path: Path) -> None:
-    import json
-
-    from ki_brain.catalog import build_default_models, build_default_tools
-    from ki_brain.db_executors import SqliteBrainExecutor
-    from ki_brain.models import TierSequenceConfig
-    from ki_brain.storage import BrainRepository
-
-    rev3_db = tmp_path / "stale_rev3.db"
-    seed_repo = BrainRepository(SqliteBrainExecutor(rev3_db), seed_defaults=False)
-    seed_repo._init_schema()  # noqa: SLF001
-
-    # Simuliert Live-DB nach Löschung von deep-research-preview-04-2026: Modell weg, aber noch in Deep-Rationale & paid_use_deep_agent
-    models = build_default_models()
-    tools = build_default_tools()
-    seed_repo.upsert_models_batch(models)
-    seed_repo.upsert_tools_batch(tools)
-    seed_repo.upsert_sequence(
-        TierSequenceConfig(
-            tier=BrainTier.DEEP,
-            search_tool_sequence=["yahoo_search", "wikipedia_api"],
-            model_sequence=["gemini-3.5-flash-lite"],
-            paid_model_sequence=["deep-research-preview-04-2026", "gemini-3.5-flash-lite"],
-            use_deep_agent=False,
-            paid_use_deep_agent=True,
-            manual_override=False,
-            optimization_rationale="Deep (0%-Standard): Suche yahoo_search | KI gemini-3.5-flash-lite | Paid-Opt-In: deep-research-preview-04-2026.",
-        )
-    )
-    seed_repo.set_meta("seeded_v1", "1")
-    seed_repo.set_meta("seeded_catalog_rev", "3")
-    seed_repo.set_meta(
-        "known_builtin_ids",
-        json.dumps({"models": [m.id for m in models], "tools": [t.id for t in tools]}),
-    )
-    seed_repo.set_meta("excluded_ids", json.dumps({"models": ["deep-research-preview-04-2026"], "tools": []}))
-    seed_repo.close()
-
-    sanitized = BrainRepository(SqliteBrainExecutor(rev3_db))
-    assert sanitized.get_meta("seeded_catalog_rev") == "5"
-    deep_seq = sanitized.get_sequence(BrainTier.DEEP)
-    assert "deep-research-preview-04-2026" not in deep_seq.paid_model_sequence
-    assert deep_seq.paid_use_deep_agent is False
-    assert "deep-research-preview-04-2026" not in deep_seq.optimization_rationale
-    sanitized.close()
-
-    # Auch direktes remove_model() bereinigt deep_agent-Flags & Rationale sofort
+def test_remove_model_sanitizes_deep_agent_flags_and_rationale(tmp_path: Path) -> None:
     live_brain = KIWebsearchBrain.for_dashboard(create_brain_repository(sqlite_path=tmp_path / "live_prune.db"))
     live_brain.add_or_update_model(
         AIModelSpec(
@@ -2186,85 +2013,108 @@ def test_paid_benchmark_keeps_free_models_and_tools_on_free_key_and_blocks_disco
     brain.close()
 
 
-def test_one_secret_ki_brain_key_plug_and_play_isolation_and_legacy_migration(
+def test_compact_fleet_ki_brain_key_half_length_jwt_roundtrip_and_isolation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import base64
-    import hashlib
-    import hmac
     import json
+    import secrets as py_secrets
 
     import ki_brain
     from ki_brain import (
+        FLEET_CLIENT_ID,
         BrainAuthError,
         decode_connection_key,
         encode_connection_key,
     )
-    from ki_brain.secrets_vault import _derive_legacy_master_material, _keystream
 
-    # 1. Fail-closed Validierung für ungültige KI_BRAIN_KEY-Strings
-    for bad_key in ("", "invalid_prefix", "kibk1_!!!notbase64!!!", "kibk1_" + ("a" * 9000)):
+    # 1. Fail-closed Validierung für ungültige / manipulierte KI_BRAIN_KEY-Strings
+    for bad_key in ("", "invalid_prefix", "kib_!!!notbase64!!!", "kib_" + ("a" * 5000), "kib_AA"):
         with pytest.raises(BrainAuthError):
             decode_connection_key(bad_key)
 
-    bad_ver = "kibk1_" + base64.urlsafe_b64encode(json.dumps({"v": 2, "a": "alert_bot", "t": "x"}).encode()).decode()
+    bad_ver = "kib_" + base64.urlsafe_b64encode(bytes([0xE0]) + b"\x00" * 16).decode().rstrip("=")
     with pytest.raises(BrainAuthError):
         decode_connection_key(bad_ver)
 
-    bad_app = "kibk1_" + base64.urlsafe_b64encode(json.dumps({"v": 1, "a": "evil_app", "t": "kib_evil_1"}).encode()).decode()
-    with pytest.raises(BrainAuthError):
-        decode_connection_key(bad_app)
+    # 2. Kompakter binärer KI_BRAIN_KEY ist >50% kürzer als JSON-Base64 & 100% verlustfrei für Turso-EdDSA-JWTs
+    hdr = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9"
+    pay = base64.urlsafe_b64encode(
+        json.dumps(
+            {
+                "a": "rw",
+                "iat": 1730000000,
+                "id": "12345678-1234-1234-1234-123456789abc",
+                "p": {"rw": {"ns": ["default"]}},
+            },
+            separators=(",", ":"),
+        ).encode()
+    ).decode().rstrip("=")
+    sig = base64.urlsafe_b64encode(py_secrets.token_bytes(64)).decode().rstrip("=")
+    turso_jwt = f"{hdr}.{pay}.{sig}"
+    turso_url = "https://bot-dashboard-hschenke.aws-eu-west-1.turso.io"
+    fleet_sec = py_secrets.token_bytes(16)
 
-    # 2. Dashboard legt sowohl modernes enc_v2-Secret als auch altes enc_v1-Secret (mit Dashboard APP_PASSWORD) an
-    db_file = tmp_path / "one_secret_brain.db"
+    old_json_key = "kibk1_" + base64.urlsafe_b64encode(
+        json.dumps(
+            {
+                "v": 1,
+                "a": "alert_bot",
+                "t": f"kib_alert_bot_{py_secrets.token_urlsafe(32)}",
+                "u": turso_url,
+                "k": turso_jwt,
+            },
+            separators=(",", ":"),
+        ).encode()
+    ).decode().rstrip("=")
+
+    compact_cloud_key = encode_connection_key(
+        fleet_sec, turso_url=turso_url, turso_auth_token=turso_jwt
+    )
+    assert compact_cloud_key.startswith("kib_")
+    assert len(compact_cloud_key) < len(old_json_key) * 0.50
+
+    decoded_cloud = decode_connection_key(compact_cloud_key)
+    assert decoded_cloud.fleet_secret == fleet_sec
+    assert decoded_cloud.turso_url == turso_url
+    assert decoded_cloud.turso_auth_token == turso_jwt
+    assert decoded_cloud.effective_vault_passphrase == turso_jwt
+    assert turso_jwt not in repr(decoded_cloud)
+    assert fleet_sec.hex() not in repr(decoded_cloud)
+
+    # Auch Nicht-EdDSA-Tokens & expliziter vault_passphrase runden verlustfrei
+    custom_key = encode_connection_key(
+        fleet_sec,
+        turso_url="https://db.custom.example.org",
+        turso_auth_token="custom_opaque_token_abc",
+        vault_passphrase="explicit_vault_secret_123",
+    )
+    decoded_custom = decode_connection_key(custom_key)
+    assert decoded_custom.turso_url == "https://db.custom.example.org"
+    assert decoded_custom.turso_auth_token == "custom_opaque_token_abc"
+    assert decoded_custom.effective_vault_passphrase == "explicit_vault_secret_123"
+    assert "explicit_vault_secret_123" not in repr(decoded_custom)
+
+    # 3. End-to-End Plug-&-Play Isolation: Host-App hat eigenes TURSO_URL / TURSO_KEY / APP_PASSWORD
+    db_file = tmp_path / "compact_fleet_brain.db"
     monkeypatch.setenv("APP_PASSWORD", "dashboard_only_admin_pw_123")
     monkeypatch.setenv("BRAIN_TURSO_KEY", "brain_shared_turso_key_xyz")
     monkeypatch.delenv("BRAIN_SECRET_KEY", raising=False)
     monkeypatch.delenv("KI_BRAIN_KEY", raising=False)
-    monkeypatch.delenv("BRAIN_APP_ID", raising=False)
-    monkeypatch.delenv("BRAIN_APP_TOKEN", raising=False)
     monkeypatch.delenv("GEMINI_FREE_API_KEY", raising=False)
-    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
 
     admin_repo = create_brain_repository(sqlite_path=db_file)
     admin = KIWebsearchBrain.for_dashboard(
-        admin_repo, BrainSecrets(), vault_passphrase="brain_shared_turso_key_xyz"
-    )
-    admin.set_secret("GEMINI_FREE_API_KEY", "AIzaSyVaultModernFreeKey")
-
-    # Simuliere altes enc_v1:-Secret (vor v0.13 mit APP_PASSWORD verschlüsselt)
-    nonce = b"0123456789abcdef"
-    master_v1 = _derive_legacy_master_material("")
-    derived = hashlib.pbkdf2_hmac("sha256", master_v1, nonce, 120_000, dklen=64)
-    pt = b"tvly_legacy_v1_secret_999"
-    ct = bytes(a ^ b for a, b in zip(pt, _keystream(derived[:32], nonce, len(pt)), strict=True))
-    tag = hmac.new(derived[32:], nonce + ct, hashlib.sha256).digest()
-    enc_v1 = "enc_v1:" + base64.urlsafe_b64encode(nonce + tag + ct).decode("ascii")
-    admin_repo.upsert_encrypted_secret("TAVILY_API_KEY", enc_v1)
-
-    raw_tok, local_conn_key, has_turso = admin.issue_app_connection_key("alert_bot")
-    assert raw_tok.startswith("kib_alert_bot_")
-    assert local_conn_key.startswith("kibk1_")
-    assert has_turso is False
-
-    # Automatische enc_v1 -> enc_v2 Migration beim Ausstellen des App-Keys geprüft!
-    migrated_row = admin_repo._executor.execute(  # noqa: SLF001
-        "SELECT encrypted_value FROM brain_secrets WHERE env_name = ?", ("TAVILY_API_KEY",)
-    ).rows[0]
-    assert str(migrated_row["encrypted_value"]).startswith("enc_v2:")
-
-    # Simuliere Cloud-Connection-Key mit Brain-Vault-Passphrase (ohne Live-HTTP) & prüfe repr()-Maskierung
-    cloud_style_key = encode_connection_key(
-        "alert_bot",
-        raw_tok,
+        admin_repo,
+        BrainSecrets(),
         vault_passphrase="brain_shared_turso_key_xyz",
+        explicit_vault_key="brain_shared_turso_key_xyz",
     )
-    decoded = decode_connection_key(cloud_style_key)
-    assert decoded.app_id == "alert_bot"
-    assert raw_tok not in repr(decoded)
-    assert "brain_shared_turso_key_xyz" not in repr(decoded)
+    admin.set_secret("GEMINI_FREE_API_KEY", "AIzaSyVaultCompactKey")
+    fleet_key, has_turso = admin.issue_fleet_key()
+    assert fleet_key.startswith("kib_") and has_turso is False
 
-    # 3. Host-App (alert_bot) hat VÖLLIG ANDERES TURSO_URL / TURSO_KEY / APP_PASSWORD in ENV!
+    # Host-App (z. B. alert-bot) hat völlig andere eigene DB-Secrets
     monkeypatch.setenv("APP_PASSWORD", "alert_bot_different_pw")
     monkeypatch.setenv("TURSO_URL", "libsql://alert-bot-own-db.turso.io")
     monkeypatch.setenv("TURSO_KEY", "alert_bot_completely_different_turso_key")
@@ -2272,34 +2122,33 @@ def test_one_secret_ki_brain_key_plug_and_play_isolation_and_legacy_migration(
     monkeypatch.delenv("BRAIN_TURSO_URL", raising=False)
     assert ki_brain.is_configured() is False
 
-    # 3a. Plug & Play über ENV KI_BRAIN_KEY -> ignoriert Alert-Bot TURSO_URL/KEY, entschlüsselt beide Vault-Secrets!
-    monkeypatch.setenv("KI_BRAIN_KEY", cloud_style_key)
+    # 3a. ENV KI_BRAIN_KEY
+    monkeypatch.setenv("KI_BRAIN_KEY", fleet_key)
     assert ki_brain.is_configured() is True
     with ki_brain.connect(sqlite_path=db_file) as bot:
-        assert bot.client_app_id == "alert_bot"
+        assert bot.client_app_id == FLEET_CLIENT_ID
         assert bot.is_admin_client is False
-        assert bot._secrets.resolve_key("GEMINI_FREE_API_KEY") == "AIzaSyVaultModernFreeKey"  # noqa: SLF001
-        assert bot._secrets.resolve_key("TAVILY_API_KEY") == "tvly_legacy_v1_secret_999"  # noqa: SLF001
+        assert bot._secrets.resolve_key("GEMINI_FREE_API_KEY") == "AIzaSyVaultCompactKey"  # noqa: SLF001
 
-    # 3b. Plug & Play über lokales .streamlit/secrets.toml (ohne ENV KI_BRAIN_KEY)
+    # 3b. Lokales .streamlit/secrets.toml (ohne ENV)
     monkeypatch.delenv("KI_BRAIN_KEY", raising=False)
     st_dir = tmp_path / "alert_app_root" / ".streamlit"
     st_dir.mkdir(parents=True)
-    (st_dir / "secrets.toml").write_text(f'KI_BRAIN_KEY = "{cloud_style_key}"\n', encoding="utf-8")
+    (st_dir / "secrets.toml").write_text(f'KI_BRAIN_KEY = "{fleet_key}"\n', encoding="utf-8")
     assert ki_brain.is_configured(base_dir=tmp_path / "alert_app_root") is True
     with ki_brain.connect(sqlite_path=db_file, base_dir=tmp_path / "alert_app_root") as bot_toml:
-        assert bot_toml.client_app_id == "alert_bot"
+        assert bot_toml.client_app_id == FLEET_CLIENT_ID
 
-    # 3c. Plug & Play über Streamlit st.secrets (ohne ENV)
+    # 3c. Streamlit st.secrets (ohne ENV)
     import streamlit as st
 
-    monkeypatch.setattr(st, "secrets", {"KI_BRAIN_KEY": cloud_style_key})
+    monkeypatch.setattr(st, "secrets", {"KI_BRAIN_KEY": fleet_key})
     assert ki_brain.is_configured() is True
     with ki_brain.connect(sqlite_path=db_file) as bot_st:
-        assert bot_st.client_app_id == "alert_bot"
+        assert bot_st.client_app_id == FLEET_CLIENT_ID
 
-    # 4. Sofortige Sperrung im Dashboard-Vault blockiert bestehenden KI_BRAIN_KEY sofort!
-    admin.set_app_enabled("alert_bot", False)
+    # 4. Sofortige Sperrung im Vault blockiert alle 3 Apps sofort
+    admin.set_fleet_enabled(False)
     with pytest.raises(BrainAuthError):
         ki_brain.connect(sqlite_path=db_file)
     admin.close()

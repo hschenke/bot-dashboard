@@ -16,14 +16,14 @@ Zusätzlich stellt dieses Repository mit [`ki_brain`](ki_brain/__init__.py) ein 
   - Verbindet sich mit den 3 Bot-Datenbanken (Turso HTTPS Hrana v2 oder lokal per Read-Only-SQLite).
 - **🧠 KI-Brain (Zentrales KI & Websearch Brain)**:
   - **Einheitlicher Ablauf (`🚀 Sync & Optimize`)**: Kombiniert Discover, Benchmark & Optimize, Unblock Tools und Prune Failing mit wählbaren Optionen.
-  - **5 strukturierte Tabs (`Sequencing | KI | Tools | Vault | Check`)**: Free- & Paid-Tier API-Keys sowie die **3-App-Zugriffskontrolle** (`news_bot`, `research_bot`, `alert_bot`) werden zentral & Write-Only im **Vault** verwaltet.
+  - **5 strukturierte Tabs (`Sequencing | KI | Tools | Vault | Check`)**: Free- & Paid-Tier API-Keys sowie **1 gemeinsamer kompakter Flotten-Key (`KI_BRAIN_KEY`)** für alle 3 Apps werden zentral & Write-Only im **Vault** verwaltet.
   - **Strikte 0%-Kosten-Priorität & Free-/Paid-Key-Trennung**: Standardanfragen (`allow_paid=False`) nutzen ausschließlich den Free-Tier-Key (`GEMINI_FREE_API_KEY` bzw. Fallback `GEMINI_API_KEY`); der Paid-Tier-Key (`GEMINI_PAID_API_KEY`) und Paid-Only-Modelle werden erst bei explizitem `allow_paid=True` aktiv.
 
 ---
 
 ## 🔌 1-Secret Plug-&-Play Einbindung von `ki_brain` (`News-Bot`, `Research-Bot`, `Alert-Bot`)
 
-In den 3 Bot-Repos genügt **1 Eintrag** in `requirements*.txt` (zieht automatisch immer die aktuelle `main`-Version ohne Streamlit-Ballast) sowie **1 einziges Secret (`KI_BRAIN_KEY`)** aus dem Dashboard-Tab **🔐 Vault**:
+In allen 3 Bot-Repos genügt **1 Eintrag** in `requirements*.txt` (zieht automatisch immer die aktuelle `main`-Version ohne Streamlit-Ballast) sowie **derselbe kompakte Flotten-Key (`KI_BRAIN_KEY`)** aus dem Dashboard-Tab **🔐 Vault**:
 
 ```bash
 pip install "git+https://github.com/hschenke/bot-dashboard.git@main"
@@ -33,7 +33,7 @@ pip install "git+https://github.com/hschenke/bot-dashboard.git@main"
 import ki_brain
 
 # Liest KI_BRAIN_KEY automatisch aus ENV, st.secrets & .streamlit/secrets.toml (0 Kollision mit App-DB).
-# Fremde Apps oder gesperrte/widerrufene Keys werden strikt mit BrainAuthError abgelehnt.
+# Fremde Aufrufe oder gesperrte/rotierte Keys werden strikt mit BrainAuthError abgelehnt.
 if ki_brain.is_configured():
     with ki_brain.connect() as brain:
         hits = brain.search("Aktuelle Entwicklungen KI", tier="fast")

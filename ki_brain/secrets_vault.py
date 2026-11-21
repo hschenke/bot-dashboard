@@ -11,7 +11,6 @@ import re
 from ki_brain.exceptions import BrainValidationError
 
 _ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
-_ENC_V1_PREFIX = "enc_v1:"
 _ENC_V2_PREFIX = "enc_v2:"
 _KDF_ITERATIONS = 120_000
 
@@ -29,7 +28,7 @@ def _hash_seed(parts: list[str]) -> bytes:
     return hashlib.sha256(raw_seed.encode("utf-8")).digest()
 
 
-def _derive_shared_master_material(passphrase: str = "") -> bytes:
+def _derive_master_material(passphrase: str = "") -> bytes:
     """Leitet app-übergreifendes Schlüsselmaterial ab (unabhängig vom Dashboard-APP_PASSWORD)."""
     explicit = passphrase.strip() or os.getenv("BRAIN_SECRET_KEY", "").strip()
     if explicit:
@@ -37,42 +36,7 @@ def _derive_shared_master_material(passphrase: str = "") -> bytes:
     turso_seed = os.getenv("BRAIN_TURSO_KEY", "").strip() or os.getenv("TURSO_KEY", "").strip()
     if turso_seed:
         return _hash_seed([turso_seed, "ki-websearch-brain-vault-v2"])
-    return _derive_legacy_master_material(passphrase)
-
-
-def _derive_legacy_master_material(passphrase: str = "") -> bytes:
-    """Legacy-Ableitung (`enc_v1`) für 100 % Rückwärtskompatibilität bestehender Vault-Einträge."""
-    seed_parts = [
-        passphrase.strip(),
-        os.getenv("BRAIN_SECRET_KEY", "").strip(),
-        os.getenv("APP_PASSWORD", "").strip(),
-        os.getenv("BRAIN_TURSO_KEY", "").strip(),
-        os.getenv("TURSO_KEY", "").strip(),
-        "ki-websearch-brain-vault-v1",
-    ]
-    return _hash_seed(seed_parts)
-
-
-def _candidate_decryption_materials(prefix: str, passphrase: str = "") -> list[bytes]:
-    shared = _derive_shared_master_material(passphrase)
-    legacy = _derive_legacy_master_material(passphrase)
-    legacy_env_only = _derive_legacy_master_material("")
-    turso_only = _hash_seed(
-        [
-            os.getenv("BRAIN_TURSO_KEY", "").strip() or os.getenv("TURSO_KEY", "").strip(),
-            "ki-websearch-brain-vault-v2",
-        ]
-    )
-    ordered = (
-        [shared, legacy, legacy_env_only, turso_only]
-        if prefix == _ENC_V2_PREFIX
-        else [legacy, legacy_env_only, shared, turso_only]
-    )
-    unique: list[bytes] = []
-    for mat in ordered:
-        if mat not in unique:
-            unique.append(mat)
-    return unique
+    return _hash_seed(["ki-websearch-brain-vault-v2"])
 
 
 def _keystream(enc_key: bytes, nonce: bytes, length: int) -> bytes:
@@ -92,7 +56,7 @@ def encrypt_secret_value(plaintext: str, passphrase: str = "") -> str:
     if not clean or len(clean) > 4096:
         raise BrainValidationError("Ungültiger oder leerer Secret-Wert.")
     nonce = os.urandom(16)
-    master = _derive_shared_master_material(passphrase)
+    master = _derive_master_material(passphrase)
     derived = hashlib.pbkdf2_hmac("sha256", master, nonce, _KDF_ITERATIONS, dklen=64)
     enc_key, mac_key = derived[:32], derived[32:]
     pt_bytes = clean.encode("utf-8")
@@ -104,31 +68,26 @@ def encrypt_secret_value(plaintext: str, passphrase: str = "") -> str:
 
 
 def decrypt_secret_value(ciphertext_token: str, passphrase: str = "") -> str:
-    """Entschlüsselt gespeicherte `enc_v2`/`enc_v1`-Tokens intern zur Laufzeit (niemals für UI!)."""
+    """Entschlüsselt gespeicherte `enc_v2`-Tokens intern zur Laufzeit (niemals für UI!)."""
     raw = (ciphertext_token or "").strip()
-    if raw.startswith(_ENC_V2_PREFIX):
-        prefix = _ENC_V2_PREFIX
-    elif raw.startswith(_ENC_V1_PREFIX):
-        prefix = _ENC_V1_PREFIX
-    else:
+    if not raw.startswith(_ENC_V2_PREFIX):
         return ""
     try:
-        blob = base64.urlsafe_b64decode(raw.removeprefix(prefix).encode("ascii"))
+        blob = base64.urlsafe_b64decode(raw.removeprefix(_ENC_V2_PREFIX).encode("ascii"))
     except Exception:
         return ""
     if len(blob) <= 48:
         return ""
     nonce, tag, ciphertext = blob[:16], blob[16:48], blob[48:]
-    for master in _candidate_decryption_materials(prefix, passphrase):
-        derived = hashlib.pbkdf2_hmac("sha256", master, nonce, _KDF_ITERATIONS, dklen=64)
-        enc_key, mac_key = derived[:32], derived[32:]
-        expected_tag = hmac.new(mac_key, nonce + ciphertext, hashlib.sha256).digest()
-        if not hmac.compare_digest(tag, expected_tag):
-            continue
-        stream = _keystream(enc_key, nonce, len(ciphertext))
-        pt_bytes = bytes(a ^ b for a, b in zip(ciphertext, stream, strict=True))
-        try:
-            return pt_bytes.decode("utf-8")
-        except UnicodeDecodeError:
-            return ""
-    return ""
+    master = _derive_master_material(passphrase)
+    derived = hashlib.pbkdf2_hmac("sha256", master, nonce, _KDF_ITERATIONS, dklen=64)
+    enc_key, mac_key = derived[:32], derived[32:]
+    expected_tag = hmac.new(mac_key, nonce + ciphertext, hashlib.sha256).digest()
+    if not hmac.compare_digest(tag, expected_tag):
+        return ""
+    stream = _keystream(enc_key, nonce, len(ciphertext))
+    pt_bytes = bytes(a ^ b for a, b in zip(ciphertext, stream, strict=True))
+    try:
+        return pt_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return ""
