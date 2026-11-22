@@ -7,6 +7,7 @@ import logging
 import sys
 
 from src.checks.coordinator import FleetCheckCoordinator
+from src.checks.diagnostics import format_degraded_cause_short
 from src.config.settings import load_app_settings
 from src.domain.enums import HealthStatus
 from src.storage.repository import create_dashboard_repository
@@ -57,8 +58,10 @@ def run_cli_fleet_check(wake_sleeping: bool = False) -> int:
             )
 
         for snap in snapshots:
+            cause = format_degraded_cause_short(snap)
+            cause_suffix = f" | Ursache={cause}" if cause else ""
             logger.info(
-                "%s (%s): Gesamt=%s | URL=%s (awake=%s, %d ms) | Worker=%s | DB=%s (%d Zeilen)",
+                "%s (%s): Gesamt=%s | URL=%s (awake=%s, %d ms) | Worker=%s | DB=%s (%d Zeilen)%s",
                 snap.spec.title,
                 snap.spec.app_id.value,
                 snap.overall_status.value,
@@ -68,6 +71,7 @@ def run_cli_fleet_check(wake_sleeping: bool = False) -> int:
                 snap.workflow_check.state.value,
                 snap.db_check.status.value,
                 snap.db_check.total_rows,
+                cause_suffix,
             )
 
         if wake_sleeping:

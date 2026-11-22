@@ -295,4 +295,81 @@ def test_trigger_and_refresh_worker_and_quiet_refresh() -> None:
     mock_gh.check_primary_workflow.assert_not_called()
 
 
+def test_health_diagnostics_breakdown_and_recovery() -> None:
+    from src.checks.diagnostics import (
+        collect_health_diagnostics,
+        format_degraded_cause_short,
+        get_issue_diagnostics,
+    )
+    from src.domain.models import DatabaseIssue
+
+    base = _make_snapshot(AppId.ALERT_BOT)
+    assert get_issue_diagnostics(base) == []
+    assert format_degraded_cause_short(base) == ""
+
+    issue = DatabaseIssue(
+        source="Alert-Regel (web_search)",
+        title="BKK Zusatzbeitrag",
+        status="error (3× fehlgeschlagen)",
+        detail="HTTP 504 Timeout",
+        timestamp="2026-11-22T13:31:00Z",
+    )
+    degraded_db = DatabaseHealthSummary(
+        app_id=AppId.ALERT_BOT,
+        backend_label="Turso Cloud (alert-bot-hschenke)",
+        status=HealthStatus.DEGRADED,
+        latency_ms=420,
+        table_metrics=(DatabaseTableMetric("alert_rules", 3),),
+        active_count=2,
+        error_count=1,
+        message="DB erreichbar — 1 Fehler in App-Daten (BKK Zusatzbeitrag)",
+        checked_at="2026-11-22T13:35:00+00:00",
+        issues=(issue,),
+    )
+    degraded_snap = AppFleetSnapshot(
+        spec=base.spec,
+        overall_status=derive_overall_health(base.url_check, base.workflow_check, degraded_db),
+        url_check=base.url_check,
+        workflow_check=base.workflow_check,
+        db_check=degraded_db,
+        checked_at="2026-11-22T13:35:00+00:00",
+    )
+    assert degraded_snap.overall_status == HealthStatus.DEGRADED
+    assert format_degraded_cause_short(degraded_snap) == "DB: 1 Fehler"
+    all_diags = collect_health_diagnostics(
+        degraded_snap.url_check, degraded_snap.workflow_check, degraded_snap.db_check
+    )
+    assert [d.component for d in all_diags] == ["Web-App", "Worker", "Datenbank"]
+    issues = get_issue_diagnostics(degraded_snap)
+    assert len(issues) == 1
+    assert issues[0].component == "Datenbank"
+    assert "Verbindung Online" in issues[0].summary
+    assert any("BKK Zusatzbeitrag" in line and "HTTP 504 Timeout" in line for line in issues[0].details)
+
+    # Kombinierter Ausfall: Worker Failed + DB Degraded
+    failed_wf = WorkflowRunSummary(
+        app_id=AppId.ALERT_BOT,
+        workflow_file="check_alerts.yaml",
+        state=WorkflowRunState.FAILURE,
+        status_label="Failed",
+        conclusion="failure",
+        run_url="https://github.com/hschenke/alert-bot/actions/runs/1",
+        branch="main",
+        started_at="2026-11-22T14:00:00Z",
+        updated_at="2026-11-22T14:01:00Z",
+        message="ModuleNotFoundError",
+    )
+    combined_snap = AppFleetSnapshot(
+        spec=base.spec,
+        overall_status=derive_overall_health(base.url_check, failed_wf, degraded_db),
+        url_check=base.url_check,
+        workflow_check=failed_wf,
+        db_check=degraded_db,
+        checked_at="2026-11-22T14:02:00+00:00",
+    )
+    assert format_degraded_cause_short(combined_snap) == "Worker: Failed · DB: 1 Fehler"
+    assert len(get_issue_diagnostics(combined_snap)) == 2
+
+
+
 

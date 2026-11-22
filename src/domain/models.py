@@ -92,6 +92,28 @@ class DatabaseRecentItem:
 
 
 @dataclass(frozen=True)
+class DatabaseIssue:
+    """Konkreter Befund oder Fehler innerhalb einer inspizierten Bot-Datenbank."""
+
+    source: str
+    title: str
+    status: str
+    detail: str = ""
+    timestamp: str = ""
+    url: str = ""
+
+
+@dataclass(frozen=True)
+class HealthDiagnostic:
+    """Aufgeschlüsselter Einzelbefund für den Gesamtstatus (Web-App, Worker oder DB)."""
+
+    component: str
+    status: HealthStatus
+    summary: str
+    details: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class DatabaseHealthSummary:
     """Ergebnis der Datenbank-Inspektion (Turso Cloud oder lokales SQLite) eines Bots."""
 
@@ -106,6 +128,7 @@ class DatabaseHealthSummary:
     last_activity_at: str = ""
     message: str = ""
     checked_at: str = ""
+    issues: tuple[DatabaseIssue, ...] = ()
 
     @property
     def total_rows(self) -> int:

@@ -49,6 +49,7 @@ ALLOWED_INSPECTION_TABLES: frozenset[str] = frozenset(
 DEFAULT_SQLITE_REL_PATH: str = "data/bot_dashboard.db"
 DEFAULT_BRAIN_SQLITE_REL_PATH: str = "data/ai_brain.db"
 MAX_RECENT_ITEMS_PER_APP: int = 8
+MAX_DB_ISSUES_PER_APP: int = 10
 MAX_CHECK_LOG_HISTORY: int = 60
 
 # Auth, 30-Tage-Cookie & Brute-Force-Schutz

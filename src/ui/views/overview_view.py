@@ -5,6 +5,7 @@ from __future__ import annotations
 import streamlit as st
 
 from src.checks.coordinator import FleetCheckCoordinator
+from src.checks.diagnostics import format_degraded_cause_short, get_issue_diagnostics
 from src.domain.enums import AuthRole, HealthStatus, WorkflowRunState
 from src.domain.models import AppFleetSnapshot
 from src.security.sanitization import sanitize_display_url
@@ -130,6 +131,30 @@ def _render_card_actions(
     run_card_action(clicked, snap, idx, coordinator, repository)
 
 
+def _render_card_health_breakdown(snap: AppFleetSnapshot) -> None:
+    """Zeigt pro Komponente (Web-App, Worker, DB) den Status und volle Degraded/Offline-Ursachen."""
+    st.caption(
+        f"Web-App: {format_health_badge(snap.url_check.status)} · "
+        f"Worker: {format_workflow_badge(snap.workflow_check.state)} · "
+        f"DB: {format_health_badge(snap.db_check.status)}"
+    )
+    if snap.overall_status not in {HealthStatus.DEGRADED, HealthStatus.OFFLINE}:
+        return
+    issues = get_issue_diagnostics(snap)
+    if not issues:
+        return
+    lines = ["**Aufschlüsselung (wird beim nächsten fehlerfreien Check automatisch zurückgesetzt):**"]
+    for diag in issues:
+        lines.append(f"- **{diag.component} ({format_health_badge(diag.status)}):** {diag.summary}")
+        for detail in diag.details:
+            lines.append(f"  - {detail}")
+    body = "\n".join(lines)
+    if snap.overall_status == HealthStatus.OFFLINE:
+        st.error(body)
+    else:
+        st.warning(body)
+
+
 def _render_worker_card(
     snap: AppFleetSnapshot,
     coordinator: FleetCheckCoordinator,
@@ -146,8 +171,14 @@ def _render_worker_card(
     status_text = format_worker_status(wf.state, wf.status_label)
     wf_link = f"[`{wf.workflow_file}`]({safe_workflow_url})" if safe_workflow_url != "#" else f"`{wf.workflow_file}`"
     status_link = f"[{status_text}]({safe_status_url})" if safe_status_url != "#" else status_text
+    cause_short = format_degraded_cause_short(snap) if snap.overall_status == HealthStatus.DEGRADED else ""
+    health_badge = (
+        f"{format_health_badge(snap.overall_status)} ({cause_short})"
+        if cause_short
+        else format_health_badge(snap.overall_status)
+    )
     expander_title = (
-        f"{snap.spec.icon} {snap.spec.title} — {format_health_badge(snap.overall_status)} "
+        f"{snap.spec.icon} {snap.spec.title} — {health_badge} "
         f"• Worker: {format_workflow_badge(wf.state)}"
     )
 
@@ -166,6 +197,7 @@ def _render_worker_card(
             if safe_repo_url != "#":
                 st.markdown(f"**GitHub Repo:** [{snap.spec.github_repo}]({safe_repo_url})")
 
+        _render_card_health_breakdown(snap)
         st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
         _render_card_actions(snap, coordinator, repository, role, idx)
 

@@ -361,3 +361,108 @@ def test_sql_dashboard_repository_caches_turso_schema_and_recovers_missing_table
     repo1.close()
     repo2.close()
     _INITIALIZED_BACKENDS.discard(f"turso:{fake_url}")
+
+
+def test_alert_bot_db_ignores_paused_failures_reports_issues_and_resets_on_recovery() -> None:
+    inspector = BotDatabaseInspector()
+    spec = _sample_spec(AppId.ALERT_BOT)
+    alert_exec = SqliteExecutor(":memory:")
+    alert_exec.execute(
+        """
+        CREATE TABLE alert_rules (
+            id TEXT PRIMARY KEY, title TEXT, detector_type TEXT, status TEXT,
+            last_value_text TEXT, last_checked_at TEXT, target_url TEXT,
+            last_error TEXT, consecutive_failures INTEGER, updated_at TEXT
+        )
+        """
+    )
+    alert_exec.execute(
+        "CREATE TABLE alert_events (id TEXT PRIMARY KEY, rule_title TEXT, headline TEXT, "
+        "measured_display TEXT, created_at TEXT, source_url TEXT)"
+    )
+    alert_exec.execute("CREATE TABLE alert_check_logs (id TEXT PRIMARY KEY)")
+
+    # 1) Pausierte Regel mit altem consecutive_failures > 0 darf NICHT zu Degraded führen
+    alert_exec.execute(
+        """
+        INSERT INTO alert_rules VALUES
+        ('r_ok', 'Berlin Frost', 'weather_threshold', 'active', '5 °C', '2026-11-22T13:30:00Z',
+         'https://open-meteo.com', '', 0, '2026-11-22T13:30:00Z'),
+        ('r_paused', 'Alte Test-Regel', 'web_search', 'paused', '', '2026-11-20T10:00:00Z',
+         '', 'Timeout früher', 2, '2026-11-20T10:00:00Z')
+        """
+    )
+    clean = inspector.inspect_bot_database(spec, executor_override=alert_exec)
+    assert clean.status == HealthStatus.ONLINE
+    assert clean.active_count == 1
+    assert clean.error_count == 0
+    assert clean.issues == ()
+
+    # 2) Aktive Regel mit Fehler -> Degraded mit konkreter Aufschlüsselung (Titel + last_error)
+    alert_exec.execute(
+        """
+        INSERT INTO alert_rules VALUES
+        ('r_fail', 'BKK Zusatzbeitrag', 'web_search', 'active', '2,18 %', '2026-11-22T13:31:00Z',
+         'https://example.org/bkk', 'HTTP 504 Upstream Timeout', 2, '2026-11-22T13:31:00Z')
+        """
+    )
+    degraded = inspector.inspect_bot_database(spec, executor_override=alert_exec)
+    assert degraded.status == HealthStatus.DEGRADED
+    assert degraded.active_count == 2
+    assert degraded.error_count == 1
+    assert len(degraded.issues) == 1
+    assert degraded.issues[0].title == "BKK Zusatzbeitrag"
+    assert "2× fehlgeschlagen" in degraded.issues[0].status
+    assert "HTTP 504 Upstream Timeout" in degraded.issues[0].detail
+    assert "DB erreichbar" in degraded.message
+    assert "BKK Zusatzbeitrag" in degraded.message
+
+    # 3) Nächster Check erfolgreich -> consecutive_failures = 0 -> sofort wieder Online & issues leer
+    alert_exec.execute(
+        "UPDATE alert_rules SET consecutive_failures = 0, last_error = '', updated_at = '2026-11-22T14:00:00Z' WHERE id = 'r_fail'"
+    )
+    recovered = inspector.inspect_bot_database(spec, executor_override=alert_exec)
+    assert recovered.status == HealthStatus.ONLINE
+    assert recovered.error_count == 0
+    assert recovered.issues == ()
+    assert "Verbindung OK" in recovered.message
+    alert_exec.close()
+
+
+def test_research_bot_db_reports_unresolved_failure_and_resets_after_newer_success() -> None:
+    inspector = BotDatabaseInspector()
+    spec = _sample_spec(AppId.RESEARCH_BOT)
+    res_exec = SqliteExecutor(":memory:")
+    res_exec.execute(
+        """
+        CREATE TABLE research_jobs (
+            id TEXT PRIMARY KEY, topic TEXT, status TEXT, phase TEXT,
+            progress_percent INTEGER, error_message TEXT, created_at TEXT, completed_at TEXT
+        )
+        """
+    )
+    res_exec.execute("CREATE TABLE research_reports (job_id TEXT PRIMARY KEY)")
+
+    # 1) Neuester Job fehlgeschlagen -> Degraded mit konkretem Job-Befund
+    res_exec.execute(
+        "INSERT INTO research_jobs VALUES ('j_fail', 'Batterie-Recycling', 'failed', 'synthesis', 75, "
+        "'Rate limit exceeded', '2026-11-21T10:00:00Z', '2026-11-21T10:05:00Z')"
+    )
+    degraded = inspector.inspect_bot_database(spec, executor_override=res_exec)
+    assert degraded.status == HealthStatus.DEGRADED
+    assert degraded.error_count == 1
+    assert len(degraded.issues) == 1
+    assert degraded.issues[0].title == "Batterie-Recycling"
+    assert "Rate limit exceeded" in degraded.issues[0].detail
+
+    # 2) Neuerer erfolgreicher Job -> alter Fehler automatisch bereinigt -> wieder Online
+    res_exec.execute(
+        "INSERT INTO research_jobs VALUES ('j_ok', 'Solarenergie 2026', 'completed', 'done', 100, "
+        "'', '2026-11-22T12:00:00Z', '2026-11-22T12:04:00Z')"
+    )
+    recovered = inspector.inspect_bot_database(spec, executor_override=res_exec)
+    assert recovered.status == HealthStatus.ONLINE
+    assert recovered.error_count == 0
+    assert recovered.issues == ()
+    res_exec.close()
+

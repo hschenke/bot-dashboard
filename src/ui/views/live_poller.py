@@ -27,6 +27,8 @@ def snapshot_fingerprint(snap: AppFleetSnapshot) -> tuple[object, ...]:
         snap.workflow_check.updated_at,
         snap.db_check.status,
         snap.db_check.total_rows,
+        snap.db_check.error_count,
+        snap.db_check.issues,
     )
 
 

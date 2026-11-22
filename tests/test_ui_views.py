@@ -941,3 +941,152 @@ def test_apptest_overview_wake_all_secondary_button_and_overlay(monkeypatch: pyt
     assert not at_awake.exception
     wake_disabled_btn = next(b for b in at_awake.button if b.label == "☀️ Wake All")
     assert wake_disabled_btn.disabled is True
+
+
+def test_apptest_degraded_breakdown_and_db_refresh_resets_to_online(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.ui.views.live_poller import snapshot_fingerprint
+    from streamlit.testing.v1 import AppTest
+
+    monkeypatch.setenv("ALERT_BOT_URL", "https://holli-alert-bot.streamlit.app/")
+    monkeypatch.setenv("ALERT_BOT_REPO", "hschenke/alert-bot")
+
+    # Live-Poller erkennt Fehler-Wechsel auch bei unveränderter Zeilenzahl
+    base = _create_mock_snapshot()
+    degraded_db = DatabaseHealthSummary(
+        app_id=AppId.NEWS_BOT,
+        backend_label="Turso Cloud",
+        status=HealthStatus.DEGRADED,
+        latency_ms=40,
+        table_metrics=base.db_check.table_metrics,
+        error_count=1,
+        message="DB erreichbar — 1 Fehler",
+        checked_at=base.db_check.checked_at,
+    )
+    degraded_same_rows = AppFleetSnapshot(
+        spec=base.spec,
+        overall_status=HealthStatus.DEGRADED,
+        url_check=base.url_check,
+        workflow_check=base.workflow_check,
+        db_check=degraded_db,
+        checked_at=base.checked_at,
+    )
+    assert snapshot_fingerprint(base) != snapshot_fingerprint(degraded_same_rows)
+
+    def _app() -> None:
+        from unittest.mock import MagicMock
+
+        import streamlit as st
+        from src.checks.coordinator import FleetCheckCoordinator
+        from src.config.settings import load_app_settings
+        from src.domain.enums import AppId, AuthRole, HealthStatus, WorkflowRunState
+        from src.domain.models import (
+            AppFleetSnapshot,
+            DatabaseHealthSummary,
+            DatabaseIssue,
+            DatabaseTableMetric,
+            UrlCheckResult,
+            WorkflowRunSummary,
+        )
+        from src.ui.views.db_view import render_db_view
+        from src.ui.views.overview_view import render_overview_view
+
+        spec = load_app_settings(allow_sibling_env_fallback=False).get_app_spec(AppId.ALERT_BOT)
+        url_ok = UrlCheckResult(
+            app_id=AppId.ALERT_BOT,
+            target_url=spec.streamlit_url,
+            health_endpoint_url=f"{spec.streamlit_url}_stcore/health",
+            status=HealthStatus.ONLINE,
+            http_status_code=200,
+            latency_ms=90,
+            is_streamlit_awake=True,
+            health_endpoint_ok=True,
+            message="Online & wach",
+            checked_at="2026-11-22T13:31:00+00:00",
+        )
+        wf_ok = WorkflowRunSummary(
+            app_id=AppId.ALERT_BOT,
+            workflow_file="check_alerts.yaml",
+            state=WorkflowRunState.SUCCESS,
+            status_label="Success",
+            conclusion="success",
+            run_url="https://github.com/hschenke/alert-bot/actions/runs/42",
+            branch="main",
+            started_at="2026-11-22T13:30:00Z",
+            updated_at="2026-11-22T13:31:00Z",
+            message="Success",
+        )
+        degraded_snap = AppFleetSnapshot(
+            spec=spec,
+            overall_status=HealthStatus.DEGRADED,
+            url_check=url_ok,
+            workflow_check=wf_ok,
+            db_check=DatabaseHealthSummary(
+                app_id=AppId.ALERT_BOT,
+                backend_label="Turso Cloud (alert-bot-hschenke)",
+                status=HealthStatus.DEGRADED,
+                latency_ms=320,
+                table_metrics=(DatabaseTableMetric("alert_rules", 3),),
+                active_count=2,
+                error_count=1,
+                message="DB erreichbar — 1 Fehler in App-Daten (BKK Zusatzbeitrag)",
+                checked_at="2026-11-22T13:31:00+00:00",
+                issues=(
+                    DatabaseIssue(
+                        source="Alert-Regel (web_search)",
+                        title="BKK Zusatzbeitrag",
+                        status="error (3× fehlgeschlagen)",
+                        detail="HTTP 504 Upstream Timeout",
+                        timestamp="2026-11-22T13:31:00Z",
+                    ),
+                ),
+            ),
+            checked_at="2026-11-22T13:31:00+00:00",
+        )
+        recovered_snap = AppFleetSnapshot(
+            spec=spec,
+            overall_status=HealthStatus.ONLINE,
+            url_check=url_ok,
+            workflow_check=wf_ok,
+            db_check=DatabaseHealthSummary(
+                app_id=AppId.ALERT_BOT,
+                backend_label="Turso Cloud (alert-bot-hschenke)",
+                status=HealthStatus.ONLINE,
+                latency_ms=280,
+                table_metrics=(DatabaseTableMetric("alert_rules", 3),),
+                active_count=2,
+                error_count=0,
+                message="Verbindung OK (Turso Cloud (alert-bot-hschenke), 3 Zeilen, 280 ms)",
+                checked_at="2026-11-22T13:35:00+00:00",
+                issues=(),
+            ),
+            checked_at="2026-11-22T13:35:00+00:00",
+        )
+        if "fleet_snapshots" not in st.session_state:
+            st.session_state["fleet_snapshots"] = [degraded_snap]
+        coord = MagicMock(spec=FleetCheckCoordinator)
+        coord.check_all_apps.return_value = [recovered_snap]
+        repo = MagicMock()
+        current = st.session_state["fleet_snapshots"]
+        render_overview_view(current, coord, repo, role=AuthRole.ADMIN)
+        render_db_view(current, coordinator=coord, repository=repo)
+
+    at = AppTest.from_function(_app).run(timeout=10)
+    assert not at.exception
+    assert any("🟡 Degraded (DB: 1 Fehler)" in exp.label for exp in at.expander)
+    warnings = [w.value for w in at.warning]
+    assert len(warnings) == 2
+    assert all("BKK Zusatzbeitrag" in w and "HTTP 504 Upstream Timeout" in w for w in warnings)
+    db_df = at.table[1].value
+    assert list(db_df["Verbindung"]) == ["🟢 Online"]
+    assert list(db_df["Status"]) == ["🟡 Degraded"]
+
+    # Klick auf "🔄 DBs & Status jetzt prüfen" setzt behobene Fehler sofort auf Online zurück
+    refresh_btn = next(b for b in at.button if b.label == "🔄 DBs & Status jetzt prüfen")
+    at = refresh_btn.click().run(timeout=10)
+    assert not at.exception
+    assert len(at.warning) == 0
+    assert any("🟢 Online" in exp.label and "Degraded" not in exp.label for exp in at.expander)
+    assert list(at.table[1].value["Status"]) == ["🟢 Online"]
+

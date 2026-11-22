@@ -105,7 +105,7 @@ def run_streamlit_app() -> None:
         if selected_page == "dashboard":
             render_overview_view(snapshots, coordinator, _get_repository(), role)
         elif selected_page == "db":
-            render_db_view(snapshots)
+            render_db_view(snapshots, coordinator=coordinator, repository=_get_repository())
         else:
             render_ai_view(settings, role=role)
     finally:
