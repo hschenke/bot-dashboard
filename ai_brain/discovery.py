@@ -13,6 +13,7 @@ from typing import Any
 from google import genai
 
 from ai_brain.benchmark import BrainBenchmarkRunner
+from ai_brain.capability import estimate_model_capability, infer_model_tier
 from ai_brain.catalog import build_default_models, build_default_tools
 from ai_brain.enums import BrainTier, ModelProvider, ProbeStatus, ToolCategory
 from ai_brain.llm_runner import UnifiedLLMRunner
@@ -102,14 +103,8 @@ class DiscoverySummary:
 
 
 def _guess_gemini_tier(model_id: str) -> tuple[BrainTier, bool]:
-    low = model_id.lower()
-    if "deep-research" in low:
-        return BrainTier.DEEP, True
-    if "lite" in low:
-        return BrainTier.FAST, False
-    if any(tok in low for tok in ("hydrogen", "argon", "carbon", "pro", "ultra")):
-        return BrainTier.STANDARD if "hydrogen" in low else BrainTier.DEEP, False
-    return BrainTier.STANDARD, False
+    is_deep = "deep-research" in model_id.lower()
+    return infer_model_tier(model_id, is_deep_agent=is_deep), is_deep
 
 
 def _sync_new_builtins(
@@ -258,7 +253,7 @@ def _discover_groq_models(api_key: str) -> list[AIModelSpec]:
         mid = str(entry.get("id") or "").strip()
         if not mid or any(bad in mid.lower() for bad in ("whisper", "guard", "tts")):
             continue
-        tier = BrainTier.FAST if ("8b" in mid.lower() or "instant" in mid.lower()) else BrainTier.STANDARD
+        tier = infer_model_tier(mid)
         specs.append(
             AIModelSpec(
                 id=validate_identifier(f"groq/{mid}"[:94], "Groq-Modell-ID"),
@@ -277,6 +272,7 @@ def _discover_groq_models(api_key: str) -> list[AIModelSpec]:
                 notes="Kostenfreier Groq-OpenAI-Compat-Endpunkt.",
             )
         )
+    specs.sort(key=lambda m: (estimate_model_capability(m), m.id), reverse=True)
     return specs[:24]
 
 
@@ -311,7 +307,7 @@ def _discover_openrouter_free_models(api_key: str) -> list[AIModelSpec]:
                 name=f"OpenRouter Free: {str(entry.get('name') or mid)[:95]}",
                 provider=ModelProvider.OPENAI_COMPATIBLE,
                 model_id=mid,
-                tier_hint=BrainTier.STANDARD,
+                tier_hint=infer_model_tier(mid),
                 api_key_env="OPENROUTER_API_KEY",
                 paid_api_key_env="OPENROUTER_PAID_API_KEY",
                 base_url="https://openrouter.ai/api/v1",
@@ -325,9 +321,8 @@ def _discover_openrouter_free_models(api_key: str) -> list[AIModelSpec]:
                 output_cost_per_1m=_parse_openrouter_per_1m(pricing.get("completion")),
             )
         )
-        if len(specs) >= 24:
-            break
-    return specs
+    specs.sort(key=lambda m: (estimate_model_capability(m), m.id), reverse=True)
+    return specs[:24]
 
 
 def _sync_remote_manifest(

@@ -71,7 +71,9 @@ def _render_sequence_card(
         if paid_diff:
             paid_s = " → ".join(ps_ids or s_ids) or "–"
             paid_m = " → ".join(pm_ids or m_ids) or "Heuristik"
-            st.caption(f"💳 Paid-Opt-In (`allow_paid=True`): Suche `{paid_s}` · AI `{paid_m}` (`deep_agent={seq.paid_use_deep_agent}`)")
+            st.caption(
+                f"💳 Paid-Opt-In (`allow_paid=True` · Preis-Leistung): Suche `{paid_s}` · AI `{paid_m}` (`deep_agent={seq.paid_use_deep_agent}`)"
+            )
         if seq.optimization_rationale:
             st.caption(f"Logik: {seq.optimization_rationale}")
 

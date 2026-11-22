@@ -413,16 +413,16 @@ def build_default_tools() -> list[ToolSpec]:
 
 
 def build_default_sequences() -> dict[BrainTier, TierSequenceConfig]:
-    """Erstellt strikt 0%-kostenorientierte Start-Sequenzen plus Paid-Opt-In-Ketten."""
+    """Erstellt 0%-Start-Sequenzen (Best→Worst) plus Paid-Opt-In-Ketten (bestes Preis-Leistungs-Verhältnis)."""
     return {
         BrainTier.FAST: TierSequenceConfig(
             tier=BrainTier.FAST,
             search_tool_sequence=["yahoo_search", "searxng_public", "google_news_rss", "wikipedia_api"],
             extractor_tool_sequence=["direct_http_fetch", "jina_reader"],
-            model_sequence=["gemini-2.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-2.5-flash"],
+            model_sequence=["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite", "gemini-3.8-flash"],
             paid_search_tool_sequence=["yahoo_search", "searxng_public", "google_news_rss", "wikipedia_api", "gemini_google_search"],
             paid_extractor_tool_sequence=["direct_http_fetch", "jina_reader"],
-            paid_model_sequence=["gemini-2.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-2.5-flash"],
+            paid_model_sequence=["gemini-2.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-3.8-flash"],
             max_search_tools=2,
             enable_page_scraping=False,
             max_pages_to_scrape=0,
@@ -430,7 +430,7 @@ def build_default_sequences() -> dict[BrainTier, TierSequenceConfig]:
             single_pass=True,
             use_deep_agent=False,
             paid_use_deep_agent=False,
-            optimization_rationale="Standard-Startprofil (Fast · 0% Kosten): Schnelle Keyless-Treffer + günstige Lite-Modelle.",
+            optimization_rationale="Standard-Startprofil (Fast · 0% Kosten · Best→Worst): Schnelle Keyless-Treffer + stärkste Lite-Modelle zuerst.",
         ),
         BrainTier.STANDARD: TierSequenceConfig(
             tier=BrainTier.STANDARD,
@@ -444,7 +444,7 @@ def build_default_sequences() -> dict[BrainTier, TierSequenceConfig]:
                 "gemini_google_maps",
             ],
             extractor_tool_sequence=["direct_http_fetch", "jina_reader"],
-            model_sequence=["gemini-2.5-flash", "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-4-hydrogen"],
+            model_sequence=["gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.6-flash", "gemini-2.5-flash", "gemini-3.5-flash-lite"],
             paid_search_tool_sequence=[
                 "yahoo_search",
                 "searxng_public",
@@ -455,7 +455,7 @@ def build_default_sequences() -> dict[BrainTier, TierSequenceConfig]:
                 "gemini_google_maps",
             ],
             paid_extractor_tool_sequence=["direct_http_fetch", "jina_reader"],
-            paid_model_sequence=["gemini-2.5-flash", "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-4-hydrogen"],
+            paid_model_sequence=["gemini-3.8-flash", "gemini-3.6-flash", "gemini-2.5-flash", "gemini-4-hydrogen", "gemini-2.5-flash-lite"],
             max_search_tools=4,
             enable_page_scraping=True,
             max_pages_to_scrape=2,
@@ -463,7 +463,7 @@ def build_default_sequences() -> dict[BrainTier, TierSequenceConfig]:
             single_pass=False,
             use_deep_agent=False,
             paid_use_deep_agent=False,
-            optimization_rationale="Standard-Startprofil (Standard · 0% Kosten): Multi-Source + Geo-Smart Maps + Free-Tier Flash.",
+            optimization_rationale="Standard-Startprofil (Standard · 0% Kosten · Best→Worst): Multi-Source + Geo-Smart Maps + stärkste Free-Tier-Modelle zuerst.",
         ),
         BrainTier.DEEP: TierSequenceConfig(
             tier=BrainTier.DEEP,
@@ -481,10 +481,10 @@ def build_default_sequences() -> dict[BrainTier, TierSequenceConfig]:
             ],
             extractor_tool_sequence=["jina_reader", "direct_http_fetch", "browserbase_fetch"],
             model_sequence=[
-                "gemini-2.5-flash",
-                "gemini-3.8-flash",
                 "gemini-4-hydrogen",
+                "gemini-3.8-flash",
                 "gemini-3.6-flash",
+                "gemini-2.5-flash",
             ],
             paid_search_tool_sequence=[
                 "yahoo_search",
@@ -500,10 +500,10 @@ def build_default_sequences() -> dict[BrainTier, TierSequenceConfig]:
             ],
             paid_extractor_tool_sequence=["jina_reader", "direct_http_fetch", "browserbase_fetch"],
             paid_model_sequence=[
-                "gemini-2.5-flash",
                 "gemini-3.8-flash",
                 "gemini-4-hydrogen",
                 "gemini-3.6-flash",
+                "gemini-2.5-flash",
             ],
             max_search_tools=8,
             enable_page_scraping=True,
@@ -512,6 +512,6 @@ def build_default_sequences() -> dict[BrainTier, TierSequenceConfig]:
             single_pass=False,
             use_deep_agent=False,
             paid_use_deep_agent=False,
-            optimization_rationale="Standard-Startprofil (Deep · 0% Kosten): Breite Quellensuche + leistungsstarke Flash-/Hydrogen-Modelle; Paid-Modelle erst mit Opt-In.",
+            optimization_rationale="Standard-Startprofil (Deep · 0% Kosten · Best→Worst): Breite Quellensuche + stärkste Free-Tier-Modelle zuerst; Paid-Opt-In nach Preis-Leistung.",
         ),
     }

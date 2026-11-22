@@ -189,11 +189,14 @@ def select_grounding_model(
     ]
     if not candidates:
         return None
+    from ai_brain.capability import estimate_model_capability
+
     candidates.sort(
         key=lambda m: (
             1 if m.last_status == ProbeStatus.OK else (0 if m.last_status == ProbeStatus.UNTESTED else -1),
             1 if is_gemini_3_or_newer(m) else 0,
             1 if "lite" in m.id.lower() else 0,
+            estimate_model_capability(m),
             -(m.last_latency_ms or 1500),
         ),
         reverse=True,

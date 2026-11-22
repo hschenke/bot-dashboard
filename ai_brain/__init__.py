@@ -39,7 +39,9 @@ from ai_brain.models import (
 )
 from ai_brain.pricing import (
     compute_cost_score,
+    compute_value_score,
     estimate_blended_cost_per_1m,
+    estimate_model_capability,
     format_model_budget_label,
     infer_model_is_free,
 )
@@ -54,7 +56,7 @@ from ai_brain.quotas import (
 from ai_brain.storage import BrainDashboardState, BrainRepository, create_brain_repository
 from ai_brain.unblock import UnblockSummary
 
-__version__ = "0.20.1"
+__version__ = "0.21.0"
 
 connect = AIWebsearchBrain.connect
 is_configured = is_brain_configured
@@ -98,6 +100,7 @@ __all__ = [
     "UnblockSummary",
     "__version__",
     "compute_cost_score",
+    "compute_value_score",
     "connect",
     "create_brain_repository",
     "decode_connection_key",
@@ -105,6 +108,7 @@ __all__ = [
     "derive_tier_key_envs",
     "encode_connection_key",
     "estimate_blended_cost_per_1m",
+    "estimate_model_capability",
     "evaluate_model_quota",
     "evaluate_tool_quota",
     "format_model_budget_label",

@@ -4,6 +4,11 @@ from __future__ import annotations
 
 import re
 
+from ai_brain.capability import (
+    compute_capability_adjustment,
+    estimate_model_capability,
+    is_small_capacity_model,
+)
 from ai_brain.enums import BrainTier, ModelProvider
 from ai_brain.models import AIModelSpec
 
@@ -40,35 +45,17 @@ _KNOWN_TOKEN_RATES_PER_1M: tuple[tuple[str, tuple[float, float]], ...] = (
     ("deepseek-r1-distill", (0.75, 0.99)),
 )
 
-_SMALL_MODEL_RE = re.compile(r"(?:^|[-_/: ])(?:0\.5b|[1-9]b|nano|micro)(?:$|[-_/: ])")
-_MODERN_CAPABLE_TOKENS = (
-    "gemini-3.5",
-    "gemini-3.6",
-    "gemini-3.7",
-    "gemini-3.8",
-    "gemini-3.9",
-    "gemini-4",
-    "70b",
-    "120b",
-)
-
-
-def is_small_capacity_model(model: AIModelSpec) -> bool:
-    """Erkennt sehr kleine Modelle (<=9B, Nano/Micro), damit sie starke Modelle in Standard/Deep nicht verdrängen."""
-    haystack = f"{model.id} {model.model_id}".lower()
-    return bool(_SMALL_MODEL_RE.search(haystack))
-
-
-def compute_capability_adjustment(model: AIModelSpec) -> float:
-    """Moderater Qualitäts-Ausgleich nach Modellkapazität (-6 für <=9B, +1/+2 für moderne Flash/70B/G4)."""
-    if is_small_capacity_model(model):
-        return -6.0
-    haystack = f"{model.id} {model.model_id}".lower()
-    if any(tok in haystack for tok in _MODERN_CAPABLE_TOKENS):
-        return 2.0
-    if "gemini-2.5-flash" in haystack and "lite" not in haystack:
-        return 1.0
-    return 0.0
+__all__ = [
+    "compute_capability_adjustment",
+    "compute_cost_score",
+    "compute_value_score",
+    "estimate_blended_cost_per_1m",
+    "estimate_model_capability",
+    "format_model_budget_label",
+    "infer_model_is_free",
+    "is_small_capacity_model",
+    "resolve_model_token_costs",
+]
 
 
 def resolve_model_token_costs(model: AIModelSpec) -> tuple[float, float]:
@@ -95,7 +82,7 @@ def resolve_model_token_costs(model: AIModelSpec) -> tuple[float, float]:
     if "hydrogen" in slug:
         return 1.50, 7.50
     if model.provider == ModelProvider.OPENAI_COMPATIBLE:
-        if is_small_capacity_model(model) or "mini" in slug:
+        if is_small_capacity_model(model) or _MINI_WORD_RE.search(slug):
             return 0.06, 0.12
         if "70b" in slug:
             return 0.59, 0.79
@@ -107,6 +94,7 @@ def resolve_model_token_costs(model: AIModelSpec) -> tuple[float, float]:
     return 0.75, 3.50
 
 
+_MINI_WORD_RE = re.compile(r"(?:^|[-_/: ])mini(?:$|[-_/: ])")
 _PAID_ONLY_PRO_RE = re.compile(r"(?:^|[-_/: ])pro(?:$|[-_/: ])")
 _PAID_ONLY_MARKERS = ("deep-research", "argon", "carbon", "ultra")
 
@@ -141,6 +129,15 @@ def compute_cost_score(model: AIModelSpec) -> float:
     """Normiert Modellkosten auf 0..100 Punkte (günstiger = höher)."""
     blended = estimate_blended_cost_per_1m(model)
     return round(100.0 / (1.0 + 0.50 * max(0.0, blended)), 1)
+
+
+def compute_value_score(model: AIModelSpec, *, price_sensitivity: float = 0.45) -> float:
+    """Bewertet das Preis-Leistungs-Verhältnis (0..100, höher = mehr Modellstärke je USD)."""
+    cap = estimate_model_capability(model)
+    useful_cap = max(1.0, cap - 38.0)
+    blended = max(0.0, estimate_blended_cost_per_1m(model))
+    raw = useful_cap / (1.0 + max(0.0, price_sensitivity) * (blended**0.75))
+    return round(min(100.0, raw * 1.6), 1)
 
 
 def format_model_budget_label(model: AIModelSpec) -> str:

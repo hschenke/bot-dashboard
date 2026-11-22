@@ -1246,21 +1246,189 @@ def test_cost_aware_model_pricing_and_tier_sequencing() -> None:
     fast_seq = seqs[BrainTier.FAST].model_sequence
     std_seq = seqs[BrainTier.STANDARD].model_sequence
     deep_seq = seqs[BrainTier.DEEP].model_sequence
+    paid_std_seq = seqs[BrainTier.STANDARD].paid_model_sequence
     paid_deep_seq = seqs[BrainTier.DEEP].paid_model_sequence
 
+    # Fast (Free): leichte/schnelle Modelle vor schweren Standard-Modellen, tiny 8B ganz am Ende
     assert fast_seq[0] == "gemini-2.5-flash-lite"
     assert fast_seq.index("gemini-2.5-flash-lite") < fast_seq.index("gemini-4-hydrogen")
+    assert fast_seq[-1] == "groq/llama-3.1-8b-instant"
 
-    # Standard: günstige & starke Standard-Modelle (70B / Flash) vor teurem Hydrogen & schwachem 8B
-    assert std_seq[0] in {"groq/llama-3.3-70b-versatile", "gemini-2.5-flash"}
-    assert std_seq.index("gemini-2.5-flash") < std_seq.index("gemini-4-hydrogen")
-    assert std_seq.index("gemini-3.8-flash") < std_seq.index("gemini-4-hydrogen")
-    assert std_seq.index("gemini-3.8-flash") < std_seq.index("groq/llama-3.1-8b-instant")
+    # Standard (Free · 0% Kosten): strikt Best → Worst ohne Paid-Preis-Verzerrung
+    assert std_seq[0] == "gemini-4-hydrogen"
+    assert std_seq.index("gemini-4-hydrogen") < std_seq.index("gemini-3.8-flash")
+    assert std_seq.index("gemini-3.8-flash") < std_seq.index("groq/llama-3.3-70b-versatile")
+    assert std_seq.index("groq/llama-3.3-70b-versatile") < std_seq.index("gemini-2.5-flash")
+    assert std_seq.index("gemini-2.5-flash") < std_seq.index("gemini-2.5-flash-lite")
+    assert std_seq[-1] == "groq/llama-3.1-8b-instant"
+
+    # Paid-Opt-In (Standard & Deep): bestes Preis-Leistungs-Verhältnis zuerst (70B / 3.8-Flash vor teurem Hydrogen/Argon, 8B bleibt Letzter)
+    assert paid_std_seq[0] == "groq/llama-3.3-70b-versatile"
+    assert paid_std_seq.index("gemini-3.8-flash") < paid_std_seq.index("gemini-4-hydrogen")
+    assert paid_std_seq.index("gemini-4-hydrogen") < paid_std_seq.index("gemini-4-argon")
+    assert paid_std_seq[-1] == "groq/llama-3.1-8b-instant"
 
     # Deep 0%-Standard schließt Paid-Only Argon aus; Paid-Opt-In platziert Argon vor 8B
     assert "gemini-4-argon" not in deep_seq
+    assert deep_seq[0] == "gemini-4-hydrogen"
+    assert paid_deep_seq[0] == "groq/llama-3.3-70b-versatile"
+    assert paid_deep_seq.index("gemini-3.8-flash") < paid_deep_seq.index("gemini-4-argon")
     assert paid_deep_seq.index("gemini-4-argon") < paid_deep_seq.index("groq/llama-3.1-8b-instant")
     assert "or/broken/model-free" not in std_seq
+
+
+def test_model_sequencing_best_to_worst_free_and_value_for_money_paid(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_brain.benchmark import BrainBenchmarkRunner
+    from ai_brain.capability import estimate_model_capability, infer_model_tier
+    from ai_brain.discovery import _discover_groq_models
+    from ai_brain.optimizer import compute_model_quality, optimize_tier_sequences
+    from ai_brain.quotas import select_grounding_model
+
+    # Exakte Flotte aus Live-Screenshot inkl. veraltetem tier_hint=STANDARD für Groq 7B/20B & realen Latenzunterschieden
+    gpt_oss_20b = AIModelSpec(
+        id="groq/openai/gpt-oss-20b",
+        name="Groq: openai/gpt-oss-20b",
+        provider=ModelProvider.OPENAI_COMPATIBLE,
+        model_id="openai/gpt-oss-20b",
+        tier_hint=BrainTier.STANDARD,  # Altlast aus älterem Discovery-Lauf
+        api_key_env="GROQ_API_KEY",
+        base_url="https://api.groq.com/openai/v1",
+        source="auto_discovered",
+        last_status=ProbeStatus.OK,
+        last_latency_ms=220,
+    )
+    gpt_oss_120b = AIModelSpec(
+        id="groq/openai/gpt-oss-120b",
+        name="Groq: openai/gpt-oss-120b",
+        provider=ModelProvider.OPENAI_COMPATIBLE,
+        model_id="openai/gpt-oss-120b",
+        tier_hint=BrainTier.STANDARD,
+        api_key_env="GROQ_API_KEY",
+        base_url="https://api.groq.com/openai/v1",
+        source="auto_discovered",
+        last_status=ProbeStatus.OK,
+        last_latency_ms=480,
+    )
+    allam_7b = AIModelSpec(
+        id="groq/allam-2-7b",
+        name="Groq: allam-2-7b",
+        provider=ModelProvider.OPENAI_COMPATIBLE,
+        model_id="allam-2-7b",
+        tier_hint=BrainTier.STANDARD,  # Altlast aus älterem Discovery-Lauf
+        api_key_env="GROQ_API_KEY",
+        base_url="https://api.groq.com/openai/v1",
+        source="auto_discovered",
+        last_status=ProbeStatus.OK,
+        last_latency_ms=170,
+    )
+    flash_31_lite = AIModelSpec(
+        id="gemini-3.1-flash-lite",
+        name="Gemini 3.1 Flash-Lite",
+        model_id="gemini-3.1-flash-lite",
+        tier_hint=BrainTier.FAST,
+        last_status=ProbeStatus.OK,
+        last_latency_ms=420,
+    )
+    gemma_4_31b = AIModelSpec(
+        id="gemma-4-31b-it",
+        name="Gemma 4 31B",
+        model_id="gemma-4-31b-it",
+        tier_hint=BrainTier.STANDARD,
+        source="auto_discovered",
+        last_status=ProbeStatus.OK,
+        last_latency_ms=1800,
+    )
+    flash_35_lite = AIModelSpec(
+        id="gemini-3.5-flash-lite",
+        name="Gemini 3.5 Flash-Lite",
+        model_id="gemini-3.5-flash-lite",
+        tier_hint=BrainTier.FAST,
+        last_status=ProbeStatus.OK,
+        last_latency_ms=950,
+    )
+
+    assert estimate_model_capability(gpt_oss_120b) > estimate_model_capability(gemma_4_31b)
+    assert estimate_model_capability(gemma_4_31b) > estimate_model_capability(flash_35_lite)
+    assert estimate_model_capability(flash_35_lite) > estimate_model_capability(flash_31_lite)
+    assert estimate_model_capability(flash_31_lite) > estimate_model_capability(gpt_oss_20b)
+    assert estimate_model_capability(gpt_oss_20b) > estimate_model_capability(allam_7b)
+
+    fleet = [
+        m.model_copy(update={"quality_score": compute_model_quality(m, m.last_status, m.last_latency_ms)})
+        for m in (gpt_oss_20b, gpt_oss_120b, allam_7b, flash_31_lite, gemma_4_31b, flash_35_lite)
+    ]
+    seqs = optimize_tier_sequences(fleet, [], {})
+
+    # Free-Tier Fast: leichte Modelle zuerst (Best → Worst: 3.5 vor 3.1 vor 20b), 7B immer zuletzt
+    assert seqs[BrainTier.FAST].model_sequence == [
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+        "groq/openai/gpt-oss-20b",
+        "groq/openai/gpt-oss-120b",
+        "gemma-4-31b-it",
+        "groq/allam-2-7b",
+    ]
+    # Free-Tier Standard & Deep: strikt Best → Worst (provider-neutral: 120B vor Gemma 31B vor 3.5 vor 3.1 vor 20B vor 7B)
+    expected_best_to_worst = [
+        "groq/openai/gpt-oss-120b",
+        "gemma-4-31b-it",
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+        "groq/openai/gpt-oss-20b",
+        "groq/allam-2-7b",
+    ]
+    assert seqs[BrainTier.STANDARD].model_sequence == expected_best_to_worst
+    assert seqs[BrainTier.DEEP].model_sequence == expected_best_to_worst
+
+    # Paid-Opt-In: bestes Preis-Leistungs-Verhältnis zuerst
+    assert seqs[BrainTier.FAST].paid_model_sequence[0] == "groq/openai/gpt-oss-20b"
+    assert seqs[BrainTier.FAST].paid_model_sequence[-1] == "groq/allam-2-7b"
+    assert seqs[BrainTier.STANDARD].paid_model_sequence[:2] == ["groq/openai/gpt-oss-120b", "gemma-4-31b-it"]
+    assert seqs[BrainTier.STANDARD].paid_model_sequence[-1] == "groq/allam-2-7b"
+
+    # Grounding bevorzugt gemini-3.5-flash-lite vor gemini-3.1-flash-lite
+    g_pick = select_grounding_model(
+        [flash_31_lite, flash_35_lite],
+        BrainSecrets(gemini_api_key="AIzaSyTestKey123"),
+        executor_type="gemini_google_search",
+        allow_paid=False,
+    )
+    assert g_pick is not None and g_pick.id == "gemini-3.5-flash-lite"
+
+    # Discovery ordnet Groq-Tiers sauber zu & sortiert stärkste Modelle zuerst
+    assert infer_model_tier("allam-2-7b") == BrainTier.FAST
+    assert infer_model_tier("openai/gpt-oss-20b") == BrainTier.FAST
+    assert infer_model_tier("openai/gpt-oss-120b") == BrainTier.STANDARD
+    assert infer_model_tier("meta-llama/llama-4-maverick-17b-128e-instruct") == BrainTier.STANDARD
+    assert infer_model_tier("gemini-4-hydrogen") == BrainTier.STANDARD
+    assert infer_model_tier("gemini-4-argon") == BrainTier.DEEP
+
+    groq_payload = (
+        b'{"data": [{"id": "allam-2-7b"}, {"id": "openai/gpt-oss-20b"}, '
+        b'{"id": "openai/gpt-oss-120b"}, {"id": "llama-3.3-70b-versatile"}]}'
+    )
+    monkeypatch.setattr(
+        "ai_brain.discovery.safe_http_request",
+        lambda *_a, **_kw: (200, "https://api.groq.com/openai/v1/models", "application/json", groq_payload),
+    )
+    discovered = _discover_groq_models("gsk_test_key")
+    assert [m.id for m in discovered] == [
+        "groq/openai/gpt-oss-120b",
+        "groq/llama-3.3-70b-versatile",
+        "groq/openai/gpt-oss-20b",
+        "groq/allam-2-7b",
+    ]
+    by_id = {m.id: m for m in discovered}
+    assert by_id["groq/allam-2-7b"].tier_hint == BrainTier.FAST
+    assert by_id["groq/openai/gpt-oss-20b"].tier_hint == BrainTier.FAST
+    assert by_id["groq/openai/gpt-oss-120b"].tier_hint == BrainTier.STANDARD
+
+    # Benchmark-Record heilt veralteten auto_discovered tier_hint, lässt custom-Modelle aber unverändert
+    healed, _ = BrainBenchmarkRunner._record_model_result(allam_7b, ProbeStatus.OK, 180, "OK", "2026-11-22T12:00:00+00:00")
+    assert healed.tier_hint == BrainTier.FAST
+    custom_small = allam_7b.model_copy(update={"source": "custom", "tier_hint": BrainTier.STANDARD})
+    kept_custom, _ = BrainBenchmarkRunner._record_model_result(custom_small, ProbeStatus.OK, 180, "OK", "2026-11-22T12:00:00+00:00")
+    assert kept_custom.tier_hint == BrainTier.STANDARD
 
 
 def test_google_maps_grounding_citations_geo_smart_and_gemini3_guard(monkeypatch: pytest.MonkeyPatch) -> None:

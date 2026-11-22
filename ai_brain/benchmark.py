@@ -326,9 +326,13 @@ class BrainBenchmarkRunner:
     def _record_model_result(
         model: AIModelSpec, status: ProbeStatus, latency_ms: int, details: str, now: str
     ) -> tuple[AIModelSpec, BenchmarkEntry]:
+        from ai_brain.capability import resolve_effective_tier
+
         quality = compute_model_quality(model, status, latency_ms)
+        effective_tier = resolve_effective_tier(model) if model.source == "auto_discovered" else model.tier_hint
         updated = model.model_copy(
             update={
+                "tier_hint": effective_tier,
                 "last_status": status,
                 "last_latency_ms": latency_ms,
                 "quality_score": quality,

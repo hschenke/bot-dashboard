@@ -6,18 +6,30 @@ import datetime
 from collections.abc import Iterable
 from typing import Any
 
-from ai_brain.enums import BrainTier, ProbeStatus, ToolCategory
-from ai_brain.models import AIModelSpec, TierSequenceConfig, ToolSpec
-from ai_brain.pricing import (
-    compute_capability_adjustment,
-    compute_cost_score,
+from ai_brain.capability import (
+    estimate_model_capability,
+    is_fast_class_model,
     is_small_capacity_model,
 )
+from ai_brain.enums import BrainTier, ProbeStatus, ToolCategory
+from ai_brain.models import AIModelSpec, TierSequenceConfig, ToolSpec
+from ai_brain.pricing import compute_value_score
 from ai_brain.quotas import evaluate_model_quota, evaluate_tool_quota
 from ai_brain.tools.registry import is_extractor_capable, is_search_capable
 
 DEFAULT_TEST_QUERY = "Python AI"
 DEFAULT_TEST_URL = "https://de.wikipedia.org/wiki/Python_(Programmiersprache)"
+
+_MODEL_SPEED_WEIGHTS: dict[BrainTier, float] = {
+    BrainTier.FAST: 0.06,
+    BrainTier.STANDARD: 0.04,
+    BrainTier.DEEP: 0.02,
+}
+_PAID_VALUE_SENSITIVITY: dict[BrainTier, float] = {
+    BrainTier.FAST: 0.50,
+    BrainTier.STANDARD: 0.45,
+    BrainTier.DEEP: 0.35,
+}
 
 
 def compute_speed_score(latency_ms: int, max_ms: int = 6000) -> float:
@@ -44,20 +56,19 @@ def compute_tool_quality(status: ProbeStatus, latency_ms: int, result_count: int
 
 
 def compute_model_quality(model: AIModelSpec, status: ProbeStatus, latency_ms: int) -> float:
-    """Berechnet den Modell-Qualitätsscore (0..100) nach Health, Speed, Tier-Stärke & Kapazität."""
+    """Berechnet den Modell-Qualitätsscore (0..100) primär aus Modellstärke & Status (+ leichtem Speed-Anteil)."""
     if status == ProbeStatus.AUTH_MISSING:
         return 0.0
     if status in {ProbeStatus.BLOCKED, ProbeStatus.ERROR}:
         return 5.0
     if status == ProbeStatus.QUOTA_LIMITED:
         return 12.0
+    cap = estimate_model_capability(model)
     if status == ProbeStatus.UNTESTED:
-        return 55.0
+        return round(max(15.0, min(95.0, cap * 0.75)), 1)
     speed = compute_speed_score(latency_ms, max_ms=8000)
-    tier_bonus = 92.0 if model.tier_hint == BrainTier.DEEP else (84.0 if model.tier_hint == BrainTier.STANDARD else 76.0)
-    struct_bonus = 6.0 if model.supports_structured_output else 0.0
-    cap_adj = compute_capability_adjustment(model)
-    return round(max(15.0, min(100.0, 0.45 * speed + 0.55 * tier_bonus + struct_bonus + cap_adj)), 1)
+    struct_bonus = 2.0 if model.supports_structured_output else -2.0
+    return round(max(15.0, min(100.0, 0.92 * cap + 0.08 * speed + struct_bonus)), 1)
 
 
 def _is_usable_status(status: ProbeStatus) -> bool:
@@ -119,6 +130,34 @@ def _rank_tools_for_tier(
     return picked
 
 
+def _score_model_for_tier(
+    model: AIModelSpec,
+    tier: BrainTier,
+    *,
+    allow_paid: bool,
+) -> tuple[int, int, float, float, float]:
+    """Berechnet Ranking-Schlüssel: Free = Best→Worst (Fast bevorzugt leichte Modelle), Paid = Bestes Preis-Leistungs-Verhältnis."""
+    if model.is_deep_agent and tier != BrainTier.DEEP:
+        return 0, -1, -10.0, 0.0, 0.0
+    status_rank = 2 if model.last_status == ProbeStatus.OK else (1 if model.last_status == ProbeStatus.UNTESTED else 0)
+    cap = estimate_model_capability(model)
+    speed = compute_speed_score(model.last_latency_ms or 1500, max_ms=8000)
+    small = is_small_capacity_model(model)
+    if tier == BrainTier.FAST:
+        tier_bucket = 2 if (is_fast_class_model(model) and not small) else (1 if not small else 0)
+    else:
+        tier_bucket = 1 if not small else 0
+
+    speed_w = _MODEL_SPEED_WEIGHTS[tier]
+    base_metric = (
+        compute_value_score(model, price_sensitivity=_PAID_VALUE_SENSITIVITY[tier])
+        if allow_paid
+        else cap
+    )
+    primary = (1.0 - speed_w) * base_metric + speed_w * speed
+    return status_rank, tier_bucket, primary, cap, speed
+
+
 def _rank_models_for_tier(
     models: list[AIModelSpec],
     tier: BrainTier,
@@ -133,32 +172,11 @@ def _rank_models_for_tier(
     if not usable:
         usable = [m for m in enabled if m.last_status != ProbeStatus.AUTH_MISSING]
 
-    def _score(m: AIModelSpec) -> tuple[int, float]:
-        snap = evaluate_model_quota(m, usage_state)
-        free_pref = 10.0 if (snap.is_free_available and tier != BrainTier.DEEP) else 0.0
-        status_rank = 2 if m.last_status == ProbeStatus.OK else 1
-        speed = compute_speed_score(m.last_latency_ms or 1500, max_ms=8000)
-        qual = m.quality_score if m.quality_score > 0 else (55.0 + compute_capability_adjustment(m))
-        cost_eff = compute_cost_score(m)
-        small_pen = is_small_capacity_model(m)
-
-        if tier == BrainTier.FAST:
-            if m.is_deep_agent:
-                return 0, -10.0
-            hint = 10.0 if m.tier_hint == BrainTier.FAST else (4.0 if m.tier_hint == BrainTier.STANDARD else 0.0)
-            pen = -8.0 if small_pen else 0.0
-            return status_rank, 0.35 * speed + 0.35 * qual + 0.30 * cost_eff + hint + pen + free_pref
-        if tier == BrainTier.STANDARD:
-            if m.is_deep_agent:
-                return 0, 0.0
-            hint = 14.0 if m.tier_hint == BrainTier.STANDARD else (4.0 if m.tier_hint == BrainTier.FAST else 2.0)
-            pen = -12.0 if small_pen else 0.0
-            return status_rank, 0.40 * qual + 0.25 * speed + 0.35 * cost_eff + hint + pen + free_pref
-        hint = 16.0 if (m.is_deep_agent or m.tier_hint == BrainTier.DEEP) else (10.0 if m.tier_hint == BrainTier.STANDARD else 0.0)
-        pen = -14.0 if small_pen else 0.0
-        return status_rank, 0.60 * qual + 0.25 * cost_eff + 0.15 * speed + hint + pen
-
-    ranked = sorted(usable, key=_score, reverse=True)
+    ranked = sorted(
+        usable,
+        key=lambda m: _score_model_for_tier(m, tier, allow_paid=allow_paid),
+        reverse=True,
+    )
     if tier != BrainTier.DEEP:
         ranked = [m for m in ranked if not m.is_deep_agent] or ranked
     return ranked
@@ -183,8 +201,8 @@ def _format_rationale(
     top_m = " → ".join(model_ids[:3]) or "Heuristik"
     skip_note = f" | Übersprungen: {', '.join(skipped[:3])}" if skipped else ""
     paid_count = len(paid_only) + len(exhausted_t)
-    paid_note = f" | Paid-Opt-In: {paid_count}" if paid_count else ""
-    return f"[{tier.value.upper()} · 0% Kosten] Suche: {top_s} | Modelle: {top_m}{skip_note}{paid_note}"[:1150]
+    paid_note = f" | Paid-Opt-In (Preis-Leistung): {paid_count}" if paid_count else ""
+    return f"[{tier.value.upper()} · 0% Kosten · Best→Worst] Suche: {top_s} | Modelle: {top_m}{skip_note}{paid_note}"[:1150]
 
 
 def optimize_tier_sequences(
