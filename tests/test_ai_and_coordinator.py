@@ -1,4 +1,4 @@
-"""Tests für Flotten-Koordinator, Dashboard-Repository und KI-Diagnose-Gateway."""
+"""Tests für Flotten-Koordinator, Dashboard-Repository und AI-Diagnose-Gateway."""
 
 from __future__ import annotations
 

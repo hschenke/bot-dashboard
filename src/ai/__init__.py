@@ -1,1 +1,1 @@
-"""Brückenschicht vom Bot-Dashboard zum zentralen KI & Websearch Brain."""
+"""Brückenschicht vom Bot-Dashboard zum zentralen AI & Websearch Brain."""

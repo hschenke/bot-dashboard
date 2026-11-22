@@ -1,10 +1,10 @@
-"""Brücke zwischen Bot-Dashboard AppSettings und dem eigenständigen ki_brain-Framework."""
+"""Brücke zwischen Bot-Dashboard AppSettings und dem eigenständigen ai_brain-Framework."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from ki_brain import BrainSecrets, KIWebsearchBrain, create_brain_repository
+from ai_brain import AIWebsearchBrain, BrainSecrets, create_brain_repository
 
 from src.config.settings import PROJECT_ROOT, AppSettings
 
@@ -37,7 +37,7 @@ def create_dashboard_brain(
     settings: AppSettings,
     *,
     genai_client: Any = None,
-) -> KIWebsearchBrain:
+) -> AIWebsearchBrain:
     """Erstellt die authentifizierte Dashboard-Admin-Instanz auf Basis von Turso Cloud oder SQLite."""
     use_brain_turso = bool(settings.brain_turso_url.strip() and settings.brain_turso_auth_token.strip())
     use_shared_turso = bool(settings.has_turso_configured)
@@ -58,7 +58,7 @@ def create_dashboard_brain(
         sqlite_path=settings.brain_sqlite_path,
         base_dir=PROJECT_ROOT,
     )
-    return KIWebsearchBrain.for_dashboard(
+    return AIWebsearchBrain.for_dashboard(
         repository=repo,
         secrets=build_brain_secrets(settings),
         genai_client=genai_client,

@@ -282,7 +282,7 @@ def test_check_all_and_wake_all_buttons_run_task_overlay_outside_header_columns(
     from src.ui.task_overlay import INSTANT_OVERLAY_HTML
 
     assert "st-key-overview_top_btn_" in INSTANT_OVERLAY_HTML
-    assert "st-key-ki_top_btn_" in INSTANT_OVERLAY_HTML
+    assert "st-key-ai_top_btn_" in INSTANT_OVERLAY_HTML
 
     awake_snap = _create_mock_snapshot()
     sleeping_url = UrlCheckResult(
@@ -388,8 +388,8 @@ def test_check_all_and_wake_all_buttons_run_task_overlay_outside_header_columns(
     assert spinner_depths == [0]
     assert "overview_kpi_row" in overlay_keys
     assert "overview_action_row" in overlay_keys
-    assert "ki_task_overlay" in overlay_keys
-    assert any("ki-task-backdrop" in m for m in md_calls)
+    assert "ai_task_overlay" in overlay_keys
+    assert any("ai-task-backdrop" in m for m in md_calls)
     assert empty_clears["count"] >= 2
 
 

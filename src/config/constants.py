@@ -47,7 +47,7 @@ ALLOWED_INSPECTION_TABLES: frozenset[str] = frozenset(
 
 # Persistenz & Grenzwerte
 DEFAULT_SQLITE_REL_PATH: str = "data/bot_dashboard.db"
-DEFAULT_BRAIN_SQLITE_REL_PATH: str = "data/ki_brain.db"
+DEFAULT_BRAIN_SQLITE_REL_PATH: str = "data/ai_brain.db"
 MAX_RECENT_ITEMS_PER_APP: int = 8
 MAX_CHECK_LOG_HISTORY: int = 60
 

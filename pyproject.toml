@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bot-dashboard"
-version = "0.19.0"
-description = "Zentrales Monitoring-, DB-, URL-, Worker- und KI-Dashboard für die 3 Streamlit Cloud Apps (News-Bot, Research-Bot, Alert-Bot)."
+version = "0.20.0"
+description = "Zentrales Monitoring-, DB-, URL-, Worker- und AI-Dashboard für die 3 Streamlit Cloud Apps (News-Bot, Research-Bot, Alert-Bot)."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -33,7 +33,7 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["ki_brain*"]
+include = ["ai_brain*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -43,7 +43,7 @@ addopts = "-q --strict-markers"
 [tool.ruff]
 target-version = "py311"
 line-length = 100
-src = ["src", "ki_brain", "tests"]
+src = ["src", "ai_brain", "tests"]
 
 [tool.ruff.lint]
 select = [

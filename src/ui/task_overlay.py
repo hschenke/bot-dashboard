@@ -11,46 +11,46 @@ import streamlit as st
 _T = TypeVar("_T")
 
 INSTANT_OVERLAY_HTML = """
-<div id="ki-brain-instant-backdrop">
-  <div class="ki-instant-card">
+<div id="ai-brain-instant-backdrop">
+  <div class="ai-instant-card">
     <strong>⚙️ Running task…</strong>
-    <div id="ki-instant-sub" style="font-size:0.9rem;color:#94a3b8;margin-top:0.35rem;">Please wait — locking background.</div>
+    <div id="ai-instant-sub" style="font-size:0.9rem;color:#94a3b8;margin-top:0.35rem;">Please wait — locking background.</div>
   </div>
 </div>
 <script>
 (function () {
-  if (window.__kiBrainOverlayBound) return;
-  window.__kiBrainOverlayBound = true;
+  if (window.__aiBrainOverlayBound) return;
+  window.__aiBrainOverlayBound = true;
   function releaseBackdrop() {
-    var cur = document.getElementById("ki-brain-instant-backdrop");
+    var cur = document.getElementById("ai-brain-instant-backdrop");
     if (cur) cur.classList.remove("active");
-    if (window.__kiBrainWatch) {
-      clearInterval(window.__kiBrainWatch);
-      window.__kiBrainWatch = null;
+    if (window.__aiBrainWatch) {
+      clearInterval(window.__aiBrainWatch);
+      window.__aiBrainWatch = null;
     }
   }
   document.addEventListener("click", function (ev) {
     var btn = ev.target && ev.target.closest
-      ? ev.target.closest('[class*="st-key-ki_top_btn_"] button, [class*="st-key-overview_top_btn_"] button')
+      ? ev.target.closest('[class*="st-key-ai_top_btn_"] button, [class*="st-key-overview_top_btn_"] button')
       : null;
     if (!btn || btn.disabled) return;
-    var bd = document.getElementById("ki-brain-instant-backdrop");
-    var sub = document.getElementById("ki-instant-sub");
+    var bd = document.getElementById("ai-brain-instant-backdrop");
+    var sub = document.getElementById("ai-instant-sub");
     if (sub) sub.textContent = (btn.innerText || "Task").trim() + " running — live status follows…";
     if (bd) bd.classList.add("active");
-    if (window.__kiBrainWatch) clearInterval(window.__kiBrainWatch);
+    if (window.__aiBrainWatch) clearInterval(window.__aiBrainWatch);
     var seenBusy = false;
     var waitTicks = 0;
     var idleTicks = 0;
     var startedAt = Date.now();
-    window.__kiBrainWatch = setInterval(function () {
-      var cur = document.getElementById("ki-brain-instant-backdrop");
+    window.__aiBrainWatch = setInterval(function () {
+      var cur = document.getElementById("ai-brain-instant-backdrop");
       if (!cur) { releaseBackdrop(); return; }
       if (document.querySelector('[data-testid="stException"]')) {
         releaseBackdrop();
         return;
       }
-      var hasOverlay = !!document.querySelector('.st-key-ki_task_overlay');
+      var hasOverlay = !!document.querySelector('.st-key-ai_task_overlay');
       var isRunning = !!document.querySelector('[data-testid="stStatusWidgetRunningIcon"], [data-test-script-state="running"]');
       if (!hasOverlay && (Date.now() - startedAt) > 180000) {
         releaseBackdrop();
@@ -89,8 +89,8 @@ def run_with_task_overlay(
     backdrop_slot = st.empty()
     overlay_slot = st.empty()
     try:
-        backdrop_slot.markdown('<div class="ki-task-backdrop" aria-hidden="true"></div>', unsafe_allow_html=True)
-        with overlay_slot.container(key="ki_task_overlay"):
+        backdrop_slot.markdown('<div class="ai-task-backdrop" aria-hidden="true"></div>', unsafe_allow_html=True)
+        with overlay_slot.container(key="ai_task_overlay"):
             st.markdown(f"#### {title}")
             status_slot = st.empty()
             progress_bar = st.progress(0.05, text=initial_text)

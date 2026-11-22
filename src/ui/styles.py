@@ -19,21 +19,21 @@ div[data-testid="stMetric"] {
 }
 div[data-testid="stMetric"] [data-testid="stMetricValue"] { font-size: 1.45rem !important; }
 
-/* Kompakte KPI-Kacheln (Dashboard & KI-Brain) */
+/* Kompakte KPI-Kacheln (Dashboard & AI-Brain) */
 .st-key-overview_kpi_row div[data-testid="stMetric"],
-.st-key-ki_kpi_row div[data-testid="stMetric"] {
+.st-key-ai_kpi_row div[data-testid="stMetric"] {
     padding: 5px 10px !important;
     border-radius: 9px !important;
     min-height: 0 !important;
 }
 .st-key-overview_kpi_row div[data-testid="stMetric"] [data-testid="stMetricLabel"] p,
-.st-key-ki_kpi_row div[data-testid="stMetric"] [data-testid="stMetricLabel"] p {
+.st-key-ai_kpi_row div[data-testid="stMetric"] [data-testid="stMetricLabel"] p {
     font-size: 0.74rem !important;
     line-height: 1.15 !important;
     white-space: nowrap !important;
 }
 .st-key-overview_kpi_row div[data-testid="stMetric"] [data-testid="stMetricValue"],
-.st-key-ki_kpi_row div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+.st-key-ai_kpi_row div[data-testid="stMetric"] [data-testid="stMetricValue"] {
     font-size: 1.08rem !important;
     line-height: 1.2 !important;
 }
@@ -147,9 +147,9 @@ section[data-testid="stSidebar"] [class*="st-key-nav_page_"] div[data-testid="st
         padding-top: 2rem;
         padding-bottom: 1.5rem;
     }
-    /* Dashboard & KI-Brain KPIs sowie Check All / Wake All bleiben mobil nebeneinander */
+    /* Dashboard & AI-Brain KPIs sowie Check All / Wake All bleiben mobil nebeneinander */
     .st-key-overview_kpi_row div[data-testid="stHorizontalBlock"],
-    .st-key-ki_kpi_row div[data-testid="stHorizontalBlock"],
+    .st-key-ai_kpi_row div[data-testid="stHorizontalBlock"],
     .st-key-overview_action_row div[data-testid="stHorizontalBlock"] {
         display: flex !important;
         flex-direction: row !important;
@@ -157,7 +157,7 @@ section[data-testid="stSidebar"] [class*="st-key-nav_page_"] div[data-testid="st
         gap: 0.45rem !important;
     }
     .st-key-overview_kpi_row :is([data-testid="stColumn"], [data-testid="column"]),
-    .st-key-ki_kpi_row :is([data-testid="stColumn"], [data-testid="column"]),
+    .st-key-ai_kpi_row :is([data-testid="stColumn"], [data-testid="column"]),
     .st-key-overview_action_row :is([data-testid="stColumn"], [data-testid="column"]) {
         width: auto !important;
         min-width: 0 !important;
@@ -166,22 +166,22 @@ section[data-testid="stSidebar"] [class*="st-key-nav_page_"] div[data-testid="st
         flex-basis: 0 !important;
     }
     .st-key-overview_kpi_row div[data-testid="stMetric"],
-    .st-key-ki_kpi_row div[data-testid="stMetric"] {
+    .st-key-ai_kpi_row div[data-testid="stMetric"] {
         padding: 4px 6px !important;
         border-radius: 8px !important;
     }
     .st-key-overview_kpi_row div[data-testid="stMetric"] [data-testid="stMetricLabel"],
-    .st-key-ki_kpi_row div[data-testid="stMetric"] [data-testid="stMetricLabel"] {
+    .st-key-ai_kpi_row div[data-testid="stMetric"] [data-testid="stMetricLabel"] {
         min-height: 0 !important;
     }
     .st-key-overview_kpi_row div[data-testid="stMetric"] [data-testid="stMetricLabel"] p,
-    .st-key-ki_kpi_row div[data-testid="stMetric"] [data-testid="stMetricLabel"] p {
+    .st-key-ai_kpi_row div[data-testid="stMetric"] [data-testid="stMetricLabel"] p {
         font-size: 0.66rem !important;
         overflow: hidden !important;
         text-overflow: ellipsis !important;
     }
     .st-key-overview_kpi_row div[data-testid="stMetric"] [data-testid="stMetricValue"],
-    .st-key-ki_kpi_row div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+    .st-key-ai_kpi_row div[data-testid="stMetric"] [data-testid="stMetricValue"] {
         font-size: 0.94rem !important;
     }
     .st-key-overview_action_row div[data-testid="stButton"] > button {
@@ -211,28 +211,28 @@ div[data-testid="stElementContainer"]:has(.bot-dash-health-marker)
 div[data-testid="stElementContainer"]:has(:is(.bot-dash-health-marker, .bot-dash-auth-bridge)) {
     display: none !important; margin: 0 !important; padding: 0 !important; height: 0 !important;
 }
-div[data-testid="stElementContainer"]:has(:is(.ki-task-backdrop, #ki-brain-instant-backdrop)) {
+div[data-testid="stElementContainer"]:has(:is(.ai-task-backdrop, #ai-brain-instant-backdrop)) {
     height: 0 !important; margin: 0 !important; padding: 0 !important;
 }
 
 /* Task-Overlay: blockierter Hintergrund + lesbare Fortschritts-Box im Vordergrund */
-.ki-task-backdrop,
-#ki-brain-instant-backdrop.active {
+.ai-task-backdrop,
+#ai-brain-instant-backdrop.active {
     position: fixed; inset: 0; width: 100vw; height: 100vh;
     background-color: rgba(15, 23, 42, 0.74);
     backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px);
     pointer-events: all; cursor: wait;
 }
-.ki-task-backdrop { z-index: 999990; }
-#ki-brain-instant-backdrop { display: none; z-index: 999985; align-items: center; justify-content: center; }
-#ki-brain-instant-backdrop.active { display: flex; }
-body:has(.st-key-ki_task_overlay) #ki-brain-instant-backdrop .ki-instant-card { display: none; }
-.ki-instant-card {
+.ai-task-backdrop { z-index: 999990; }
+#ai-brain-instant-backdrop { display: none; z-index: 999985; align-items: center; justify-content: center; }
+#ai-brain-instant-backdrop.active { display: flex; }
+body:has(.st-key-ai_task_overlay) #ai-brain-instant-backdrop .ai-instant-card { display: none; }
+.ai-instant-card {
     width: min(500px, 90vw); background: rgba(15, 23, 42, 0.96); color: #e2e8f0;
     border: 1px solid rgba(56, 189, 248, 0.45); border-radius: 14px; padding: 1.1rem 1.35rem;
     box-shadow: 0 24px 64px rgba(0, 0, 0, 0.7);
 }
-.st-key-ki_task_overlay {
+.st-key-ai_task_overlay {
     position: fixed !important; top: 50% !important; left: 50% !important;
     transform: translate(-50%, -50%) !important; width: min(560px, 92vw) !important; z-index: 1000001 !important;
     background: rgba(15, 23, 42, 0.96) !important; border: 1px solid rgba(56, 189, 248, 0.45) !important;

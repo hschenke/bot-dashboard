@@ -1,0 +1,1322 @@
+"""Hauptfassade des wiederverwendbaren AI & Websearch Brain Frameworks."""
+
+from __future__ import annotations
+
+import datetime
+import logging
+import os
+import re
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, TypeVar
+
+import yaml
+from pydantic import BaseModel
+
+from ai_brain.access import (
+    INTERNAL_DASHBOARD_APP,
+    FleetAccessStatus,
+    authorize_fleet_client,
+    build_fleet_access_status,
+    generate_fleet_access_secret,
+)
+from ai_brain.benchmark import BrainBenchmarkRunner
+from ai_brain.connection import encode_connection_key, resolve_connection_config
+from ai_brain.discovery import DiscoverySummary, auto_sync_catalog
+from ai_brain.enums import BrainTier, ProbeStatus, ToolCategory
+from ai_brain.exceptions import BrainAuthError, BrainValidationError
+from ai_brain.execution import (
+    execute_tiered_ask,
+    execute_tiered_fetch_page,
+    execute_tiered_search,
+    execute_tiered_structured,
+    execute_tiered_text,
+)
+from ai_brain.llm_runner import UnifiedLLMRunner
+from ai_brain.models import (
+    AIModelSpec,
+    AppBrainPolicy,
+    BenchmarkEntry,
+    BenchmarkReport,
+    BrainAccessLogEntry,
+    BrainConfigSnapshot,
+    BrainFetchedPage,
+    BrainGenerationResult,
+    BrainSearchResult,
+    BrainSecrets,
+    SecretStatusEntry,
+    TierSequenceConfig,
+    ToolSpec,
+    derive_tier_key_envs,
+)
+from ai_brain.optimizer import DEFAULT_TEST_QUERY, DEFAULT_TEST_URL, optimize_tier_sequences
+from ai_brain.rate_limiter import LlmRateLimiter, get_global_rate_limiter
+from ai_brain.secrets_vault import encrypt_secret_value, validate_secret_env_name
+from ai_brain.security import validate_safe_external_url
+from ai_brain.storage import BrainRepository, create_brain_repository
+from ai_brain.telemetry import (
+    build_access_log_entry,
+    detect_caller_app,
+    detect_runtime_environment,
+    normalize_caller_label,
+    sanitize_url_for_log,
+)
+from ai_brain.unblock import UnblockSummary
+from ai_brain.unblock import resolve_blocked_tools as _resolve_blocked_tools_impl
+
+logger = logging.getLogger(__name__)
+ModelT = TypeVar("ModelT", bound=BaseModel)
+
+_DEFAULT_AI_SECRET_SPECS: tuple[tuple[str, str], ...] = (
+    ("GEMINI_FREE_API_KEY", "free"),
+    ("GEMINI_PAID_API_KEY", "paid"),
+    ("GEMINI_API_KEY", "legacy"),
+    ("GROQ_API_KEY", "free"),
+    ("GROQ_PAID_API_KEY", "paid"),
+    ("OPENROUTER_API_KEY", "free"),
+    ("OPENROUTER_PAID_API_KEY", "paid"),
+    ("CEREBRAS_API_KEY", "free"),
+    ("MISTRAL_API_KEY", "free"),
+)
+_KNOWN_TOOL_SECRET_ORDER: tuple[str, ...] = (
+    "TAVILY_API_KEY",
+    "SERPER_API_KEY",
+    "BROWSERBASE_API_KEY",
+)
+_DEFAULT_AI_SECRET_NAMES: tuple[str, ...] = tuple(name for name, _ in _DEFAULT_AI_SECRET_SPECS)
+_AI_SECRET_TIERS: dict[str, str] = dict(_DEFAULT_AI_SECRET_SPECS)
+_HTTP_202_RE = re.compile(r"(?:(?:http|status)\s*202\b|\b202\s*\(anti-bot)", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class PipelineSummary:
+    """Konsolidiertes Ergebnis des vereinten AI-Brain-Ablaufs (Discover → Benchmark → Unblock → Prune)."""
+
+    executed_steps: tuple[str, ...] = ()
+    discovery: DiscoverySummary | None = None
+    benchmark: BenchmarkReport | None = None
+    unblock: UnblockSummary | None = None
+    pruned_models: tuple[tuple[str, ProbeStatus], ...] = ()
+    pruned_tools: tuple[tuple[str, ProbeStatus], ...] = ()
+    warnings: tuple[str, ...] = ()
+
+
+def _should_clean_item(status: ProbeStatus, last_error: str, bad: set[ProbeStatus], include_http_202: bool) -> bool:
+    if status in bad:
+        return True
+    return include_http_202 and status == ProbeStatus.BLOCKED and bool(_HTTP_202_RE.search(last_error or ""))
+
+
+def _model_matches_secret_env(model: AIModelSpec, clean_env: str) -> bool:
+    if not model.requires_api_key:
+        return False
+    free_envs, paid_envs = derive_tier_key_envs(model.api_key_env, model.paid_api_key_env)
+    return clean_env in free_envs or clean_env in paid_envs
+
+
+def _tool_matches_secret_env(tool: ToolSpec, clean_env: str) -> bool:
+    if not tool.requires_api_key:
+        return False
+    t_env = tool.api_key_env.strip().upper()
+    if t_env == clean_env:
+        return True
+    return t_env == "GEMINI_API_KEY" and clean_env in {"GEMINI_FREE_API_KEY", "GEMINI_PAID_API_KEY"}
+
+
+def _classify_secret_env(
+    env_name: str, models_list: list[AIModelSpec], tools_list: list[ToolSpec]
+) -> tuple[str, str]:
+    if env_name in _AI_SECRET_TIERS:
+        return "ai", _AI_SECRET_TIERS[env_name]
+    if env_name in _KNOWN_TOOL_SECRET_ORDER:
+        return "tool", "tool"
+    if any(_model_matches_secret_env(m, env_name) for m in models_list):
+        tier = "paid" if env_name.endswith("_PAID_API_KEY") else "free"
+        return "ai", tier
+    if any(_tool_matches_secret_env(t, env_name) for t in tools_list):
+        return "tool", "tool"
+    if env_name.endswith("_PAID_API_KEY"):
+        return "ai", "paid"
+    if env_name.endswith("_FREE_API_KEY"):
+        return "ai", "free"
+    return "tool", "tool"
+
+
+class AIWebsearchBrain:
+    """Zentrale, dynamische Schaltzentrale für kostenfreie AI-Modelle & Websearch-Tools."""
+
+    def __init__(
+        self,
+        repository: BrainRepository,
+        secrets: BrainSecrets | None = None,
+        *,
+        fleet_secret: bytes = b"",
+        caller: str = "",
+        genai_client: Any = None,
+        rate_limiter: LlmRateLimiter | None = None,
+        vault_passphrase: str = "",
+        explicit_vault_key: str = "",
+        _internal_admin: bool = False,
+    ) -> None:
+        self._repo = repository
+        self._caller_app = detect_caller_app(explicit_caller=caller, is_admin=_internal_admin)
+        self._environment = detect_runtime_environment()
+        if _internal_admin:
+            self._client_app_id = INTERNAL_DASHBOARD_APP
+            self._is_admin_client = True
+        else:
+            try:
+                self._client_app_id = authorize_fleet_client(repository, fleet_secret)
+            except BrainAuthError as exc:
+                self._record_access(action="auth", status="Failed", summary=str(exc))
+                raise
+            self._is_admin_client = False
+        self._vault_passphrase = vault_passphrase.strip()
+        self._explicit_vault_key = explicit_vault_key.strip()
+        self._base_secrets = secrets or BrainSecrets.from_env()
+        self._secrets = self._base_secrets.with_extra_keys(
+            self._repo.load_decrypted_secrets(passphrase=self._vault_passphrase)
+        )
+        self._genai_client = genai_client
+        self._rate_limiter = rate_limiter or get_global_rate_limiter()
+        self._runner = UnifiedLLMRunner(
+            self._secrets, genai_client=genai_client, rate_limiter=self._rate_limiter
+        )
+
+    @classmethod
+    def for_dashboard(
+        cls,
+        repository: BrainRepository,
+        secrets: BrainSecrets | None = None,
+        *,
+        genai_client: Any = None,
+        rate_limiter: LlmRateLimiter | None = None,
+        vault_passphrase: str = "",
+        explicit_vault_key: str = "",
+    ) -> AIWebsearchBrain:
+        """Erstellt die interne Admin-Instanz für das authentifizierte Holli Dashboard."""
+        return cls(
+            repository=repository,
+            secrets=secrets,
+            genai_client=genai_client,
+            rate_limiter=rate_limiter,
+            vault_passphrase=vault_passphrase,
+            explicit_vault_key=explicit_vault_key,
+            _internal_admin=True,
+        )
+
+    @classmethod
+    def connect(
+        cls,
+        connection_key: str = "",
+        *,
+        caller: str = "",
+        sqlite_path: str | Path = "data/ai_brain.db",
+        base_dir: Path | None = None,
+        secrets: BrainSecrets | None = None,
+    ) -> AIWebsearchBrain:
+        """Plug-&-Play-Verbindung für News-Bot, Research-Bot & Alert-Bot (1 Secret: `AI_BRAIN_KEY`)."""
+        cfg = resolve_connection_config(connection_key=connection_key, base_dir=base_dir)
+        repo = create_brain_repository(
+            turso_url=cfg.turso_url,
+            turso_auth_token=cfg.turso_auth_token,
+            sqlite_path=sqlite_path,
+            base_dir=base_dir,
+        )
+        try:
+            return cls(
+                repository=repo,
+                secrets=secrets or BrainSecrets.from_env(),
+                fleet_secret=cfg.fleet_secret,
+                caller=caller,
+                vault_passphrase=cfg.effective_vault_passphrase,
+            )
+        except Exception:
+            repo.close()
+            raise
+
+    @classmethod
+    def from_env(
+        cls,
+        *,
+        connection_key: str = "",
+        caller: str = "",
+        sqlite_path: str | Path = "data/ai_brain.db",
+        base_dir: Path | None = None,
+        secrets: BrainSecrets | None = None,
+    ) -> AIWebsearchBrain:
+        """Alias für `AIWebsearchBrain.connect()`."""
+        return cls.connect(
+            connection_key=connection_key,
+            caller=caller,
+            sqlite_path=sqlite_path,
+            base_dir=base_dir,
+            secrets=secrets,
+        )
+
+    @property
+    def repository(self) -> BrainRepository:
+        return self._repo
+
+    @property
+    def backend_name(self) -> str:
+        return self._repo.backend_name
+
+    @property
+    def client_app_id(self) -> str:
+        return self._client_app_id
+
+    @property
+    def is_admin_client(self) -> bool:
+        return self._is_admin_client
+
+    def _require_admin(self) -> None:
+        if not self._is_admin_client:
+            raise BrainAuthError(
+                f"Zugriff verweigert: App '{self._client_app_id}' besitzt keine Admin-Rechte für diese Vault-Aktion."
+            )
+
+    # --- Dynamische Verwaltung von Modellen, Tools & Sequenzen ---
+    def list_models(self, enabled_only: bool = False) -> list[AIModelSpec]:
+        return self._repo.list_models(enabled_only=enabled_only)
+
+    def get_model(self, model_id: str) -> AIModelSpec | None:
+        return self._repo.get_model(model_id)
+
+    def add_or_update_model(self, spec: AIModelSpec) -> AIModelSpec:
+        if spec.base_url.strip():
+            validate_safe_external_url(spec.base_url.strip(), resolve_dns=False)
+        saved = self._repo.upsert_model(spec)
+        self._repo.remove_excluded_id(model_id=saved.id)
+        return saved
+
+    def set_model_enabled(self, model_id: str, enabled: bool) -> AIModelSpec | None:
+        current = self._repo.get_model(model_id)
+        return self._repo.upsert_model(current.model_copy(update={"enabled": enabled})) if current else None
+
+    def _prune_ids_from_sequences(
+        self, *, model_ids: set[str] | None = None, tool_ids: set[str] | None = None
+    ) -> None:
+        from ai_brain.optimizer import _format_rationale
+
+        drop_m = model_ids or set()
+        drop_t = tool_ids or set()
+        if not drop_m and not drop_t:
+            return
+        all_models = self._repo.list_models()
+        all_tools = self._repo.list_tools()
+        deep_ids = {m.id for m in all_models if m.is_deep_agent}
+        usage_state = self._repo.load_usage_quotas()
+        for seq in self._repo.list_sequences().values():
+            new_s = [tid for tid in seq.search_tool_sequence if tid not in drop_t]
+            new_e = [tid for tid in seq.extractor_tool_sequence if tid not in drop_t]
+            new_m = [mid for mid in seq.model_sequence if mid not in drop_m]
+            new_ps = [tid for tid in seq.paid_search_tool_sequence if tid not in drop_t]
+            new_pe = [tid for tid in seq.paid_extractor_tool_sequence if tid not in drop_t]
+            new_pm = [mid for mid in seq.paid_model_sequence if mid not in drop_m]
+            new_use_deep = seq.tier == BrainTier.DEEP and any(mid in deep_ids for mid in new_m)
+            new_paid_deep = seq.tier == BrainTier.DEEP and any(mid in deep_ids for mid in new_pm)
+            rationale_stale = any(
+                dropped in (seq.optimization_rationale or "") for dropped in (*drop_m, *drop_t)
+            )
+            if (
+                new_s != seq.search_tool_sequence
+                or new_e != seq.extractor_tool_sequence
+                or new_m != seq.model_sequence
+                or new_ps != seq.paid_search_tool_sequence
+                or new_pe != seq.paid_extractor_tool_sequence
+                or new_pm != seq.paid_model_sequence
+                or new_use_deep != seq.use_deep_agent
+                or new_paid_deep != seq.paid_use_deep_agent
+                or rationale_stale
+            ):
+                new_rationale = (
+                    seq.optimization_rationale
+                    if seq.manual_override and not rationale_stale
+                    else _format_rationale(seq.tier, new_s, new_m, all_tools, all_models, usage_state)
+                )
+                self._repo.upsert_sequence(
+                    seq.model_copy(
+                        update={
+                            "search_tool_sequence": new_s,
+                            "extractor_tool_sequence": new_e,
+                            "model_sequence": new_m,
+                            "paid_search_tool_sequence": new_ps,
+                            "paid_extractor_tool_sequence": new_pe,
+                            "paid_model_sequence": new_pm,
+                            "use_deep_agent": new_use_deep,
+                            "paid_use_deep_agent": new_paid_deep,
+                            "optimization_rationale": new_rationale,
+                        }
+                    )
+                )
+
+    def remove_model(self, model_id: str) -> bool:
+        removed = self._repo.delete_model(model_id)
+        if removed:
+            self._repo.add_excluded_ids(model_ids=[model_id], reason="manual")
+            self._prune_ids_from_sequences(model_ids={model_id.strip().lower()})
+        return removed
+
+    def list_tools(self, enabled_only: bool = False) -> list[ToolSpec]:
+        return self._repo.list_tools(enabled_only=enabled_only)
+
+    def get_tool(self, tool_id: str) -> ToolSpec | None:
+        return self._repo.get_tool(tool_id)
+
+    def add_or_update_tool(self, spec: ToolSpec) -> ToolSpec:
+        if spec.endpoint_url.strip():
+            validate_safe_external_url(spec.endpoint_url.strip(), resolve_dns=False)
+        saved = self._repo.upsert_tool(spec)
+        self._repo.remove_excluded_id(tool_id=saved.id)
+        return saved
+
+    def set_tool_enabled(self, tool_id: str, enabled: bool) -> ToolSpec | None:
+        current = self._repo.get_tool(tool_id)
+        return self._repo.upsert_tool(current.model_copy(update={"enabled": enabled})) if current else None
+
+    def remove_tool(self, tool_id: str) -> bool:
+        removed = self._repo.delete_tool(tool_id)
+        if removed:
+            self._repo.add_excluded_ids(tool_ids=[tool_id], reason="manual")
+            self._prune_ids_from_sequences(tool_ids={tool_id.strip().lower()})
+        return removed
+
+    def list_sequences(self) -> dict[BrainTier, TierSequenceConfig]:
+        return self._repo.list_sequences()
+
+    def get_sequence(self, tier: BrainTier | str) -> TierSequenceConfig:
+        return self._repo.get_sequence(tier)
+
+    def update_sequence(self, config: TierSequenceConfig) -> TierSequenceConfig:
+        return self._repo.upsert_sequence(config)
+
+    def reset_defaults(self) -> None:
+        self._repo.reset_to_defaults()
+
+    def load_usage_quotas(self) -> dict[str, dict[str, dict[str, Any]]]:
+        """Liefert den periodenbasierten Free-Kontingent-Verbrauch (Monat/Tag/Lifetime)."""
+        return self._repo.load_usage_quotas()
+
+    def reset_usage_quotas(self) -> None:
+        """Setzt gespeicherte Verbrauchs-Zähler der Free-Kontingente zurück."""
+        self._repo.reset_usage_quotas()
+
+    def cleanup_unhealthy_items_with_status(
+        self,
+        statuses: tuple[ProbeStatus, ...] = (
+            ProbeStatus.ERROR,
+            ProbeStatus.QUOTA_LIMITED,
+        ),
+        *,
+        include_http_202: bool = True,
+    ) -> tuple[list[tuple[str, ProbeStatus]], list[tuple[str, ProbeStatus]]]:
+        """Entfernt Modelle & Tools mit `Error`, `Quota 429` oder `HTTP 202` dauerhaft; übrige `Blocked` bleiben erhalten."""
+        bad = set(statuses)
+        removed_models = [
+            (m.id, m.last_status)
+            for m in self._repo.list_models()
+            if _should_clean_item(m.last_status, m.last_error, bad, include_http_202) and self._repo.delete_model(m.id)
+        ]
+        removed_tools = [
+            (t.id, t.last_status)
+            for t in self._repo.list_tools()
+            if _should_clean_item(t.last_status, t.last_error, bad, include_http_202) and self._repo.delete_tool(t.id)
+        ]
+        if removed_models or removed_tools:
+            rem_m_ids = [mid for mid, _ in removed_models]
+            rem_t_ids = [tid for tid, _ in removed_tools]
+            model_reasons = {
+                mid: ("quota_limited" if st == ProbeStatus.QUOTA_LIMITED else "error")
+                for mid, st in removed_models
+            }
+            tool_reasons = {
+                tid: ("quota_limited" if st == ProbeStatus.QUOTA_LIMITED else "error")
+                for tid, st in removed_tools
+            }
+            self._repo.add_excluded_ids(
+                model_ids=rem_m_ids,
+                tool_ids=rem_t_ids,
+                model_reasons=model_reasons,
+                tool_reasons=tool_reasons,
+            )
+            self._prune_ids_from_sequences(model_ids=set(rem_m_ids), tool_ids=set(rem_t_ids))
+            seqs = optimize_tier_sequences(
+                self._repo.list_models(),
+                self._repo.list_tools(),
+                self._repo.list_sequences(),
+                force_overwrite=False,
+                usage_state=self._repo.load_usage_quotas(),
+            )
+            for seq in seqs.values():
+                self._repo.upsert_sequence(seq)
+        return removed_models, removed_tools
+
+    def cleanup_unhealthy_items(
+        self,
+        statuses: tuple[ProbeStatus, ...] = (
+            ProbeStatus.ERROR,
+            ProbeStatus.QUOTA_LIMITED,
+        ),
+        *,
+        include_http_202: bool = True,
+    ) -> tuple[list[str], list[str]]:
+        """Entfernt Modelle & Tools mit `Error`, `Quota 429` oder `HTTP 202` dauerhaft; übrige `Blocked` bleiben erhalten."""
+        rem_m, rem_t = self.cleanup_unhealthy_items_with_status(statuses=statuses, include_http_202=include_http_202)
+        return [mid for mid, _ in rem_m], [tid for tid, _ in rem_t]
+
+    def resolve_blocked_tools(
+        self,
+        *,
+        test_query: str = DEFAULT_TEST_QUERY,
+        test_url: str = DEFAULT_TEST_URL,
+        on_progress: Callable[[float, str], None] | None = None,
+    ) -> UnblockSummary:
+        """Wendet Rules, searx.space-Pool & Endpoint-Fallbacks auf `Blocked`-Tools an und testet live nach."""
+        return _resolve_blocked_tools_impl(
+            self._repo,
+            self._secrets,
+            self._runner,
+            test_query=test_query,
+            test_url=test_url,
+            on_progress=on_progress,
+        )
+
+    # --- Write-Only Secret-Management (wie GitHub Secrets) ---
+    def _refresh_runtime_secrets(self) -> None:
+        self._secrets = self._base_secrets.with_extra_keys(
+            self._repo.load_decrypted_secrets(passphrase=self._vault_passphrase)
+        )
+        self._runner = UnifiedLLMRunner(
+            self._secrets, genai_client=self._genai_client, rate_limiter=self._rate_limiter
+        )
+
+    def _reset_items_for_secret(
+        self, clean_name: str, from_statuses: set[ProbeStatus], target_status: ProbeStatus, error_msg: str = ""
+    ) -> None:
+        is_paid_key = clean_name.endswith("_PAID_API_KEY")
+        models_to_save: list[AIModelSpec] = []
+        for m in self._repo.list_models():
+            if not _model_matches_secret_env(m, clean_name):
+                continue
+            if is_paid_key and m.is_free and self._secrets.has_model_key(m, allow_paid=False):
+                continue
+            if m.last_status in from_statuses:
+                models_to_save.append(m.model_copy(update={"last_status": target_status, "last_error": error_msg}))
+        tools_to_save: list[ToolSpec] = [
+            t.model_copy(update={"last_status": target_status, "last_error": error_msg})
+            for t in self._repo.list_tools()
+            if _tool_matches_secret_env(t, clean_name) and t.last_status in from_statuses
+        ]
+        self._repo.upsert_models_batch(models_to_save)
+        self._repo.upsert_tools_batch(tools_to_save)
+
+    def set_secret(self, env_name: str, new_secret_value: str) -> str:
+        """Speichert oder überschreibt ein Secret komplett verschlüsselt (Write-Only) und entsperrt Key-/Quota-Einträge."""
+        self._require_admin()
+        clean_name = validate_secret_env_name(env_name)
+        encrypted = encrypt_secret_value(new_secret_value, passphrase=self._vault_passphrase)
+        updated_at = self._repo.upsert_encrypted_secret(clean_name, encrypted)
+        self._refresh_runtime_secrets()
+        self._reset_items_for_secret(
+            clean_name,
+            {ProbeStatus.AUTH_MISSING, ProbeStatus.QUOTA_LIMITED, ProbeStatus.ERROR},
+            ProbeStatus.UNTESTED,
+        )
+        return updated_at
+
+    def delete_secret(self, env_name: str) -> bool:
+        """Entfernt ein im Brain-Vault gespeichertes Secret und aktualisiert abhängige Statuswerte."""
+        self._require_admin()
+        clean_name = validate_secret_env_name(env_name)
+        removed = self._repo.delete_encrypted_secret(clean_name)
+        self._refresh_runtime_secrets()
+        if removed:
+            models_to_save: list[AIModelSpec] = []
+            for m in self._repo.list_models():
+                if not _model_matches_secret_env(m, clean_name):
+                    continue
+                has_key = self._secrets.has_model_key(m, allow_paid=not m.is_free)
+                if has_key and m.last_status in {ProbeStatus.OK, ProbeStatus.QUOTA_LIMITED, ProbeStatus.ERROR, ProbeStatus.AUTH_MISSING}:
+                    models_to_save.append(m.model_copy(update={"last_status": ProbeStatus.UNTESTED, "last_error": ""}))
+                elif not has_key and m.last_status in {ProbeStatus.OK, ProbeStatus.QUOTA_LIMITED, ProbeStatus.ERROR, ProbeStatus.UNTESTED}:
+                    models_to_save.append(
+                        m.model_copy(update={"last_status": ProbeStatus.AUTH_MISSING, "last_error": f"Key {clean_name} fehlt."})
+                    )
+            tools_to_save: list[ToolSpec] = []
+            for t in self._repo.list_tools():
+                if not _tool_matches_secret_env(t, clean_name):
+                    continue
+                has_key = self._secrets.has_tool_key(t, allow_paid=False)
+                if has_key and t.last_status in {ProbeStatus.OK, ProbeStatus.QUOTA_LIMITED, ProbeStatus.ERROR, ProbeStatus.AUTH_MISSING}:
+                    tools_to_save.append(t.model_copy(update={"last_status": ProbeStatus.UNTESTED, "last_error": ""}))
+                elif not has_key and t.last_status in {ProbeStatus.OK, ProbeStatus.QUOTA_LIMITED, ProbeStatus.ERROR, ProbeStatus.UNTESTED}:
+                    tools_to_save.append(
+                        t.model_copy(update={"last_status": ProbeStatus.AUTH_MISSING, "last_error": f"Key {clean_name} fehlt."})
+                    )
+            self._repo.upsert_models_batch(models_to_save)
+            self._repo.upsert_tools_batch(tools_to_save)
+        return removed
+
+    # --- Einheitlicher Flotten-Zugriff (1 kompakter AI_BRAIN_KEY für alle 3 Apps) ---
+    def get_fleet_access_status(
+        self, *, client_record: dict[str, Any] | None = None
+    ) -> FleetAccessStatus:
+        """Liefert den sicheren Zugriffsstatus des gemeinsamen Flotten-Keys."""
+        rec = client_record if client_record is not None else self._repo.get_fleet_client_record()
+        return build_fleet_access_status(rec)
+
+    def issue_fleet_key(self) -> tuple[str, bool]:
+        """Erzeugt/rotiert den kompakten 1-Secret `AI_BRAIN_KEY` für alle 3 Apps (`(key, has_turso)`)."""
+        self._require_admin()
+        raw_secret, token_hash = generate_fleet_access_secret()
+        self._repo.upsert_fleet_client(token_hash, enabled=True)
+        turso_url, turso_token = self._repo.get_turso_connection_credentials()
+        explicit_vault_key = self._explicit_vault_key or os.getenv("BRAIN_SECRET_KEY", "").strip()
+        connection_key = encode_connection_key(
+            raw_secret,
+            turso_url=turso_url,
+            turso_auth_token=turso_token,
+            vault_passphrase=explicit_vault_key,
+        )
+        return connection_key, bool(turso_url and turso_token)
+
+    def set_fleet_enabled(self, enabled: bool) -> bool:
+        """Aktiviert oder sperrt den gemeinsamen Flotten-Key für alle 3 Apps sofort."""
+        self._require_admin()
+        return self._repo.set_fleet_client_enabled(enabled)
+
+    def revoke_fleet_key(self) -> bool:
+        """Widerruft den gemeinsamen Flotten-Key sofort."""
+        self._require_admin()
+        return self._repo.revoke_fleet_client()
+
+    @staticmethod
+    def _select_quick_verify_model(models: list[AIModelSpec]) -> AIModelSpec:
+        def _rank(m: AIModelSpec) -> tuple[bool, int, int, float, str]:
+            mid = m.model_id.lower()
+            tier_rank = 0 if "lite" in mid else (1 if "flash" in mid else 2)
+            lat = m.last_latency_ms if m.last_latency_ms > 0 else 999_999
+            return (m.is_deep_agent, tier_rank, lat, -m.quality_score, m.id)
+
+        return min(models, key=_rank)
+
+    def _merge_entries_into_latest_benchmark(
+        self,
+        entries: list[BenchmarkEntry],
+        updated_seqs: dict[BrainTier, TierSequenceConfig],
+    ) -> None:
+        latest = self._repo.get_latest_benchmark()
+        if latest is None or not entries:
+            return
+        by_key = {(e.item_type, e.item_id): e for e in latest.entries}
+        for new_entry in entries:
+            by_key[(new_entry.item_type, new_entry.item_id)] = new_entry
+        merged = list(by_key.values())
+        refreshed = latest.model_copy(
+            update={
+                "entries": merged,
+                "sequences": {t.value: cfg for t, cfg in updated_seqs.items()},
+                "healthy_tools_count": sum(1 for e in merged if e.item_type == "tool" and e.status == ProbeStatus.OK),
+                "healthy_models_count": sum(1 for e in merged if e.item_type == "model" and e.status == ProbeStatus.OK),
+            }
+        )
+        self._repo.save_benchmark_run(refreshed)
+
+    def probe_single_tool(
+        self,
+        tool_id: str,
+        *,
+        test_query: str = DEFAULT_TEST_QUERY,
+        test_url: str = DEFAULT_TEST_URL,
+    ) -> BenchmarkEntry:
+        """Testet gezielt genau ein Tool live (inkl. Kontingent-Tools, ohne Paid-Key-Routing)."""
+        from ai_brain.quotas import select_grounding_model
+
+        tool = self._repo.get_tool(tool_id)
+        if tool is None:
+            raise BrainValidationError(f"Tool '{tool_id}' nicht gefunden.")
+        self._refresh_runtime_secrets()
+        bench = BrainBenchmarkRunner(self._repo, self._secrets, self._runner)
+        usage_state = self._repo.load_usage_quotas()
+        g_model = (
+            select_grounding_model(
+                self._repo.list_models(enabled_only=True),
+                self._secrets,
+                executor_type=tool.executor_type,
+                allow_paid=False,
+            )
+            if tool.category == ToolCategory.AI_GROUNDING
+            else None
+        )
+        ut, entry = bench.probe_tool(
+            tool,
+            test_query=test_query,
+            test_url=test_url,
+            grounding_model=g_model,
+            usage_state=usage_state,
+            include_paid=False,
+            include_quota_tools=True,
+        )
+        if ut != tool:
+            self._repo.upsert_tool(ut)
+        updated_seqs = self._repo.list_sequences()
+        if ut.last_status != tool.last_status or entry.status == ProbeStatus.OK:
+            seqs = optimize_tier_sequences(
+                self._repo.list_models(),
+                self._repo.list_tools(),
+                updated_seqs,
+                force_overwrite=False,
+                usage_state=self._repo.load_usage_quotas(),
+            )
+            updated_seqs = {t: self._repo.upsert_sequence(seq) for t, seq in seqs.items()}
+        self._merge_entries_into_latest_benchmark([entry], updated_seqs)
+        return entry
+
+    def probe_items_for_secret(self, env_name: str, *, quick_verify: bool = False) -> list[BenchmarkEntry]:
+        """Testet zu einem Secret gehörende Modelle/Tools live (`quick_verify=True` prüft 1 schnelles Referenzmodell)."""
+        from ai_brain.quotas import select_grounding_model
+
+        clean_name = validate_secret_env_name(env_name)
+        is_paid_key = clean_name.endswith("_PAID_API_KEY")
+        self._refresh_runtime_secrets()
+        bench = BrainBenchmarkRunner(self._repo, self._secrets, self._runner)
+        usage_state = self._repo.load_usage_quotas()
+        entries: list[BenchmarkEntry] = []
+
+        target_models = [
+            m
+            for m in self._repo.list_models(enabled_only=True)
+            if _model_matches_secret_env(m, clean_name) and (is_paid_key or m.is_free)
+        ]
+        if quick_verify and target_models:
+            target_models = [self._select_quick_verify_model(target_models)]
+
+        probe_timeout = 25.0 if quick_verify else 30.0
+        for model in target_models:
+            um, entry = bench.probe_model(
+                model,
+                usage_state=usage_state,
+                include_paid=is_paid_key,
+                force_paid_key=is_paid_key,
+                timeout_seconds=probe_timeout,
+            )
+            if um != model:
+                self._repo.upsert_model(um)
+            entries.append(entry)
+
+        target_tools = (
+            []
+            if (quick_verify and target_models)
+            else [t for t in self._repo.list_tools(enabled_only=True) if _tool_matches_secret_env(t, clean_name)]
+        )
+        if target_tools:
+            all_models = self._repo.list_models(enabled_only=True)
+            for tool in target_tools:
+                g_model = select_grounding_model(
+                    all_models, self._secrets, executor_type=tool.executor_type, allow_paid=is_paid_key
+                )
+                ut, entry = bench.probe_tool(
+                    tool,
+                    DEFAULT_TEST_QUERY,
+                    DEFAULT_TEST_URL,
+                    g_model,
+                    usage_state=usage_state,
+                    include_paid=is_paid_key,
+                    include_quota_tools=True,
+                )
+                if ut != tool:
+                    self._repo.upsert_tool(ut)
+                entries.append(entry)
+
+        updated_seqs = self._repo.list_sequences()
+        if any(e.status == ProbeStatus.OK for e in entries):
+            seqs = optimize_tier_sequences(
+                self._repo.list_models(),
+                self._repo.list_tools(),
+                updated_seqs,
+                force_overwrite=False,
+                usage_state=self._repo.load_usage_quotas(),
+            )
+            updated_seqs = {t: self._repo.upsert_sequence(seq) for t, seq in seqs.items()}
+
+        self._merge_entries_into_latest_benchmark(entries, updated_seqs)
+        return entries
+
+    def list_secret_statuses(
+        self,
+        *,
+        models: list[AIModelSpec] | None = None,
+        tools: list[ToolSpec] | None = None,
+        secret_timestamps: dict[str, str] | None = None,
+    ) -> list[SecretStatusEntry]:
+        """Liefert Write-Only-Metadaten aller relevanten API-Keys (ungenutzte Tool-Keys werden ausgeblendet)."""
+        vault_ts = secret_timestamps if secret_timestamps is not None else self._repo.list_secret_timestamps()
+        models_list = models if models is not None else self._repo.list_models()
+        tools_list = tools if tools is not None else self._repo.list_tools()
+
+        all_names = list(_DEFAULT_AI_SECRET_NAMES)
+        active_tool_envs = {
+            t.api_key_env.strip().upper()
+            for t in tools_list
+            if t.requires_api_key and t.api_key_env.strip()
+        }
+        for known_tool_env in _KNOWN_TOOL_SECRET_ORDER:
+            if (
+                known_tool_env in active_tool_envs
+                or known_tool_env in vault_ts
+                or self._base_secrets.has_key(known_tool_env)
+            ) and known_tool_env not in all_names:
+                all_names.append(known_tool_env)
+
+        extra_envs = [
+            *(m.api_key_env for m in models_list),
+            *(m.paid_api_key_env for m in models_list),
+            *(t.api_key_env for t in tools_list),
+            *vault_ts.keys(),
+        ]
+        for item_env in extra_envs:
+            clean = item_env.strip().upper()
+            if clean and clean not in all_names:
+                all_names.append(clean)
+
+        entries: list[SecretStatusEntry] = []
+        for name in all_names:
+            in_vault = name in vault_ts
+            in_env = self._base_secrets.has_key(name)
+            if name == "GEMINI_API_KEY" and not in_vault and not in_env:
+                continue
+            cat, key_tier = _classify_secret_env(name, models_list, tools_list)
+            affected_tools = [f"Tool: {t.id}" for t in tools_list if _tool_matches_secret_env(t, name)]
+            if cat == "tool" and not in_vault and not in_env and not affected_tools:
+                continue
+            if in_vault and in_env:
+                source = "Brain Vault (verschlüsselt, überschreibt ENV/Secrets)"
+            elif in_vault:
+                source = "Brain Vault (verschlüsselt)"
+            elif in_env:
+                source = "ENV / Streamlit Secrets"
+            else:
+                source = "Nicht gesetzt"
+            affected = [
+                *[
+                    f"Model: {m.id}"
+                    for m in models_list
+                    if _model_matches_secret_env(m, name)
+                    and (key_tier != "free" or m.is_free)
+                ],
+                *affected_tools,
+            ]
+            entries.append(
+                SecretStatusEntry(
+                    env_name=name,
+                    is_configured=(in_vault or in_env),
+                    source=source,
+                    updated_at=vault_ts.get(name, ""),
+                    affected_items=affected,
+                    category=cat,
+                    key_tier=key_tier,
+                )
+            )
+        return entries
+
+    def load_ui_state(self) -> tuple[Any, list[SecretStatusEntry]]:
+        """Lädt den gesamten Dashboard-Zustand in einem DB-Batch plus abgeleitete Secret-Metadaten."""
+        state = self._repo.load_dashboard_state()
+        statuses = self.list_secret_statuses(
+            models=state.models,
+            tools=state.tools,
+            secret_timestamps=state.secret_timestamps,
+        )
+        return state, statuses
+
+    # --- Auto-Discovery, Testlauf & Vereinte Pipeline (Fast, Standard, Deep) ---
+    def auto_sync(
+        self,
+        manifest_url: str = "",
+        *,
+        verify_discovered: bool = True,
+        include_quota_tools: bool = False,
+        on_progress: Callable[[float, str], None] | None = None,
+    ) -> DiscoverySummary:
+        return auto_sync_catalog(
+            self._repo,
+            self._secrets,
+            genai_client=self._genai_client,
+            manifest_url=manifest_url,
+            runner=self._runner,
+            verify_discovered=verify_discovered,
+            include_quota_tools=include_quota_tools,
+            on_progress=on_progress,
+        )
+
+    def run_benchmark(
+        self,
+        *,
+        test_query: str = DEFAULT_TEST_QUERY,
+        test_url: str = DEFAULT_TEST_URL,
+        force_overwrite_sequences: bool = False,
+        include_paid: bool = False,
+        include_quota_tools: bool = False,
+        on_progress: Callable[[float, str], None] | None = None,
+    ) -> BenchmarkReport:
+        runner = BrainBenchmarkRunner(self._repo, self._secrets, self._runner)
+        return runner.run_benchmark(
+            test_query=test_query,
+            test_url=test_url,
+            force_overwrite_sequences=force_overwrite_sequences,
+            include_paid=include_paid,
+            include_quota_tools=include_quota_tools,
+            on_progress=on_progress,
+        )
+
+    def run_full_pipeline(
+        self,
+        *,
+        run_discover: bool = True,
+        run_benchmark: bool = True,
+        run_unblock: bool = True,
+        run_prune: bool = True,
+        include_paid: bool = False,
+        include_quota_tools: bool = False,
+        on_progress: Callable[[float, str], None] | None = None,
+    ) -> PipelineSummary:
+        """Führt den kombinierten AI-Brain-Ablauf aus (Discover → Benchmark → Unblock → Prune)."""
+        steps: list[tuple[str, float]] = [
+            (name, weight)
+            for name, enabled, weight in (
+                ("discover", run_discover, 0.30),
+                ("benchmark", run_benchmark, 0.42),
+                ("unblock", run_unblock, 0.18),
+                ("prune", run_prune, 0.10),
+            )
+            if enabled
+        ]
+        if not steps:
+            return PipelineSummary()
+
+        total_w = sum(w for _, w in steps)
+        cursor = 0.0
+        executed: list[str] = []
+        warnings: list[str] = []
+        discovery: DiscoverySummary | None = None
+        benchmark: BenchmarkReport | None = None
+        unblock: UnblockSummary | None = None
+        pruned_models: list[tuple[str, ProbeStatus]] = []
+        pruned_tools: list[tuple[str, ProbeStatus]] = []
+
+        def _slice_cb(start: float, span: float, label: str) -> Callable[[float, str], None]:
+            def _inner(frac: float, msg: str) -> None:
+                if on_progress:
+                    clamped = max(0.0, min(1.0, float(frac)))
+                    on_progress(min(0.99, start + span * clamped), f"[{label}] {msg}")
+
+            return _inner
+
+        for step_name, weight in steps:
+            span = weight / total_w
+            if step_name == "discover":
+                cb = _slice_cb(cursor, span, "1/4 Discover")
+                cb(0.05, "Prüfe Quota-Recovery & neue Modelle/Tools...")
+                discovery = self.auto_sync(
+                    verify_discovered=True,
+                    include_quota_tools=include_quota_tools,
+                    on_progress=cb,
+                )
+                warnings.extend(discovery.warnings)
+                executed.append("discover")
+            elif step_name == "benchmark":
+                cb = _slice_cb(cursor, span, "2/4 Benchmark")
+                cb(0.05, "Teste aktive Modelle & Tools live...")
+                benchmark = self.run_benchmark(
+                    include_paid=include_paid,
+                    include_quota_tools=include_quota_tools,
+                    on_progress=cb,
+                )
+                executed.append("benchmark")
+            elif step_name == "unblock":
+                cb = _slice_cb(cursor, span, "3/4 Unblock")
+                cb(0.05, "Prüfe & entsperre Blocked-Tools...")
+                unblock = self.resolve_blocked_tools(on_progress=cb)
+                executed.append("unblock")
+            elif step_name == "prune":
+                cb = _slice_cb(cursor, span, "4/4 Prune")
+                cb(0.25, "Bereinige Error-, Quota-429- & HTTP-202-Einträge...")
+                pruned_models, pruned_tools = self.cleanup_unhealthy_items_with_status()
+                cb(1.0, "Bereinigung & Sequenz-Optimierung abgeschlossen.")
+                executed.append("prune")
+            cursor += span
+
+        if on_progress:
+            on_progress(1.0, "AI-Brain Ablauf abgeschlossen.")
+        return PipelineSummary(
+            executed_steps=tuple(executed),
+            discovery=discovery,
+            benchmark=benchmark,
+            unblock=unblock,
+            pruned_models=tuple(pruned_models),
+            pruned_tools=tuple(pruned_tools),
+            warnings=tuple(warnings),
+        )
+
+    def get_latest_benchmark(self) -> BenchmarkReport | None:
+        return self._repo.get_latest_benchmark()
+
+    # --- Zugriffs-Logs (Wann, Wer, Wo, Wie, Budget & Erfolg) ---
+    def _record_access(
+        self,
+        *,
+        action: str,
+        status: str,
+        tier: str = "",
+        allow_paid: bool = False,
+        latency_ms: int = 0,
+        model_used: str = "",
+        tools_used: list[str] | tuple[str, ...] = (),
+        result_count: int = 0,
+        summary: str = "",
+    ) -> None:
+        try:
+            entry = build_access_log_entry(
+                caller_app=self._caller_app,
+                environment=self._environment,
+                action=action,
+                status=status,
+                tier=tier,
+                allow_paid=allow_paid,
+                latency_ms=latency_ms,
+                model_used=model_used,
+                tools_used=tools_used,
+                result_count=result_count,
+                summary=summary,
+            )
+            self._repo.append_access_log(entry)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Zugriffs-Log übersprungen: %s", exc)
+
+    def list_access_logs(
+        self,
+        *,
+        limit: int = 200,
+        caller_app: str = "",
+        status: str = "",
+    ) -> list[BrainAccessLogEntry]:
+        """Liefert die neuesten AI-Brain-Zugriffsprotokolle."""
+        return self._repo.list_access_logs(limit=limit, caller_app=caller_app, status=status)
+
+    def clear_access_logs(self) -> int:
+        """Löscht alle Zugriffs-Logs (nur Dashboard-Admin)."""
+        self._require_admin()
+        return self._repo.clear_access_logs()
+
+    # --- Persistente App-Optionen (Fast / Standard / Deep & Free / Paid) ---
+    def get_app_policy(self, app_name: str = "") -> AppBrainPolicy:
+        """Liefert die gespeicherten Tier-/Budget-Optionen dieser App (oder kostenfreien Default)."""
+        target = normalize_caller_label(app_name) if app_name.strip() else self._caller_app
+        return self._repo.get_app_policy(target)
+
+    def set_app_policy(self, policy: AppBrainPolicy, app_name: str = "") -> AppBrainPolicy:
+        """Speichert Tier-/Budget-Optionen in Turso (Apps dürfen nur ihre eigene Policy ändern)."""
+        target = normalize_caller_label(app_name) if app_name.strip() else self._caller_app
+        if not self._is_admin_client and target != self._caller_app:
+            raise BrainAuthError(
+                f"Zugriff verweigert: '{self._caller_app}' darf keine Optionen für '{target}' ändern."
+            )
+        saved = self._repo.save_app_policy(target, policy)
+        budget_label = "Paid Opt-In" if saved.allow_paid else "Free-Only"
+        self._record_access(
+            action="policy_update",
+            status="Success",
+            tier=saved.llm_tier.value,
+            allow_paid=False,
+            summary=(
+                f"{target}: LLM={saved.llm_tier.value} · Search={saved.search_tier.value} "
+                f"· Maps={saved.maps_mode} · {budget_label}"
+            ),
+        )
+        return saved
+
+    def _resolve_call_policy(
+        self,
+        tier: BrainTier | str,
+        allow_paid: bool | None,
+        *,
+        for_search: bool = False,
+        use_maps: bool | None = None,
+    ) -> tuple[BrainTier, bool, bool | None]:
+        use_policy = isinstance(tier, str) and tier.strip().lower() == "auto"
+        policy = self.get_app_policy() if use_policy else None
+        resolved_tier = (
+            (policy.search_tier if for_search else policy.llm_tier)
+            if policy is not None
+            else BrainTier(tier)
+        )
+        resolved_paid = (
+            bool(policy.allow_paid) if (allow_paid is None and policy is not None) else bool(allow_paid)
+        )
+        resolved_maps = (
+            policy.resolved_use_maps if (use_maps is None and policy is not None) else use_maps
+        )
+        return resolved_tier, resolved_paid, resolved_maps
+
+    # --- Einheitliche Ausführungs-API für alle Anfragen ---
+    def search(
+        self,
+        query: str,
+        *,
+        tier: BrainTier | str = BrainTier.STANDARD,
+        language: str = "de",
+        max_results: int = 8,
+        allow_paid: bool | None = None,
+        use_maps: bool | None = None,
+        latitude: float | None = None,
+        longitude: float | None = None,
+        on_action: Callable[[str], None] | None = None,
+    ) -> BrainSearchResult:
+        started = time.monotonic()
+        tier_enum, eff_paid, eff_maps = self._resolve_call_policy(
+            tier, allow_paid, for_search=True, use_maps=use_maps
+        )
+        try:
+            res = execute_tiered_search(
+                self._repo,
+                self._secrets,
+                query,
+                tier_enum,
+                language=language,
+                max_results=max_results,
+                runner=self._runner,
+                allow_paid=eff_paid,
+                use_maps=eff_maps,
+                latitude=latitude,
+                longitude=longitude,
+                on_action=on_action,
+            )
+        except Exception as exc:
+            self._record_access(
+                action="search",
+                status="Failed",
+                tier=tier_enum.value,
+                allow_paid=eff_paid,
+                latency_ms=int((time.monotonic() - started) * 1000),
+                summary=f"{query[:60]} · {exc}",
+            )
+            raise
+        self._record_access(
+            action="search",
+            status="Success",
+            tier=res.tier.value,
+            allow_paid=eff_paid,
+            latency_ms=res.latency_ms or int((time.monotonic() - started) * 1000),
+            tools_used=res.tools_executed,
+            result_count=len(res.citations),
+            summary=f"{len(res.citations)} Treffer · {query[:90]}",
+        )
+        return res
+
+    def fetch_page(self, url: str, *, allow_paid: bool = False) -> BrainFetchedPage:
+        started = time.monotonic()
+        safe_target = sanitize_url_for_log(url)
+        try:
+            res = execute_tiered_fetch_page(self._repo, self._secrets, url, allow_paid=allow_paid)
+        except Exception as exc:
+            self._record_access(
+                action="fetch_page",
+                status="Failed",
+                allow_paid=allow_paid,
+                latency_ms=int((time.monotonic() - started) * 1000),
+                summary=f"{safe_target} · {exc}",
+            )
+            raise
+        self._record_access(
+            action="fetch_page",
+            status="Success",
+            allow_paid=allow_paid,
+            latency_ms=res.latency_ms or int((time.monotonic() - started) * 1000),
+            tools_used=[res.extractor_used] if res.extractor_used else [],
+            result_count=len(res.text_content),
+            summary=f"{safe_target} ({len(res.text_content)} Zeichen)",
+        )
+        return res
+
+    def generate_text(
+        self,
+        prompt: str,
+        *,
+        tier: BrainTier | str = BrainTier.FAST,
+        system_instruction: str = "",
+        allow_paid: bool | None = None,
+        on_action: Callable[[str], None] | None = None,
+    ) -> BrainGenerationResult:
+        started = time.monotonic()
+        tier_enum, eff_paid, _ = self._resolve_call_policy(tier, allow_paid, for_search=False)
+        try:
+            res = execute_tiered_text(
+                self._repo,
+                self._secrets,
+                self._runner,
+                prompt,
+                tier=tier_enum,
+                system_instruction=system_instruction,
+                allow_paid=eff_paid,
+                on_action=on_action,
+            )
+        except Exception as exc:
+            self._record_access(
+                action="generate_text",
+                status="Failed",
+                tier=tier_enum.value,
+                allow_paid=eff_paid,
+                latency_ms=int((time.monotonic() - started) * 1000),
+                summary=f"Prompt ({len(prompt)} Zeichen) · {exc}",
+            )
+            raise
+        self._record_access(
+            action="generate_text",
+            status="Success",
+            tier=res.tier.value,
+            allow_paid=eff_paid,
+            latency_ms=res.latency_ms or int((time.monotonic() - started) * 1000),
+            model_used=res.model_used,
+            result_count=len(res.text),
+            summary=f"Antwort ({len(res.text)} Zeichen)",
+        )
+        return res
+
+    def generate_structured(
+        self,
+        prompt: str,
+        schema_cls: type[ModelT],
+        *,
+        tier: BrainTier | str = BrainTier.FAST,
+        system_instruction: str = "",
+        allow_paid: bool | None = None,
+    ) -> tuple[ModelT, str]:
+        started = time.monotonic()
+        tier_enum, eff_paid, _ = self._resolve_call_policy(tier, allow_paid, for_search=False)
+        schema_name = getattr(schema_cls, "__name__", "Schema")
+        try:
+            obj, model_used = execute_tiered_structured(
+                self._repo,
+                self._secrets,
+                self._runner,
+                prompt,
+                schema_cls,
+                tier=tier_enum,
+                system_instruction=system_instruction,
+                allow_paid=eff_paid,
+            )
+        except Exception as exc:
+            self._record_access(
+                action="generate_structured",
+                status="Failed",
+                tier=tier_enum.value,
+                allow_paid=eff_paid,
+                latency_ms=int((time.monotonic() - started) * 1000),
+                summary=f"Schema: {schema_name} · {exc}",
+            )
+            raise
+        self._record_access(
+            action="generate_structured",
+            status="Success",
+            tier=tier_enum.value,
+            allow_paid=eff_paid,
+            latency_ms=int((time.monotonic() - started) * 1000),
+            model_used=model_used,
+            result_count=1,
+            summary=f"Schema: {schema_name}",
+        )
+        return obj, model_used
+
+    def ask(
+        self,
+        query: str,
+        *,
+        tier: BrainTier | str = BrainTier.STANDARD,
+        language: str = "de",
+        system_instruction: str = "",
+        allow_paid: bool | None = None,
+        use_maps: bool | None = None,
+        latitude: float | None = None,
+        longitude: float | None = None,
+        on_action: Callable[[str], None] | None = None,
+    ) -> BrainGenerationResult:
+        started = time.monotonic()
+        tier_enum, eff_paid, eff_maps = self._resolve_call_policy(
+            tier, allow_paid, for_search=False, use_maps=use_maps
+        )
+        try:
+            res = execute_tiered_ask(
+                self._repo,
+                self._secrets,
+                self._runner,
+                query,
+                tier=tier_enum,
+                language=language,
+                system_instruction=system_instruction,
+                allow_paid=eff_paid,
+                use_maps=eff_maps,
+                latitude=latitude,
+                longitude=longitude,
+                on_action=on_action,
+            )
+        except Exception as exc:
+            self._record_access(
+                action="ask",
+                status="Failed",
+                tier=tier_enum.value,
+                allow_paid=eff_paid,
+                latency_ms=int((time.monotonic() - started) * 1000),
+                summary=f"{query[:60]} · {exc}",
+            )
+            raise
+        self._record_access(
+            action="ask",
+            status="Success",
+            tier=res.tier.value,
+            allow_paid=eff_paid,
+            latency_ms=res.latency_ms or int((time.monotonic() - started) * 1000),
+            model_used=res.model_used,
+            tools_used=res.tools_executed,
+            result_count=len(res.citations),
+            summary=f"{len(res.citations)} Quellen · {query[:85]}",
+        )
+        return res
+
+    # --- Export / Import ---
+    def export_snapshot(self) -> BrainConfigSnapshot:
+        seqs = {t.value: cfg for t, cfg in self._repo.list_sequences().items()}
+        return BrainConfigSnapshot(
+            models=self._repo.list_models(),
+            tools=self._repo.list_tools(),
+            sequences=seqs,
+            last_benchmark=self._repo.get_latest_benchmark(),
+            exported_at=datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
+        )
+
+    def export_snapshot_json(self) -> str:
+        return self.export_snapshot().model_dump_json(indent=2)
+
+    def export_snapshot_yaml(self) -> str:
+        payload = self.export_snapshot().model_dump(mode="json")
+        return yaml.safe_dump(payload, allow_unicode=True, sort_keys=False, default_flow_style=False)
+
+    def import_snapshot_json(self, raw_json: str) -> None:
+        snap = BrainConfigSnapshot.model_validate_json(raw_json)
+        for m in snap.models:
+            self.add_or_update_model(m)
+        for t in snap.tools:
+            self.add_or_update_tool(t)
+        for seq in snap.sequences.values():
+            self.update_sequence(seq)
+
+    def close(self) -> None:
+        self._repo.close()
+
+    def __enter__(self) -> AIWebsearchBrain:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()

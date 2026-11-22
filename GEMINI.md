@@ -16,14 +16,14 @@
 ## Architektur & Clean Code Standards (Strikte Pflicht)
 - **Kompakte Module & Funktionen**: Dateien übersichtlich halten (Ziel: < 200 Zeilen pro Modul), Funktionen kompakt halten (Ziel: max. 20–30 Zeilen, SRP, Guard Clauses statt tiefer Verschachtelung).
 - **Strikte Schichten-Trennung**:
-  1. `src/domain`: Unveränderliche Datenmodelle (`@dataclass(frozen=True)`), Enums, Pydantic-KI-Schemata und typisierte Exceptions.
+  1. `src/domain`: Unveränderliche Datenmodelle (`@dataclass(frozen=True)`), Enums, Pydantic-AI-Schemata und typisierte Exceptions.
   2. `src/config`: Konstanten ohne Magic Values, YAML-Defaults und `AppSettings` (`repr=False` für alle Secrets).
   3. `src/security`: SSRF-Guard (inkl. DNS-Rebinding- & Redirect-Hop-Prüfung), Input-Whitelist-Validierung, HMAC-Auth & Brute-Force-Schutz.
   4. `src/storage`: `SqlExecutor`-Abstraktion + einheitliches `SqlDashboardRepository` für lokales SQLite (WAL) & Turso Cloud (Hrana v2 HTTPS).
   5. `src/checks`: `SafeUrlProbe` (HTTP & Streamlit `/_stcore/health`), `GitHubWorkflowProbe` (Workflow-Status & `workflow_dispatch`), `BotDatabaseInspector` (Multi-DB-Inspektion) und `FleetCheckCoordinator`.
   6. `src/ai`: `DashboardAIGateway` auf Basis der modernen `google-genai` Interactions API (`>= 2.30.1`) mit Structured Output & deterministischem Heuristik-Fallback.
   7. `src/worker`: CLI-Healthcheck-Runner für GitHub Actions (`scheduled_healthcheck.yaml`).
-  8. `src/ui`: Reine Streamlit-Präsentationsschicht (`overview_view` [inkl. Running & URLs], `db_view`, `ki_view` [KI-Brain inkl. Vault]).
+  8. `src/ui`: Reine Streamlit-Präsentationsschicht (`overview_view` [inkl. Running & URLs], `db_view`, `ai_view` [AI-Brain inkl. Vault]).
 
 ## UI- & Benennungs-Konvention (Benutzer-Präferenz)
 - **Kurze englische Fachbegriffe**: Bei Status-Badges, Worker-Zuständen und technischen Labels konsequent kurze englische Originalbegriffe nutzen (`Online`, `Offline`, `Sleeping`, `Degraded`, `Queued`, `Running`, `Success`, `Failed`, `Cancelled`, `Awake`) statt umständlicher/langer deutscher Entsprechungen (z. B. **nur `Queued`**, niemals `"Warteschlange"`).

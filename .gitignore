@@ -34,7 +34,7 @@ dist/
 build/
 *.egg-info/
 # Streamlit Community Cloud bevorzugt uv.lock vor requirements.txt und würde
-# wegen schlankem ki_brain-pyproject.toml streamlit aus der Cloud-Venv entfernen:
+# wegen schlankem ai_brain-pyproject.toml streamlit aus der Cloud-Venv entfernen:
 uv.lock
 
 # OS / IDE files

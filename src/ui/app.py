@@ -12,15 +12,15 @@ from src.domain.models import AppFleetSnapshot
 from src.storage.repository import SqlDashboardRepository, create_dashboard_repository
 from src.ui.auth_view import enforce_authentication
 from src.ui.styles import inject_global_styles
+from src.ui.views.ai_task_overlay import invalidate_ai_ui_cache
+from src.ui.views.ai_view import render_ai_view
 from src.ui.views.db_view import render_db_view
-from src.ui.views.ki_task_overlay import invalidate_ki_ui_cache
-from src.ui.views.ki_view import render_ki_view
 from src.ui.views.overview_view import render_overview_view
 
 _NAV_PAGES: tuple[tuple[str, str, str], ...] = (
     ("dashboard", "📡", "Dashboard"),
     ("db", "🗄️", "DB-Inspektor"),
-    ("ki", "🧠", "KI-Brain"),
+    ("ai", "🧠", "AI-Brain"),
 )
 _NAV_VALID_KEYS: frozenset[str] = frozenset(k for k, _, _ in _NAV_PAGES)
 
@@ -28,8 +28,8 @@ _NAV_VALID_KEYS: frozenset[str] = frozenset(k for k, _, _ in _NAV_PAGES)
 def _select_nav_page(page_key: str) -> None:
     """Button-Callback (`on_click`): wechselt die Seite in genau einem Render-Durchlauf."""
     st.session_state["active_page"] = page_key
-    if page_key != "ki":
-        invalidate_ki_ui_cache()
+    if page_key != "ai":
+        invalidate_ai_ui_cache()
 
 
 def _ensure_initial_snapshots(
@@ -107,7 +107,7 @@ def run_streamlit_app() -> None:
         elif selected_page == "db":
             render_db_view(snapshots)
         else:
-            render_ki_view(settings, role=role)
+            render_ai_view(settings, role=role)
     finally:
         if repo_holder["repo"] is not None:
             repo_holder["repo"].close()
