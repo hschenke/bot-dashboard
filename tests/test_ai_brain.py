@@ -1555,6 +1555,9 @@ def test_google_maps_grounding_citations_geo_smart_and_gemini3_guard(monkeypatch
     geo = brain.search("Cafés am Alexanderplatz in Berlin", tier=BrainTier.STANDARD)
     assert "gemini_google_maps" in geo.tools_executed
     assert seen_create_calls[-1]["tools"] == [{"type": "google_maps"}]
+    maps_hits = [c for c in geo.citations if c.source_tool == "gemini_google_maps"]
+    assert maps_hits and "Empfehlung am Alexanderplatz" in maps_hits[0].snippet
+    assert "Tolle Zimtschnecken" in maps_hits[0].snippet
     quotas = brain.load_usage_quotas()
     assert quotas["tools"]["gemini_google_maps"]["used"] == 2
 
@@ -2673,4 +2676,120 @@ def test_firecrawl_search_and_scrape_tools_catalog_vault_ssrf_and_execution(
         execute_extractor_tool(fc_scrape, "https://example.com/post", secrets=secrets)
 
     brain.close()
+
+
+def test_ai_grounding_search_enriches_maps_and_search_snippets() -> None:
+    from ai_brain.models import BrainCitation
+
+    maps_tool = ToolSpec(
+        id="gemini_google_maps",
+        name="Gemini Google Maps Grounding",
+        category=ToolCategory.AI_GROUNDING,
+        executor_type="gemini_google_maps",
+        requires_api_key=True,
+        api_key_env="GEMINI_API_KEY",
+    )
+    search_tool = ToolSpec(
+        id="gemini_google_search",
+        name="Gemini Google Search Grounding",
+        category=ToolCategory.AI_GROUNDING,
+        executor_type="gemini_google_search",
+        requires_api_key=True,
+        api_key_env="GEMINI_API_KEY",
+    )
+    secrets = BrainSecrets(gemini_api_key="AIzaSyTestKey123")
+
+    # 1. Strukturierte Multi-Place Maps-Antwort -> pro Ort eigenes Snippet (Sterne, Adresse, Öffnungszeiten) + Review-Snippet erhalten
+    structured_maps_text = (
+        "Hier sind passende Cafés am Alexanderplatz in Berlin:\n\n"
+        "1. **Zeit für Brot**\n"
+        "  - **Bewertung:** 4,6 Sterne (2.100 Bewertungen)\n"
+        "  - **Adresse:** Alte Schönhauser Str. 4, 10119 Berlin\n"
+        "  - **Öffnungszeiten:** Mo–Sa 07:00–20:00\n"
+        "  - **Preisniveau:** €€\n\n"
+        "2. **Café Einstein**\n"
+        "  - **Bewertung:** 4,3 Sterne (1.450 Bewertungen)\n"
+        "  - **Adresse:** Kurfürstenstraße 58, 10785 Berlin\n"
+        "  - **Öffnungszeiten:** Täglich 08:00–22:00\n"
+    )
+    maps_citations = [
+        BrainCitation(
+            url="https://www.google.com/maps/place/?q=place_id:ChIJZeit1",
+            title="Zeit für Brot Berlin",
+            snippet="Tolle Zimtschnecken",
+            source_tool="gemini_google_maps",
+        ),
+        BrainCitation(
+            url="https://maps.google.com/?cid=4242",
+            title="Cafe Einstein",
+            snippet="",
+            source_tool="gemini_google_maps",
+        ),
+    ]
+    runner_structured = SimpleNamespace(run_text=lambda *_a, **_kw: (structured_maps_text, maps_citations))
+    hits = execute_search_tool(
+        maps_tool,
+        "Cafés am Alexanderplatz in Berlin",
+        secrets=secrets,
+        limit=5,
+        runner=runner_structured,
+    )
+    assert len(hits) == 2
+    assert "4,6 Sterne" in hits[0].snippet
+    assert "Alte Schönhauser Str. 4" in hits[0].snippet
+    assert "07:00–20:00" in hits[0].snippet
+    assert "Tolle Zimtschnecken" in hits[0].snippet
+    assert "Kurfürstenstraße" not in hits[0].snippet
+
+    assert "4,3 Sterne" in hits[1].snippet
+    assert "Kurfürstenstraße 58" in hits[1].snippet
+    assert "08:00–22:00" in hits[1].snippet
+    assert "Alte Schönhauser" not in hits[1].snippet
+
+    # 2. Einzeilige Bullet-Liste ohne Leerzeilen -> saubere Trennung ohne Cross-Bleed
+    bullet_text = (
+        "Empfehlungen:\n"
+        "- **Bäckerei Siebert** – 4,7 Sterne, Schönfließer Str. 12, Mo–Fr 06:30–18:00\n"
+        "- **Bonanza Coffee** – 4,5 Sterne, Adalbertstraße 70, Täglich 08:30–18:00\n"
+    )
+    bullet_cites = [
+        BrainCitation(url="https://maps.google.com/?cid=101", title="Bäckerei Siebert", source_tool="gemini_google_maps"),
+        BrainCitation(url="https://maps.google.com/?cid=102", title="Bonanza Coffee", source_tool="gemini_google_maps"),
+    ]
+    runner_bullets = SimpleNamespace(run_text=lambda *_a, **_kw: (bullet_text, bullet_cites))
+    bullet_hits = execute_search_tool(maps_tool, "Kaffee Berlin", secrets=secrets, runner=runner_bullets)
+    assert "4,7 Sterne" in bullet_hits[0].snippet and "Adalbertstraße" not in bullet_hits[0].snippet
+    assert "4,5 Sterne" in bullet_hits[1].snippet and "Schönfließer" not in bullet_hits[1].snippet
+
+    # 3. Generische/nicht zuordenbare Titel -> Maps-Text als Fallback am ersten Treffer (nicht verworfen, nicht dupliziert)
+    generic_cites = [
+        BrainCitation(url="https://maps.google.com/?cid=201", title="Google Maps Place", source_tool="gemini_google_maps"),
+        BrainCitation(url="https://maps.google.com/?cid=202", title="Google Maps Place", source_tool="gemini_google_maps"),
+    ]
+    generic_text = "Top-Empfehlung vor Ort: 4,8 Sterne, Friedrichstraße 100, Mo–So 09:00–21:00."
+    runner_generic = SimpleNamespace(run_text=lambda *_a, **_kw: (generic_text, generic_cites))
+    generic_hits = execute_search_tool(maps_tool, "Restaurant Mitte", secrets=secrets, runner=runner_generic)
+    assert "4,8 Sterne" in generic_hits[0].snippet and "Friedrichstraße 100" in generic_hits[0].snippet
+    assert generic_hits[1].snippet == ""
+
+    # 4. Leere Citations bei Maps -> Fallback-Maps-Citation mit Detailtext; bei Web Search keine erfundene URL
+    runner_no_cites = SimpleNamespace(run_text=lambda *_a, **_kw: (generic_text, []))
+    maps_fallback = execute_search_tool(maps_tool, "Restaurant Mitte Berlin", secrets=secrets, runner=runner_no_cites)
+    assert len(maps_fallback) == 1
+    assert maps_fallback[0].url.startswith("https://www.google.com/maps/search/?api=1&query=")
+    assert "4,8 Sterne" in maps_fallback[0].snippet
+
+    search_empty = execute_search_tool(search_tool, "Python 3.13", secrets=secrets, runner=runner_no_cites)
+    assert search_empty == []
+
+    # 5. Google Search Grounding: leere url_citation-Snippets werden ebenfalls mit Kontexttext angereichert
+    search_cites = [
+        BrainCitation(url="https://docs.python.org/3.13/", title="Python 3.13 Release Notes", source_tool="gemini_google_search"),
+    ]
+    search_text = "Python 3.13 Release Notes: Neuer interaktiver Interpreter und experimentelles Free-Threading (PEP 703)."
+    runner_search = SimpleNamespace(run_text=lambda *_a, **_kw: (search_text, search_cites))
+    search_hits = execute_search_tool(search_tool, "Python 3.13", secrets=secrets, runner=runner_search)
+    assert len(search_hits) == 1
+    assert "PEP 703" in search_hits[0].snippet
+
 

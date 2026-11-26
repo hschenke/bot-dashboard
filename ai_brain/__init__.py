@@ -56,7 +56,7 @@ from ai_brain.quotas import (
 from ai_brain.storage import BrainDashboardState, BrainRepository, create_brain_repository
 from ai_brain.unblock import UnblockSummary
 
-__version__ = "0.22.0"
+__version__ = "0.22.1"
 
 connect = AIWebsearchBrain.connect
 is_configured = is_brain_configured
