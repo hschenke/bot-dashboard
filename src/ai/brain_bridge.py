@@ -20,6 +20,7 @@ def build_brain_secrets(settings: AppSettings) -> BrainSecrets:
         brave_search_api_key=settings.brave_search_api_key,
         tavily_api_key=settings.tavily_api_key,
         serper_api_key=settings.serper_api_key,
+        firecrawl_api_key=settings.firecrawl_api_key,
         reddit_client_id=settings.reddit_client_id,
         reddit_client_secret=settings.reddit_client_secret,
         groq_api_key=settings.groq_api_key,

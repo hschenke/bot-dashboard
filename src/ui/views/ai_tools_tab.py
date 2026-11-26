@@ -25,6 +25,7 @@ _EXECUTOR_OPTIONS: tuple[str, ...] = (
     "searxng_search",
     "tavily_search",
     "serper_search",
+    "firecrawl_search",
     "yahoo_search",
     "duckduckgo_html",
     "duckduckgo_lite",
@@ -37,6 +38,7 @@ _EXECUTOR_OPTIONS: tuple[str, ...] = (
     "arxiv_api",
     "direct_http_fetch",
     "jina_reader",
+    "firecrawl_scrape",
     "browserbase_fetch",
     "gemini_google_search",
     "gemini_google_maps",
@@ -80,7 +82,7 @@ def render_tools_tab(
     st.dataframe(rows, width="stretch", hide_index=True)
     st.caption(
         "ℹ️ **0%-Kosten & Free-Kontingente:** Gemini Search & Google Maps Grounding bieten je **5.000 Queries/Mo** im Paid Tier (ab Gemini 3+; Maps bei 2.5 sofort $25/1k, daher 0%-Schutz). "
-        "Weitere Gratisfelder: Tavily (1.000/Mo), Serper (2.500 Starter), Browserbase (60/Mo) — nach Ausschöpfen nur mit `allow_paid=True`. "
+        "Weitere Gratisfelder: Tavily (1.000/Mo), Serper (2.500 Starter), Firecrawl (1.000 Credits/Mo), Browserbase (60/Mo) — nach Ausschöpfen nur mit `allow_paid=True`. "
         "Kontingent-Tools werden im Benchmark standardmäßig geschont (0 Verbrauch) und im Echtbetrieb passiv mitgemessen."
     )
 

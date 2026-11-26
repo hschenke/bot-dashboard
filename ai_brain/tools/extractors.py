@@ -123,6 +123,58 @@ def fetch_via_browserbase(
     )
 
 
+def fetch_via_firecrawl(
+    url: str,
+    secrets: BrainSecrets,
+    *,
+    endpoint_url: str = "https://api.firecrawl.dev/v2/scrape",
+    timeout_seconds: float = 12.0,
+    max_chars: int = 8000,
+) -> BrainFetchedPage:
+    """Extrahiert sauberes LLM-Markdown (inkl. JS-Rendering) über die Firecrawl v2 Scrape API."""
+    api_key = secrets.resolve_key("FIRECRAWL_API_KEY")
+    if not api_key:
+        raise BrainProviderError("FIRECRAWL_API_KEY fehlt.")
+    t0 = time.monotonic()
+    safe_target = validate_safe_external_url(url)
+    status, _, _, body = safe_http_request(
+        "POST",
+        endpoint_url or "https://api.firecrawl.dev/v2/scrape",
+        json_body={"url": safe_target, "formats": ["markdown"], "onlyMainContent": True},
+        headers={
+            **API_HEADERS,
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        timeout_seconds=timeout_seconds,
+        max_bytes=1_500_000,
+    )
+    if status == 429:
+        snippet = body.decode("utf-8", errors="replace")[:180].strip()
+        raise BrainProviderError(f"Firecrawl Scrape HTTP 429 Rate-Limit/Quota erschöpft: {snippet}")
+    if status not in {200, 201}:
+        snippet = body.decode("utf-8", errors="replace")[:180].strip()
+        raise BrainProviderError(f"Firecrawl Scrape HTTP {status}: {snippet}")
+    payload = json.loads(body.decode("utf-8", errors="replace"))
+    if payload.get("success") is False:
+        raise BrainProviderError(f"Firecrawl Scrape Fehler: {payload.get('error') or 'unbekannt'}")
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    content = str(data.get("markdown") or data.get("content") or data.get("text") or "").strip()[:max_chars]
+    if not content:
+        raise BrainProviderError("Firecrawl Scrape lieferte keinen verwertbaren Text.")
+    meta = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    host = urlparse(safe_target).netloc or safe_target
+    title = str(meta.get("title") or "").strip()[:240] or f"[Firecrawl] {host}"
+    return BrainFetchedPage(
+        url=safe_target,
+        title=title,
+        text_content=content,
+        extractor_used="firecrawl_scrape",
+        latency_ms=int((time.monotonic() - t0) * 1000),
+    )
+
+
 _BUILTIN_CITY_COORDS: dict[str, tuple[float, float, str]] = {
     "berlin": (52.52, 13.405, "Berlin, Deutschland"),
     "münchen": (48.137, 11.576, "München, Deutschland"),

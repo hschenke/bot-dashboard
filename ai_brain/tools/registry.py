@@ -12,11 +12,13 @@ from ai_brain.tools.extractors import (
     execute_custom_rss_feed,
     fetch_direct_http,
     fetch_via_browserbase,
+    fetch_via_firecrawl,
     fetch_via_jina_reader,
     query_open_meteo,
 )
 from ai_brain.tools.search_apis import (
     search_brave,
+    search_firecrawl,
     search_searxng,
     search_serper,
     search_tavily,
@@ -128,6 +130,10 @@ def execute_search_tool(
         return search_serper(
             query, secrets=sec, endpoint_url=tool.endpoint_url, language=language, max_results=max_res, timeout_seconds=tmo
         )
+    if etype == "firecrawl_search":
+        return search_firecrawl(
+            query, secrets=sec, endpoint_url=tool.endpoint_url, max_results=max_res, timeout_seconds=tmo
+        )
     if etype == "searxng_search":
         return search_searxng(tool, query, language=language, max_results=max_res)
     if etype == "yahoo_search":
@@ -179,6 +185,8 @@ def execute_extractor_tool(
         return fetch_direct_http(url, timeout_seconds=tmo)
     if etype == "jina_reader":
         return fetch_via_jina_reader(url, timeout_seconds=tmo)
+    if etype == "firecrawl_scrape":
+        return fetch_via_firecrawl(url, secrets=sec, endpoint_url=tool.endpoint_url, timeout_seconds=tmo)
     if etype == "browserbase_fetch":
         return fetch_via_browserbase(url, secrets=sec, timeout_seconds=tmo)
 

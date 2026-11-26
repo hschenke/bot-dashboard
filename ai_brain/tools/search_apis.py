@@ -155,6 +155,67 @@ def search_serper(
     return results
 
 
+def search_firecrawl(
+    query: str,
+    secrets: BrainSecrets,
+    *,
+    endpoint_url: str = "https://api.firecrawl.dev/v2/search",
+    max_results: int = 6,
+    timeout_seconds: float = 10.0,
+) -> list[BrainCitation]:
+    """Führt eine Websuche über die Firecrawl v2 Search API (`Bearer FIRECRAWL_API_KEY`) aus."""
+    api_key = secrets.resolve_key("FIRECRAWL_API_KEY")
+    if not api_key:
+        raise BrainProviderError("FIRECRAWL_API_KEY fehlt.")
+    clean_q = " ".join(query.split())[:200]
+    if not clean_q:
+        return []
+    status, _, _, body = safe_http_request(
+        "POST",
+        endpoint_url or "https://api.firecrawl.dev/v2/search",
+        json_body={"query": clean_q, "limit": min(max(1, max_results), 20)},
+        headers={
+            **API_HEADERS,
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        timeout_seconds=timeout_seconds,
+        max_bytes=500_000,
+    )
+    if status not in {200, 201}:
+        _raise_api_error("Firecrawl Search", status, body)
+    payload = json.loads(body.decode("utf-8", errors="replace"))
+    if payload.get("success") is False:
+        raise BrainProviderError(f"Firecrawl Search Fehler: {payload.get('error') or 'unbekannt'}")
+    raw_data = payload.get("data")
+    if isinstance(raw_data, dict):
+        items = raw_data.get("web") or raw_data.get("news") or []
+    elif isinstance(raw_data, list):
+        items = raw_data
+    else:
+        items = []
+    results: list[BrainCitation] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        safe = sanitize_display_url(str(item.get("url") or ""))
+        title = str(item.get("title") or "").strip()[:180]
+        if safe != "#" and title:
+            snippet = str(item.get("description") or item.get("markdown") or "").strip()[:340]
+            results.append(
+                BrainCitation(
+                    url=safe,
+                    title=title,
+                    snippet=snippet,
+                    source_tool="firecrawl_search",
+                )
+            )
+            if len(results) >= max_results:
+                break
+    return results
+
+
 def search_searxng(
     tool: ToolSpec,
     query: str,

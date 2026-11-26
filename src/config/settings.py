@@ -136,6 +136,7 @@ class AppSettings:
     brave_search_api_key: str = field(default="", repr=False)
     tavily_api_key: str = field(default="", repr=False)
     serper_api_key: str = field(default="", repr=False)
+    firecrawl_api_key: str = field(default="", repr=False)
     reddit_client_id: str = field(default="", repr=False)
     reddit_client_secret: str = field(default="", repr=False)
     groq_api_key: str = field(default="", repr=False)
@@ -279,6 +280,7 @@ def load_app_settings(
         ),
         tavily_api_key=_clean_secret("TAVILY_API_KEY", local_secrets),
         serper_api_key=_clean_secret("SERPER_API_KEY", local_secrets),
+        firecrawl_api_key=_clean_secret("FIRECRAWL_API_KEY", local_secrets),
         reddit_client_id=_clean_secret("REDDIT_CLIENT_ID", local_secrets),
         reddit_client_secret=_clean_secret("REDDIT_CLIENT_SECRET", local_secrets),
         groq_api_key=_clean_secret("GROQ_API_KEY", local_secrets),

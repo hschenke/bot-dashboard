@@ -83,6 +83,7 @@ _DEFAULT_AI_SECRET_SPECS: tuple[tuple[str, str], ...] = (
 _KNOWN_TOOL_SECRET_ORDER: tuple[str, ...] = (
     "TAVILY_API_KEY",
     "SERPER_API_KEY",
+    "FIRECRAWL_API_KEY",
     "BROWSERBASE_API_KEY",
 )
 _DEFAULT_AI_SECRET_NAMES: tuple[str, ...] = tuple(name for name, _ in _DEFAULT_AI_SECRET_SPECS)

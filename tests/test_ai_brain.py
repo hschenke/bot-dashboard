@@ -2562,3 +2562,115 @@ def test_app_brain_policy_defaults_persistence_auto_tier_and_isolation(
     assert len(policy_logs) >= 2
     assert all(row.budget_mode == "free" for row in policy_logs)
     admin.close()
+
+
+def test_firecrawl_search_and_scrape_tools_catalog_vault_ssrf_and_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    from ai_brain import BrainProviderError, BrainSSRFError, ToolCategory, is_quota_limited_tool
+    from ai_brain.tools.registry import execute_extractor_tool, execute_search_tool
+
+    brain = AIWebsearchBrain.for_dashboard(
+        create_brain_repository(sqlite_path=tmp_path / "firecrawl.db"),
+        BrainSecrets(),
+    )
+    fc_search = brain.get_tool("firecrawl_search")
+    fc_scrape = brain.get_tool("firecrawl_scrape")
+    assert fc_search is not None
+    assert fc_scrape is not None
+    assert fc_search.category == ToolCategory.WEB_SEARCH
+    assert fc_search.api_key_env == "FIRECRAWL_API_KEY"
+    assert fc_search.free_quota_limit == 500 and fc_search.free_quota_period == "monthly"
+    assert fc_scrape.category == ToolCategory.PAGE_EXTRACTOR
+    assert fc_scrape.api_key_env == "FIRECRAWL_API_KEY"
+    assert fc_scrape.free_quota_limit == 1000 and fc_scrape.free_quota_period == "monthly"
+    assert is_quota_limited_tool(fc_search) and is_quota_limited_tool(fc_scrape)
+    assert "firecrawl_scrape" in brain.get_sequence(BrainTier.DEEP).extractor_tool_sequence
+
+    secret_envs = {s.env_name: s for s in brain.list_secret_statuses()}
+    assert "FIRECRAWL_API_KEY" in secret_envs
+    assert secret_envs["FIRECRAWL_API_KEY"].key_tier == "tool"
+    assert "Tool: firecrawl_search" in secret_envs["FIRECRAWL_API_KEY"].affected_items
+    assert "Tool: firecrawl_scrape" in secret_envs["FIRECRAWL_API_KEY"].affected_items
+
+    # Fehlender Key -> klare BrainProviderError-Diagnose
+    with pytest.raises(BrainProviderError, match="FIRECRAWL_API_KEY"):
+        execute_search_tool(fc_search, "Python 3.13", secrets=BrainSecrets())
+    with pytest.raises(BrainProviderError, match="FIRECRAWL_API_KEY"):
+        execute_extractor_tool(fc_scrape, "https://example.com/article", secrets=BrainSecrets())
+
+    # SSRF-Guard blockiert private Ziel-URLs noch vor dem API-Aufruf
+    secrets = BrainSecrets(firecrawl_api_key="fc-test-secret-key")
+    with pytest.raises(BrainSSRFError):
+        execute_extractor_tool(fc_scrape, "http://127.0.0.1:8080/admin", secrets=secrets)
+
+    # Firecrawl v2 Search + Scrape Erfolgsfall
+    captured_requests: list[tuple[str, str, dict[str, Any]]] = []
+
+    def _fake_http(
+        method: str,
+        url: str,
+        *,
+        json_body: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        **_kw: Any,
+    ) -> tuple[int, str, str, bytes]:
+        assert (headers or {}).get("Authorization") == "Bearer fc-test-secret-key"
+        captured_requests.append((method, url, dict(json_body or {})))
+        if url.endswith("/v2/search"):
+            payload = {
+                "success": True,
+                "data": {
+                    "web": [
+                        {
+                            "url": "https://docs.python.org/3/",
+                            "title": "Python Docs",
+                            "description": "Offizielle Python Dokumentation.",
+                        }
+                    ]
+                },
+            }
+            return 200, url, "application/json", json.dumps(payload).encode("utf-8")
+        payload = {
+            "success": True,
+            "data": {
+                "markdown": "# Beispielartikel\n\nSauberer Markdown-Inhalt via Firecrawl.",
+                "metadata": {"title": "Beispielartikel"},
+            },
+        }
+        return 200, url, "application/json", json.dumps(payload).encode("utf-8")
+
+    monkeypatch.setattr("ai_brain.tools.search_apis.safe_http_request", _fake_http)
+    monkeypatch.setattr("ai_brain.tools.extractors.safe_http_request", _fake_http)
+    monkeypatch.setattr("ai_brain.tools.extractors.validate_safe_external_url", lambda u: u)
+
+    hits = execute_search_tool(fc_search, "Python Docs", secrets=secrets, limit=3)
+    assert len(hits) == 1
+    assert hits[0].url == "https://docs.python.org/3/"
+    assert hits[0].source_tool == "firecrawl_search"
+    assert captured_requests[0][1] == "https://api.firecrawl.dev/v2/search"
+    assert captured_requests[0][2] == {"query": "Python Docs", "limit": 3}
+
+    page = execute_extractor_tool(fc_scrape, "https://example.com/post", secrets=secrets)
+    assert page.extractor_used == "firecrawl_scrape"
+    assert page.title == "Beispielartikel"
+    assert "Sauberer Markdown-Inhalt" in page.text_content
+    assert captured_requests[1][1] == "https://api.firecrawl.dev/v2/scrape"
+    assert captured_requests[1][2] == {
+        "url": "https://example.com/post",
+        "formats": ["markdown"],
+        "onlyMainContent": True,
+    }
+
+    # HTTP 429 Rate-Limit-Fehler wird korrekt als Quota/Rate-Limit gemeldet
+    monkeypatch.setattr(
+        "ai_brain.tools.extractors.safe_http_request",
+        lambda *_a, **_kw: (429, "https://api.firecrawl.dev/v2/scrape", "application/json", b'{"error":"rate limit"}'),
+    )
+    with pytest.raises(BrainProviderError, match="HTTP 429"):
+        execute_extractor_tool(fc_scrape, "https://example.com/post", secrets=secrets)
+
+    brain.close()
+
